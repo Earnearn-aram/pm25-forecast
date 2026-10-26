@@ -65,9 +65,10 @@ def write_rows(
 ) -> int:
     """Execute `statement` once per row after rejecting naive datetimes; return rows affected.
 
-    `con` is any DB-API-style connection whose `execute(sql, params)` returns a cursor with
-    `rowcount`. Datetimes are normalised to UTC via `require_utc` (naive ones raise ValueError
-    before anything is executed), then passed through `adapt` (e.g. `isoformat` for SQLite).
+    `con` is any DB-API-style connection whose `cursor()` is a context manager with
+    `executemany(sql, rows)` and a `rowcount` that totals the rows affected (psycopg 3 does).
+    Datetimes are normalised to UTC via `require_utc` (naive ones raise ValueError before
+    anything is executed), then passed through `adapt` (e.g. `isoformat` for SQLite).
     For append-only DO NOTHING statements the shortfall is the number of ignored duplicates.
     """
     prepared = [
@@ -75,8 +76,10 @@ def write_rows(
         for row in rows
     ]
     affected = 0
-    for params in prepared:
-        affected += max(con.execute(statement, params).rowcount, 0)
+    if prepared:
+        with con.cursor() as cur:
+            cur.executemany(statement, prepared)
+            affected = max(cur.rowcount, 0)
     logger.info(
         "write_rows: %d inserted/updated, %d ignored (of %d)",
         affected,

@@ -28,7 +28,7 @@ cp .env.example .env        # optional: local settings, never commit .env
 ```
 
 Collector (KAN-18): `uv run python -m pm25_forecast.collector` needs `DATABASE_URL` and
-`STATION_LOCATIONS` (see `.env.example`). The hourly workflow draft is `docs/collector-workflow.yml.txt`.
+`STATION_LOCATIONS` (see `.env.example`). The workflow draft (every 20 minutes) is `docs/collector-workflow.yml.txt`.
 
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).

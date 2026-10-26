@@ -3,17 +3,24 @@
 #   1. Repo secrets: DATABASE_URL (Neon), ALERT_WEBHOOK_URL. Repo variable: STATION_LOCATIONS
 #      (not secret), e.g. "ID1=13.75,100.50;ID2=13.80,100.55" once KAN-9 picks the stations.
 #   2. Apply src/pm25_forecast/storage/schema.sql to the database once.
-#   3. Pin actions/upload-artifact to a commit sha like the other actions (the sha below is a
-#      placeholder the agent could not look up; the checkout/setup-uv shas are copied from ci.yml).
+#   3. TODO (Owner): pin actions/upload-artifact to a commit sha like the other actions. The
+#      `@v4` below is a placeholder tag; the agent could not look the sha up. The checkout and
+#      setup-uv shas are copied from ci.yml.
 #   4. Run it once with "Run workflow" (workflow_dispatch) and check the log before relying on cron.
+# Cost: 3 runs/hour is about 2,200 runs/month. Each should take 1-2 minutes: check the repo
+# visibility (public repos have free Actions minutes; private ones draw on the plan's quota) and
+# lower the frequency if minutes run short.
+# Follow-ups, not in this file: heartbeat ping (KAN-30), TLS fix for Air4Thai (separate ticket).
 # Notes: GitHub cron is best effort (10-40 min late, sometimes skipped) and scheduled workflows are
 # disabled after 60 days without repo activity; the collector keys on data timestamps, so late or
-# doubled runs are safe, and missed Air4Thai hours are flagged by the gap check, not recovered.
+# doubled runs are safe. Air4Thai only exposes its latest reading, so we poll every 20 minutes
+# (upserts are idempotent, CAMS repeats are deduped); anything still missed is flagged by the gap
+# check, not recovered (true backfill: KAN-34).
 name: Collector
 
 on:
   schedule:
-    - cron: "17 * * * *" # hourly, off the hour to avoid the busiest minute
+    - cron: "7,27,47 * * * *" # every 20 minutes, off the hour to avoid the busiest minute
   workflow_dispatch:
 
 permissions:

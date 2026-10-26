@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 import psycopg
 import pytest
+from tenacity import wait_none
 
 from pm25_forecast import collector
 from pm25_forecast.collector import (
@@ -31,6 +32,7 @@ from pm25_forecast.settings import Settings
 from pm25_forecast.storage import db, sql
 from pm25_forecast.storage.guard import RunSkipped, run_entrypoint
 
+STEP = timedelta(hours=1)
 FIXTURES = Path(__file__).parent / "fixtures"
 SCHEMA = (Path(sql.__file__).parent / "schema.sql").read_text()
 NOW = datetime(2026, 10, 26, 7, 30, tzinfo=UTC)
@@ -47,6 +49,8 @@ class FakeDb:
         self.con = sqlite3.connect(":memory:")
         self.con.executescript(SCHEMA.replace("DEFAULT now()", "DEFAULT CURRENT_TIMESTAMP"))
         self.urls: list[str] = []
+        self.commits = 0
+        self.rollbacks = 0
 
     def __call__(self, url):
         self.urls.append(url)
@@ -56,7 +60,15 @@ class FakeDb:
         return self
 
     def __exit__(self, *exc):
-        self.con.commit() if exc[0] is None else self.con.rollback()
+        if exc[0] is None:
+            self.con.commit()
+            self.commits += 1
+        else:
+            self.con.rollback()
+            self.rollbacks += 1
+
+    def cursor(self):
+        return _Cursor(self.con)
 
     def execute(self, statement, params=()):
         params = {k: v.isoformat() if isinstance(v, datetime) else v for k, v in params.items()}
@@ -64,6 +76,37 @@ class FakeDb:
 
     def rows(self, table):
         return self.con.execute(f"SELECT * FROM {table} ORDER BY 1, 2, 3").fetchall()
+
+
+class _Cursor:
+    def __init__(self, con):
+        self._cur = con.cursor()
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._cur.close()
+
+    def executemany(self, statement, rows):
+        rows = [
+            {k: v.isoformat() if isinstance(v, datetime) else v for k, v in r.items()} for r in rows
+        ]
+        self._cur.executemany(re.sub(r"%\((\w+)\)s", r":\1", statement), rows)
+        self.rowcount = self._cur.rowcount
+
+
+@pytest.fixture(autouse=True)
+def fast_retries(monkeypatch):
+    """No real sleeping in any retry path (DB connect, Open-Meteo client)."""
+    monkeypatch.setattr(db, "RETRY_WAIT", wait_none())
+    real = collector.OpenMeteoClient
+    monkeypatch.setattr(
+        collector,
+        "OpenMeteoClient",
+        lambda http, **kw: real(http, retry_wait=wait_none(), sleep=lambda _s: None, **kw),
+    )
 
 
 @pytest.fixture
@@ -132,7 +175,7 @@ def test_run_writes_observation_and_cams_vintage(tmp_path, fake_db):
     assert len(preds) == 3  # the fixture's 09:00 hour is null and is skipped
     assert {p[1] for p in preds} == {NOW.isoformat()}  # issue_time = retrieval time
     assert {p[3] for p in preds} == {"cams_global"}
-    assert fake_db.urls == [DB_URL]
+    assert fake_db.urls == [DB_URL, DB_URL]  # one connection per transaction
 
 
 def test_second_run_is_idempotent_and_cams_repeat_is_skipped(tmp_path, fake_db):
@@ -161,7 +204,7 @@ def test_raw_responses_are_archived_gzip(tmp_path, fake_db):
     air = list((tmp_path / "raw" / "air4thai").glob("*.json.gz"))
     meteo = list((tmp_path / "raw" / "open_meteo").glob("*.json.gz"))
     assert len(air) == 1
-    assert len(meteo) == 2  # weather + cams
+    assert len(meteo) == 1  # cams only: weather is off by default
     assert json.loads(gzip.decompress(meteo[0].read_bytes()))["source"] in {
         "weather_forecast",
         "cams_forecast",
@@ -209,12 +252,23 @@ def test_no_gap_when_consecutive(tmp_path, fake_db):
     assert do_run(tmp_path, fake_db).gaps == []
 
 
-STEP = timedelta(hours=1)
+def test_stale_station_alerts_once_as_it_crosses_the_threshold(tmp_path, fake_db):
+    alerts: list[str] = []
+    crossing = TST01_TS + timedelta(hours=3, minutes=10)
+    result = do_run(tmp_path, fake_db, now=crossing, alert=alerts.append)
+    assert result.stale_stations == result.newly_stale_stations == ["TST01"]
+    assert len(alerts) == 1
+    assert "TST01" in alerts[0]
+
+    alerts.clear()
+    later = do_run(tmp_path, fake_db, now=TST01_TS + timedelta(hours=5), alert=alerts.append)
+    assert later.stale_stations == ["TST01"]
+    assert later.newly_stale_stations == []
+    assert alerts == []
 
 
-def test_station_without_new_reading_is_flagged_stale(tmp_path, fake_db):
-    result = do_run(tmp_path, fake_db, now=TST01_TS + timedelta(hours=5))
-    assert result.stale_stations == ["TST01"]  # reading is 5 h old
+def test_fresh_station_is_not_stale(tmp_path, fake_db):
+    assert do_run(tmp_path, fake_db, now=TST01_TS + timedelta(hours=2)).stale_stations == []
 
 
 # --- CAMS content dedupe ------------------------------------------------------------------------
@@ -273,6 +327,7 @@ def test_null_pm25_and_future_readings_are_dropped_not_stored(tmp_path, fake_db)
     air["stations"][0]["AQILast"]["PM25"]["value"] = ""
     result = do_run(tmp_path, fake_db, http=make_http(air=air))
     assert (result.observations_written, result.observations_dropped) == (0, 1)
+    assert "air4thai returned no usable observations" in result.failures
 
     air = copy.deepcopy(load("air4thai_getNewAQI_synthetic.json"))
     air["stations"][0]["AQILast"]["date"] = "2026-10-28"
@@ -299,7 +354,7 @@ def test_settings_parse_station_locations():
 # --- DB down: skip, alert, non-zero, no secrets in the alert -----------------------------------
 
 
-def test_db_down_skips_alerts_and_exits_nonzero_without_leaking_url(tmp_path):
+def test_db_down_skips_alerts_and_exits_nonzero_without_leaking_url(tmp_path, caplog):
     alerts: list[str] = []
     result, code = run_entrypoint(
         lambda: run(settings(tmp_path), connect=db.connect, clock=lambda: NOW, http=make_http()),
@@ -310,6 +365,8 @@ def test_db_down_skips_alerts_and_exits_nonzero_without_leaking_url(tmp_path):
     assert code == 1
     assert len(alerts) == 1
     assert DB_PASSWORD not in alerts[0]
+    assert "OperationalError" in alerts[0]  # cause type, not message
+    assert DB_PASSWORD not in caplog.text
 
 
 def test_connection_errors_are_the_psycopg_ones():
@@ -372,3 +429,145 @@ def test_alert_failure_does_not_leak_webhook_url(monkeypatch):
     assert "secret-token" not in str(info.value)
     assert info.value.__cause__ is None
     assert info.value.__suppress_context__
+
+
+# --- two transactions, multi-station, breaker, deadline, weather ------------------------------
+
+
+def test_observations_are_committed_even_if_cams_write_crashes(tmp_path, fake_db, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("cams write failed")
+
+    monkeypatch.setattr(collector, "write_cams", boom)
+    with pytest.raises(RuntimeError):
+        do_run(tmp_path, fake_db)
+    assert len(fake_db.rows("observations")) == 1
+    assert fake_db.commits == 1
+    assert fake_db.rollbacks == 1
+
+
+def test_multi_station_run(tmp_path, fake_db):
+    air = copy.deepcopy(load("air4thai_getNewAQI_synthetic.json"))
+    air["stations"][1]["AQILast"]["PM25"]["value"] = "22"  # TST02 gets a value too
+    http = make_http(air=air)
+    result = do_run(
+        tmp_path, fake_db, http=http, station_locations="TST01=13.75,100.5;TST02=14,101"
+    )
+    assert result.failures == []
+    assert result.observations_written == 2
+    assert {r[0] for r in fake_db.rows("observations")} == {"TST01", "TST02"}
+    assert {r[0] for r in fake_db.rows("predictions")} == {"TST01", "TST02"}
+    assert len(fake_db.rows("predictions")) == 6
+    assert http.calls.count("air4thai.pcd.go.th") == 1  # one Air4Thai request for all stations
+
+
+def test_circuit_breaker_skips_remaining_stations_for_a_dead_host(tmp_path, fake_db):
+    http = make_http(status={"air-quality-api.open-meteo.com": 503})
+    result = do_run(
+        tmp_path, fake_db, http=http, station_locations="TST01=13.75,100.5;TST02=14,101"
+    )
+    assert http.calls.count("air-quality-api.open-meteo.com") == 4  # one station's retries only
+    cams_failures = [f for f in result.failures if f.startswith("open-meteo cams")]
+    assert len(cams_failures) == 1
+    assert result.observations_written == 1  # Air4Thai half unaffected
+
+
+def test_deadline_stops_fetching_and_records_one_failure(tmp_path, fake_db):
+    ticks = iter([0.0, 0.0, 10_000.0])  # deadline set, station 1 ok, station 2 too late
+    http = make_http()
+    result = run(
+        settings(tmp_path, station_locations="TST01=13.75,100.5;TST02=14,101"),
+        connect=fake_db,
+        clock=lambda: NOW,
+        monotonic=lambda: next(ticks),
+        http=http,
+    )
+    assert result.failures == ["fetch deadline exceeded; remaining stations skipped"]
+    assert {r[0] for r in fake_db.rows("predictions")} == {"TST01"}
+
+
+def test_weather_is_off_by_default_and_its_failures_never_count(tmp_path, fake_db):
+    http = make_http()
+    do_run(tmp_path, fake_db, http=http)
+    assert "api.open-meteo.com" not in http.calls
+
+    http = make_http(status={"api.open-meteo.com": 400})
+    result = do_run(tmp_path, FakeDb(), http=http, collect_weather=True)
+    assert "api.open-meteo.com" in http.calls
+    assert result.failures == []  # weather-only failure is not a run failure
+
+
+def test_weather_enabled_fetches_it(tmp_path, fake_db):
+    http = make_http()
+    do_run(tmp_path, fake_db, http=http, collect_weather=True)
+    assert "api.open-meteo.com" in http.calls
+    assert len(list((tmp_path / "raw" / "open_meteo").glob("weather_forecast-*"))) == 1
+
+
+# --- DB connect: retries and malformed URL -----------------------------------------------------
+
+
+def test_connect_retries_operational_error_then_succeeds(monkeypatch):
+    attempts = []
+
+    def flaky(url, **kw):
+        attempts.append(url)
+        if len(attempts) < 3:
+            raise psycopg.OperationalError("cold start")
+        return "conn"
+
+    monkeypatch.setattr(db.psycopg, "connect", flaky)
+    assert db.connect("u") == "conn"
+    assert len(attempts) == 3
+
+
+def test_connect_gives_up_after_three_attempts(monkeypatch):
+    attempts = []
+
+    def down(url, **kw):
+        attempts.append(1)
+        raise psycopg.OperationalError("down")
+
+    monkeypatch.setattr(db.psycopg, "connect", down)
+    with pytest.raises(psycopg.OperationalError):
+        db.connect("u")
+    assert len(attempts) == 3
+
+
+def test_connect_does_not_retry_programming_error(monkeypatch):
+    attempts = []
+
+    def bad(url, **kw):
+        attempts.append(1)
+        raise psycopg.ProgrammingError("bad conninfo with " + url)
+
+    monkeypatch.setattr(db.psycopg, "connect", bad)
+    with pytest.raises(psycopg.ProgrammingError):
+        db.connect("u")
+    assert len(attempts) == 1
+
+
+def test_malformed_database_url_is_a_config_error_without_the_url(tmp_path):
+    def bad(url):
+        raise psycopg.ProgrammingError(f"missing '=' after {url}")
+
+    with pytest.raises(ConfigError, match="DATABASE_URL is malformed") as info:
+        run(settings(tmp_path), connect=bad, clock=lambda: NOW, http=make_http())
+    assert DB_PASSWORD not in str(info.value)
+    assert info.value.__suppress_context__
+
+
+# --- main(): crash path --------------------------------------------------------------------------
+
+
+def test_main_alerts_with_exception_type_only_on_crash(patched_main, monkeypatch, caplog):
+    alerts: list[str] = []
+    monkeypatch.setattr(collector, "make_alert", lambda _url: alerts.append)
+
+    def crash(*_a, **_k):
+        raise KeyError("detail that must not be alerted")
+
+    patched_main(crash)
+    assert collector.main() == 1
+    assert alerts == ["collector crashed: KeyError"]
+    assert "collector crashed" in caplog.text  # logger.exception keeps the traceback in the log

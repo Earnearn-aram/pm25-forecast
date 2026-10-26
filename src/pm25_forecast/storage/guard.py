@@ -23,7 +23,10 @@ def run_predict_step[T](step: Callable[[], T], alert: Callable[[str], None]) -> 
     try:
         return step()
     except DatabaseUnavailableError as exc:
-        reason = f"predict run skipped: database unreachable ({type(exc).__name__})"
+        # Cause type only (never str(exc): driver messages can name hosts or carry the URL).
+        cause = type(exc.__cause__).__name__ if exc.__cause__ is not None else "unknown cause"
+        reason = f"predict run skipped: database unreachable ({cause})"
+        logger.error(reason)
         try:
             alert(reason)
         except Exception:

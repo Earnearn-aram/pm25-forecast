@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     # Collector stations and the coordinates sent to Open-Meteo, as `ID=lat,lon;ID=lat,lon`
     # (KAN-9 will choose them). Not secret: ids and coordinates of public monitoring stations.
     station_locations: str = ""
+    # Weather is fetched only when enabled: the schema has no table for it yet (KAN-18 note).
+    collect_weather: bool = False
     # Where the collector writes gzip raw-response archives (git-ignored, see .gitignore).
     raw_archive_dir: str = "data/raw"
 
