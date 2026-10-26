@@ -1,0 +1,29 @@
+name: api-probe
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "History window in days"
+        default: "730"
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked
+      - name: Run probe
+        env:
+          OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
+        run: uv run python -m pm25_forecast.ingest.probe --out probe-report --days "${{ inputs.days }}"
+      - name: Job summary
+        if: always()
+        run: cat probe-report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-report
+          path: probe-report.*
