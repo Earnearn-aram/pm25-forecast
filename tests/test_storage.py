@@ -51,6 +51,27 @@ class _PyformatConnection:
     def execute(self, statement, params=()):
         return self._con.execute(re.sub(r"%\((\w+)\)s", r":\1", statement), params)
 
+    def cursor(self):
+        return _Cursor(self._con)
+
+
+class _Cursor:
+    """Context-manager cursor with psycopg-style `executemany` (rowcount totals the batch)."""
+
+    def __init__(self, con: sqlite3.Connection):
+        self._cur = con.cursor()
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._cur.close()
+
+    def executemany(self, statement, rows):
+        self._cur.executemany(re.sub(r"%\((\w+)\)s", r":\1", statement), rows)
+        self.rowcount = self._cur.rowcount
+
 
 @pytest.fixture
 def db():
