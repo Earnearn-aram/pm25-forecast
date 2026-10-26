@@ -379,7 +379,11 @@ def run(
     archive_dir = Path(settings.raw_archive_dir or "data/raw")
 
     # Transaction 1: Air4Thai only, committed before CAMS is even fetched.
-    air4thai = Air4ThaiClient(client=http, archive=gzip_file_archive(archive_dir / "air4thai"))
+    air4thai = Air4ThaiClient(
+        client=http,
+        ca_bundle=settings.air4thai_ca_bundle,  # KAN-35: optional extra CA PEM; unset = default
+        archive=gzip_file_archive(archive_dir / "air4thai"),
+    )
     try:
         observations = fetch_air4thai(air4thai, station_ids, now, result)
     finally:

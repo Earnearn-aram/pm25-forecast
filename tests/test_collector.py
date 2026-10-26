@@ -620,3 +620,24 @@ def test_invalid_settings_trigger_the_crash_alert_with_type_only(monkeypatch):
     monkeypatch.setattr(collector, "get_settings", lambda: Settings(_env_file=None))
     assert collector.main() == 1
     assert alerts == ["collector crashed: ValidationError"]
+
+
+def test_collector_passes_ca_bundle_to_air4thai_client(tmp_path, fake_db, monkeypatch):
+    seen: dict = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_client(**kw):
+        seen.update(kw)
+        raise Stop
+
+    monkeypatch.setattr(collector, "Air4ThaiClient", fake_client)
+    bundle = tmp_path / "ca.pem"
+    with pytest.raises(Stop):
+        do_run(tmp_path, fake_db, air4thai_ca_bundle=str(bundle))
+    assert seen["ca_bundle"] == bundle
+    seen.clear()
+    with pytest.raises(Stop):
+        do_run(tmp_path, fake_db)
+    assert seen["ca_bundle"] is None

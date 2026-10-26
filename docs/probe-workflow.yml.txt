@@ -29,3 +29,11 @@ jobs:
         with:
           name: probe-report
           path: probe-report.*
+
+# KAN-35 re-run notes (comments only; the workflow above is unchanged):
+# 1. Actions > api-probe > Run workflow, then open the job summary (or download probe-report).
+# 2. probe-report.md now has an "Air4Thai TLS diagnosis" section: redirects (status + Location),
+#    the certificate chain each host presents, the intermediate fetched via AIA, and a retry
+#    using it as verify= (verification stays on).
+# 3. Paste the whole probe-report.md (or at least that section) back to the team. If it prints a
+#    PEM, check its SHA-256 against the CA's published value before saving it as certs/air4thai-ca.pem.
