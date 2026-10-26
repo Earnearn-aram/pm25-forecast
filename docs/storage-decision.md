@@ -50,7 +50,7 @@ Decided (Genos, under Boss's delegation):
 DELETE FROM predictions WHERE issue_time < now() - interval '90 days';
 ```
 
-2. DB driver: psycopg 3 with `%(name)s` placeholders. `sql.py` statements use this style. psycopg is not added as a dependency in this PR; KAN-18 adds it, and must also set `run_entrypoint`'s `connection_errors` to the driver's connection errors (the `OSError`/`ConnectionError` default is a placeholder). Tests stay offline: a tiny test helper translates `%(name)s` to `:name` for the SQLite fixture.
+2. DB driver: psycopg 3 with `%(name)s` placeholders. `sql.py` statements use this style. psycopg was added as a dependency in KAN-18 (`psycopg[binary]`), which also passes `storage.db.CONNECTION_ERRORS` (`psycopg.OperationalError`, `psycopg.InterfaceError`) to `run_entrypoint`; the `OSError`/`ConnectionError` default stays only as a placeholder for other callers. Tests stay offline: a tiny test helper translates `%(name)s` to `:name` for the SQLite fixture.
 
 3. CAMS repeats: dedupe on content at ingest (a KAN-18 concern).
 

@@ -1,4 +1,4 @@
-"""Upsert statements using psycopg 3 style `%(name)s` placeholders (driver added in KAN-18)."""
+"""Statements using psycopg 3 style `%(name)s` placeholders."""
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
@@ -40,6 +40,20 @@ VALUES (
 )
 ON CONFLICT (station_id, issue_time, valid_time, model_version)
 DO UPDATE SET pm25_obs = excluded.pm25_obs, abs_error = excluded.abs_error
+"""
+
+# Reads used by the collector (KAN-18): catch-up point per station and the latest forecast vintage.
+SELECT_LAST_OBSERVATION_TS = """
+SELECT station_id, max(ts) FROM observations WHERE source = %(source)s GROUP BY station_id
+"""
+
+SELECT_LATEST_VINTAGE = """
+SELECT issue_time, valid_time, pm25_pred FROM predictions
+WHERE station_id = %(station_id)s AND model_version = %(model_version)s
+  AND issue_time = (
+      SELECT max(issue_time) FROM predictions
+      WHERE station_id = %(station_id)s AND model_version = %(model_version)s
+  )
 """
 
 
