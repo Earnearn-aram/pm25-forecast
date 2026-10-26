@@ -1,6 +1,7 @@
 """Open-Meteo client: weather forecast, historical weather and CAMS PM2.5 forecast.
 
-Data attribution: Open-Meteo (https://open-meteo.com/), CC BY 4.0. The free tier is for
+Data attribution: Open-Meteo (https://open-meteo.com/), CC BY 4.0, plus the Copernicus
+Atmosphere Monitoring Service (CAMS) credit for air quality. The free tier is for
 non-commercial use only; keep request volume low (one request per location per run).
 
 Everything returned by the API is untrusted data. It is validated, never executed or used to
@@ -8,28 +9,39 @@ build requests, and gaps, renamed or missing variables and sentinel values are t
 All timestamps are UTC and timezone-aware.
 
 Forecast vintage: the API response does not say which model run produced it. For forecast
-endpoints ``issue_time`` is therefore the time we retrieved the response. That is an upper bound
-on the true run time, so features filtered on ``issue_time <= prediction_time`` cannot leak
-future information (it may only make a forecast look slightly older than it is).
+endpoints ``issue_time`` is therefore the time we received the response. That is an upper bound
+on the true run time, so a filter ``issue_time <= prediction_time`` cannot leak future
+information. It does overstate freshness: the real run is older, so lead times
+(``valid_time - issue_time``) come out shorter than the true lead.
+
+Historical endpoints return ``issue_time=None`` and cannot be turned into prediction rows.
+Training-time forecast features must come only from Previous Runs ``<var>_previous_dayN``
+columns matched to the lead being trained, never from the Historical Forecast API's stitched
+"best available" series.
 """
 
 import contextlib
 import logging
 import math
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
 from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError
-from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
+from tenacity import RetryCallState, Retrying, stop_after_attempt, wait_exponential_jitter
 from tenacity.retry import retry_if_exception_type
 from tenacity.wait import wait_base
 
 logger = logging.getLogger(__name__)
 
-ATTRIBUTION = "Weather data by Open-Meteo.com (CC BY 4.0, non-commercial use)."
+ATTRIBUTION = (
+    "Weather and air-quality data by Open-Meteo.com (CC BY 4.0, non-commercial use). "
+    "Air-quality data contains modified Copernicus Atmosphere Monitoring Service (CAMS) "
+    "information."
+)
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 HISTORICAL_WEATHER_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -49,6 +61,8 @@ DEFAULT_WEATHER_VARIABLES = (
 CAMS_VARIABLE = "pm2_5"
 # Bangkok is outside the CAMS Europe domain, so ask for the global model explicitly.
 CAMS_DOMAIN = "cams_global"
+CAMS_MODEL_VERSION = "cams_global"  # `predictions.model_version` for the CAMS baseline
+_MAX_RETRY_AFTER_S = 60.0
 
 _VARIABLE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 _SENTINEL_AT_OR_BELOW = -999.0
@@ -64,6 +78,23 @@ class OpenMeteoSchemaError(OpenMeteoError):
 
 class _RetryableError(OpenMeteoError):
     """Transport error, timeout, HTTP 429 or 5xx (retried with backoff)."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class _RetryAfterWait(wait_base):
+    """Backoff, but never shorter than a server-sent Retry-After (capped)."""
+
+    def __init__(self, base: wait_base) -> None:
+        self._base = base
+
+    def __call__(self, retry_state: RetryCallState) -> float:
+        delay = self._base(retry_state)
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        retry_after = getattr(exc, "retry_after", None)
+        return max(delay, retry_after) if retry_after else delay
 
 
 class RawResponse(BaseModel):
@@ -93,16 +124,27 @@ class HourlyForecast(BaseModel):
     missing_variables: list[str] = []
 
 
-class CamsSnapshotRow(BaseModel):
-    """One append-only CAMS forecast value: never overwrite a past (issue_time, valid_time)."""
+class StationLocation(BaseModel):
+    """Maps a station to the coordinates sent to Open-Meteo (configure from the KAN-9 picks)."""
 
     model_config = ConfigDict(frozen=True)
 
-    location_id: str
-    forecast_issue_time: AwareDatetime
+    station_id: str
+    latitude: float
+    longitude: float
+
+
+class PredictionRow(BaseModel):
+    """A row shaped like the KAN-17 `predictions` table (append-only per issue_time)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    station_id: str
+    issue_time: AwareDatetime
     valid_time: AwareDatetime
-    variable: str
-    value: float
+    model_version: str
+    run_id: str
+    pm25_pred: float
 
 
 class _Envelope(BaseModel):
@@ -110,11 +152,15 @@ class _Envelope(BaseModel):
 
     error: bool = False
     reason: str | None = None
+    utc_offset_seconds: int | None = None
     hourly: dict[str, Any] | None = None
 
 
-def _parse_time(value: Any) -> datetime | None:
-    """Unix seconds or ISO 8601 string to aware UTC; naive strings are taken as UTC."""
+def _parse_time(value: Any, naive_is_utc: bool = False) -> datetime | None:
+    """Unix seconds or ISO 8601 string to aware UTC.
+
+    A naive string is only accepted when the response said `utc_offset_seconds == 0`.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, int | float):
@@ -127,7 +173,9 @@ def _parse_time(value: Any) -> datetime | None:
             parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
-        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC) if naive_is_utc else None
+        return parsed.astimezone(UTC)
     return None
 
 
@@ -173,7 +221,7 @@ def parse_hourly(payload: Any, variables: Sequence[str]) -> tuple[list[HourlyRow
 
     rows: list[HourlyRow] = []
     for i, raw_time in enumerate(times):
-        valid_time = _parse_time(raw_time)
+        valid_time = _parse_time(raw_time, envelope.utc_offset_seconds == 0)
         if valid_time is None:
             logger.warning("dropping row %d with unparseable time", i)
             continue
@@ -187,23 +235,39 @@ def parse_hourly(payload: Any, variables: Sequence[str]) -> tuple[list[HourlyRow
     return rows, missing
 
 
-def to_snapshot_rows(
-    forecast: HourlyForecast, location_id: str, variable: str = CAMS_VARIABLE
-) -> list[CamsSnapshotRow]:
-    """Turn a forecast into append-only (location, issue_time, valid_time, value) rows."""
+def _floor_hour(moment: datetime) -> datetime:
+    return moment.replace(minute=0, second=0, microsecond=0)
+
+
+def to_prediction_rows(
+    forecast: HourlyForecast,
+    station_id: str,
+    run_id: str,
+    *,
+    model_version: str = CAMS_MODEL_VERSION,
+    variable: str = CAMS_VARIABLE,
+) -> list[PredictionRow]:
+    """Turn a forecast into KAN-17 `predictions` rows (CAMS lands as the baseline).
+
+    Hours before floor_hour(issue_time) are dropped: they are analysis/stitched data for times
+    that had already passed (the API starts at 00:00 UTC, and `past_days` adds more), not a
+    forecast made at issue_time. Null values are skipped.
+    """
     if forecast.issue_time is None:
         raise ValueError("forecast has no issue_time; only forecast endpoints can be snapshotted")
     issue_time = forecast.issue_time
+    first_valid = _floor_hour(issue_time)
     return [
-        CamsSnapshotRow(
-            location_id=location_id,
-            forecast_issue_time=issue_time,
+        PredictionRow(
+            station_id=station_id,
+            issue_time=issue_time,
             valid_time=row.valid_time,
-            variable=variable,
-            value=value,
+            model_version=model_version,
+            run_id=run_id,
+            pm25_pred=value,
         )
         for row in forecast.rows
-        if (value := row.values.get(variable)) is not None
+        if row.valid_time >= first_valid and (value := row.values.get(variable)) is not None
     ]
 
 
@@ -219,12 +283,14 @@ class OpenMeteoClient:
         retry_wait: wait_base | None = None,
         archive: Callable[[RawResponse], None] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._owns_http = http is None
         self._http = http or httpx.Client(timeout=timeout)
         self._timeout = timeout
         self._max_attempts = max_attempts
-        self._wait = retry_wait or wait_exponential_jitter(initial=1, max=30)
+        self._wait = _RetryAfterWait(retry_wait or wait_exponential_jitter(initial=1, max=30))
+        self._sleep = sleep
         self._archive = archive
         self._now = now
 
@@ -262,6 +328,18 @@ class OpenMeteoClient:
             "cams_forecast", AIR_QUALITY_URL, latitude, longitude, [CAMS_VARIABLE], extra
         )
 
+    def cams_baseline_rows(
+        self, stations: Sequence[StationLocation], run_id: str, *, forecast_days: int = 2
+    ) -> list[PredictionRow]:
+        """One CAMS request per station, as `predictions` rows (model_version=cams_global)."""
+        rows: list[PredictionRow] = []
+        for station in stations:
+            forecast = self.cams_forecast(
+                station.latitude, station.longitude, forecast_days=forecast_days
+            )
+            rows.extend(to_prediction_rows(forecast, station.station_id, run_id))
+        return rows
+
     def historical_weather(
         self,
         latitude: float,
@@ -291,9 +369,11 @@ class OpenMeteoClient:
         *,
         url: str = HISTORICAL_FORECAST_URL,
     ) -> HourlyForecast:
-        """Historical Forecast API (also reachable with `previous_runs`; used for coverage)."""
+        """Historical Forecast API; `issue_time` is None (stitched series, not a vintage)."""
         extra = {"start_date": start.isoformat(), "end_date": end.isoformat()}
-        return self._fetch("historical_forecast", url, latitude, longitude, variables, extra, False)
+        return self._fetch(
+            "historical_forecast", url, latitude, longitude, variables, extra, is_forecast=False
+        )
 
     def previous_runs(
         self,
@@ -303,7 +383,11 @@ class OpenMeteoClient:
         end: date,
         variables: Sequence[str],
     ) -> HourlyForecast:
-        """Previous Runs API; ask for names like `temperature_2m_previous_day1`."""
+        """Previous Runs API; ask for names like `temperature_2m_previous_day1`.
+
+        The only valid source of historical forecast features: match `_previous_dayN` to the
+        lead being trained. `issue_time` is None, so no prediction rows can be built from it.
+        """
         return self.historical_forecast(
             latitude, longitude, start, end, variables, url=PREVIOUS_RUNS_URL
         )
@@ -330,8 +414,7 @@ class OpenMeteoClient:
             "timeformat": "unixtime",
             **extra,
         }
-        retrieved_at = self._now()
-        payload = self._get_json(source, url, params, retrieved_at)
+        payload, retrieved_at = self._get_json(source, url, params)
         rows, missing = parse_hourly(payload, variables)
         return HourlyForecast(
             source=source,
@@ -343,16 +426,16 @@ class OpenMeteoClient:
             missing_variables=missing,
         )
 
-    def _get_json(
-        self, source: str, url: str, params: dict[str, str], retrieved_at: datetime
-    ) -> Any:
+    def _get_json(self, source: str, url: str, params: dict[str, str]) -> tuple[Any, datetime]:
         retrying = Retrying(
             stop=stop_after_attempt(self._max_attempts),
             wait=self._wait,
             retry=retry_if_exception_type(_RetryableError),
             reraise=True,
+            sleep=self._sleep,
         )
         body = retrying(self._send, url, params)
+        retrieved_at = self._now()  # after the response arrived, see module docstring
         if self._archive is not None:
             try:
                 self._archive(
@@ -363,7 +446,7 @@ class OpenMeteoClient:
             except Exception:  # the archive must never break ingestion
                 logger.exception("raw-response archive hook failed for %s", source)
         try:
-            return httpx.Response(200, content=body).json()
+            return httpx.Response(200, content=body).json(), retrieved_at
         except ValueError as exc:
             raise OpenMeteoSchemaError("response is not valid JSON") from exc
 
@@ -373,7 +456,12 @@ class OpenMeteoClient:
         except httpx.TransportError as exc:  # includes timeouts
             raise _RetryableError(f"transport error: {type(exc).__name__}") from exc
         if response.status_code == 429 or response.status_code >= 500:
-            raise _RetryableError(f"HTTP {response.status_code}")
+            retry_after = None
+            with contextlib.suppress(ValueError):
+                retry_after = min(
+                    float(response.headers.get("Retry-After", "")), _MAX_RETRY_AFTER_S
+                )
+            raise _RetryableError(f"HTTP {response.status_code}", retry_after)
         if response.status_code >= 400:
             reason = ""
             with contextlib.suppress(ValueError, AttributeError):

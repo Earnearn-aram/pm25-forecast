@@ -45,5 +45,6 @@ All timestamps are UTC, in code, storage and logs.
 ## Data sources and attribution
 
 - Weather and CAMS air-quality forecasts: [Open-Meteo](https://open-meteo.com/), licensed CC BY 4.0 (free tier is non-commercial use).
+  Air-quality data contains modified Copernicus Atmosphere Monitoring Service (CAMS) information.
 - PM2.5 station observations: Air4Thai, Pollution Control Department (PCD), Thailand.
 - Historical backfill and coverage metrics: [OpenAQ](https://openaq.org/).
