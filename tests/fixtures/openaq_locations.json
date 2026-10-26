@@ -1,0 +1,5 @@
+{"results":[
+ {"id":101,"name":"Synthetic A","provider":{"name":"Thailand PCD"},"coordinates":{"latitude":13.7641,"longitude":100.5531},"datetimeFirst":{"utc":"2022-03-01T00:00:00Z"},"datetimeLast":{"utc":"2026-10-25T00:00:00Z"}},
+ {"id":102,"name":"Synthetic B","provider":{"name":"Other"},"coordinates":{"latitude":13.9,"longitude":100.9},"datetimeFirst":{"utc":"2025-05-01T00:00:00Z"},"datetimeLast":null},
+ {"id":103,"coordinates":null}
+]}
