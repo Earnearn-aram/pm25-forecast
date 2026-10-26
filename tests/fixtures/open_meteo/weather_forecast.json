@@ -1,0 +1,39 @@
+{
+ "_synthetic": true,
+ "_note": "Hand-written test data, not a recorded API response.",
+ "latitude": 13.75,
+ "longitude": 100.5,
+ "generationtime_ms": 0.1,
+ "utc_offset_seconds": 0,
+ "timezone": "UTC",
+ "hourly_units": {
+  "time": "unixtime",
+  "temperature_2m": "\u00b0C"
+ },
+ "hourly": {
+  "time": [
+   1792998000,
+   1793001600,
+   1793005200,
+   1793008800
+  ],
+  "temperature_2m": [
+   28.1,
+   28.4,
+   29.0,
+   29.5
+  ],
+  "relative_humidity_2m": [
+   80,
+   78,
+   75,
+   72
+  ],
+  "wind_speed_10m": [
+   5.0,
+   4.5,
+   4.0,
+   3.5
+  ]
+ }
+}

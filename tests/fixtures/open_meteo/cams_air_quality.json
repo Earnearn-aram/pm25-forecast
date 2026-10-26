@@ -1,0 +1,25 @@
+{
+ "_synthetic": true,
+ "_note": "Hand-written test data, not a recorded API response.",
+ "latitude": 13.75,
+ "longitude": 100.5,
+ "timezone": "UTC",
+ "hourly_units": {
+  "time": "unixtime",
+  "pm2_5": "\u03bcg/m\u00b3"
+ },
+ "hourly": {
+  "time": [
+   1792998000,
+   1793001600,
+   1793005200,
+   1793008800
+  ],
+  "pm2_5": [
+   31.2,
+   33.0,
+   null,
+   35.5
+  ]
+ }
+}

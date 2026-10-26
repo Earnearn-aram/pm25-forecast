@@ -1,0 +1,24 @@
+{
+ "_synthetic": true,
+ "_note": "Hand-written test data, not a recorded API response.",
+ "latitude": 13.75,
+ "longitude": 100.5,
+ "timezone": "UTC",
+ "hourly": {
+  "time": [
+   1792998000,
+   1793001600,
+   1793005200
+  ],
+  "temperature_2m": [
+   27.0,
+   26.5,
+   26.0
+  ],
+  "relative_humidity_2m": [
+   85,
+   86,
+   88
+  ]
+ }
+}
