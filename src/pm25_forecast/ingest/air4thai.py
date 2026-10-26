@@ -28,6 +28,8 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
+from pm25_forecast.ingest.tls import build_verify
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_ARCHIVE_DIR = Path("data/raw/air4thai")
@@ -222,11 +224,16 @@ class Air4ThaiClient:
     Station ids are passed in (configurable, see ``Settings.air4thai_station_ids``); with no ids
     all stations returned by the endpoint are kept. One request is made per call to be polite.
 
-    ``timeout`` applies only to a client created here; an injected ``client`` keeps its own
-    timeout and is not closed by ``close()``. The endpoint is plain ``http://``, so responses
-    can be tampered with in transit: payloads are range-validated, and ``AIR4THAI_URL`` should
-    move to https if the host ever supports it. Raw archives default to ``data/raw/air4thai``
-    (git-ignored, see ``DEFAULT_ARCHIVE_DIR``); ``*.json.gz`` must never be committed.
+    ``ca_bundle`` (``Settings.air4thai_ca_bundle``, env ``AIR4THAI_CA_BUNDLE``) is an optional PEM
+    file of extra CAs, e.g. an intermediate the server fails to send. Unset means the default
+    trust store. Certificate verification is never disabled.
+
+    ``timeout`` and ``ca_bundle`` apply only to a client created here; an injected ``client``
+    keeps its own settings and is not closed by ``close()``. The endpoint is plain ``http://``,
+    so responses can be tampered with in transit: payloads are range-validated, and
+    ``AIR4THAI_URL`` should move to https if the host ever supports it. Raw archives default to
+    ``data/raw/air4thai`` (git-ignored, see ``DEFAULT_ARCHIVE_DIR``); ``*.json.gz`` must never be
+    committed.
     """
 
     def __init__(
@@ -235,12 +242,17 @@ class Air4ThaiClient:
         client: httpx.Client | None = None,
         url: str = AIR4THAI_URL,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
+        ca_bundle: str | Path | None = None,
         archive: RawArchive | None = None,
         max_attempts: int = MAX_ATTEMPTS,
         wait_max: float = 30.0,
     ) -> None:
+        if client is not None and ca_bundle:
+            raise ValueError("ca_bundle applies only to a client created by Air4ThaiClient")
         self._owns_client = client is None
-        self._client = client or httpx.Client(timeout=timeout, follow_redirects=True)
+        self._client = client or httpx.Client(
+            timeout=timeout, follow_redirects=True, verify=build_verify(ca_bundle)
+        )
         self._url = url
         self._archive = archive
         self._fetch = retry(

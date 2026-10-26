@@ -15,6 +15,7 @@ import itertools
 import json
 import math
 import os
+import ssl
 import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,8 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from pm25_forecast.ingest import tls
 
 BKK_TZ = timedelta(hours=7)  # Air4Thai timestamps are Asia/Bangkok local time (no DST).
 AIR4THAI_STATIONS_URL = "http://air4thai.pcd.go.th/services/getNewAQI_JSON.php"
@@ -334,6 +337,8 @@ def _get(
         return probe, payload
     except (httpx.HTTPError, ValueError) as exc:
         probe.error = f"{type(exc).__name__}: {str(exc)[:200]}"
+        if tls.is_tls_verify_error(exc):
+            probe.detail["tls_verify_failed"] = True
         return probe, None
 
 
@@ -389,6 +394,30 @@ def probe_air4thai(
     history_probe.detail = {"requests_ok": chunk_ok, "requests_total": chunk_total}
     probes.append(history_probe)
     return probes, stations, coverage
+
+
+def history_params(now: datetime, station_id: str = tls.FALLBACK_HISTORY_STATION) -> dict[str, str]:
+    """A one-day history request, used to test the history host when no station list exists."""
+    end = (now + BKK_TZ).date()
+    return {
+        "stationID": station_id,
+        "param": "PM25",
+        "type": "hr",
+        "sdate": (end - timedelta(days=2)).isoformat(),
+        "edate": (end - timedelta(days=1)).isoformat(),
+        "stime": "00",
+        "etime": "23",
+    }
+
+
+def probe_history_host(client: httpx.Client, now: datetime, suffix: str = "") -> Probe:
+    """Reach the history host independently of the station list (KAN-35)."""
+    probe, payload = _get(
+        client, f"air4thai_history_host{suffix}", AIR4THAI_HISTORY_URL, history_params(now)
+    )
+    if probe.ok:
+        probe.detail["parsed_rows"] = len(parse_air4thai_history(payload))
+    return probe
 
 
 def probe_open_meteo(client: httpx.Client, now: datetime, days: int) -> list[Probe]:
@@ -451,6 +480,7 @@ def build_report(
     coverage: dict[str, Coverage],
     openaq: list[OpenAQLocation],
     matches: dict[str, int | None],
+    air4thai_tls: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ranked = sorted(coverage.items(), key=lambda kv: kv[1].missing_pct)
     chosen = [sid for sid, _ in ranked[:MAX_STATIONS]]
@@ -478,6 +508,7 @@ def build_report(
             "of": len(matches),
         },
         "probes": [p.model_dump() for p in probes],
+        "air4thai_tls": air4thai_tls or {},
     }
 
 
@@ -507,7 +538,97 @@ def render_markdown(report: dict[str, Any]) -> str:
     for p in report["probes"]:
         detail = p["error"] or json.dumps(p["detail"], default=str)
         lines.append(f"| {p['name']} | {p['ok']} | {p['status']} | {detail} |")
+    lines += render_tls_markdown(report.get("air4thai_tls") or {})
     return "\n".join(lines) + "\n"
+
+
+def render_tls_markdown(diag: dict[str, Any]) -> list[str]:
+    """The KAN-35 section: redirects, presented chains, downloaded intermediates."""
+    if not diag:
+        return []
+    lines = ["", "## Air4Thai TLS diagnosis (KAN-35)", ""]
+    lines += ["| Request | HTTP | Location | Error |", "|---|---|---|---|"]
+    for r in diag.get("redirects", []):
+        lines.append(
+            f"| {r.get('name')} | {r.get('status')} | {r.get('location')} | {r.get('error')} |"
+        )
+    for h in diag.get("hosts", []):
+        lines += ["", f"### {h.get('host')}:{h.get('port')}", ""]
+        lines.append(f"Verified handshake (default trust store): {h.get('verify_error') or 'OK'}")
+        if h.get("error"):
+            lines += ["", f"Diagnostic handshake failed: {h['error']}"]
+            continue
+        lines += [
+            f"TLS: {h.get('tls_version')} {h.get('cipher')}; certificates presented by server: "
+            f"{h.get('presented_count') or 'unknown (openssl unavailable)'}",
+            "",
+            "| Source | Subject | Issuer | notAfter (UTC) | Expired | AIA caIssuers | SHA-256 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for c in h.get("chain", []):
+            lines.append(
+                f"| {c.get('source')} | {c.get('subject', c.get('error'))} | {c.get('issuer')} "
+                f"| {c.get('not_after')} | {c.get('expired')} "
+                f"| {', '.join(c.get('ca_issuers') or []) or '-'} | {c.get('sha256')} |"
+            )
+        for d in h.get("issuer_downloads", []):
+            lines += ["", f"AIA download {d['url']}: " + (d["error"] or "ok")]
+            if d.get("ok"):
+                lines.append(
+                    f"subject: {d['subject']}; matches leaf issuer: {d['matches_issuer']}; "
+                    f"SHA-256: {d['sha256']}"
+                )
+    bundle = diag.get("bundle_pem")
+    retry = diag.get("retry_with_bundle")
+    if bundle:
+        lines += [
+            "",
+            "### Candidate CA bundle (intermediate fetched over plain http: review before use)",
+            "",
+            "Owner: compare the SHA-256 above with the CA's published value, then save as "
+            "`certs/air4thai-ca.pem` and set `AIR4THAI_CA_BUNDLE`.",
+            "",
+            "```",
+            bundle.rstrip(),
+            "```",
+        ]
+    if retry is not None:
+        lines += ["", f"Retry with that bundle as verify= (verified path only): {retry}"]
+    return lines
+
+
+def _retry_with_bundle(
+    out: Path,
+    tls_report: dict[str, Any],
+    make_verified: Callable[[ssl.SSLContext | bool], httpx.Client],
+    first: tuple[list[Probe], list[Station], dict[str, Coverage]],
+    now: datetime,
+    days: int,
+    chunk_days: int,
+    pause: float,
+) -> tuple[list[Probe], list[Station], dict[str, Coverage], dict[str, Any]]:
+    """Re-run the Air4Thai probes with the discovered intermediate as verify= (verification on)."""
+    bundle_path = out.with_suffix(".ca.pem")
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(tls_report["bundle_pem"])
+    first_probes, first_stations, first_cov = first
+    try:
+        verify = tls.build_verify(bundle_path)
+        with make_verified(verify) as retry_client:
+            r_probes, r_stations, r_cov = probe_air4thai(retry_client, now, days, chunk_days, pause)
+            r_probes.append(probe_history_host(retry_client, now, " [ca-bundle]"))
+    except (OSError, ssl.SSLError) as exc:
+        tls_report["retry_with_bundle"] = f"not run: {type(exc).__name__}: {str(exc)[:200]}"
+        return first_probes, first_stations, first_cov, tls_report
+    for p in r_probes[:-1]:
+        p.name += " [ca-bundle]"
+    ok = r_probes[0].ok or r_probes[-1].ok
+    tls_report["retry_with_bundle"] = (
+        f"station list ok={r_probes[0].ok}, history host ok={r_probes[-1].ok}"
+    )
+    if ok and not first_stations:
+        first_stations, first_cov = r_stations, r_cov
+    return first_probes + r_probes, first_stations, first_cov, tls_report
 
 
 def run(
@@ -517,17 +638,47 @@ def run(
     pause: float = 0.5,
     now: datetime | None = None,
     client_factory: Callable[[], httpx.Client] | None = None,
+    diagnose: Callable[..., dict[str, Any]] | None = None,
+    verified_client_factory: Callable[[ssl.SSLContext | bool], httpx.Client] | None = None,
 ) -> dict[str, Any]:
-    """Run all probes and write `<out>.json` and `<out>.md`."""
+    """Run all probes and write `<out>.json` and `<out>.md` (plus `<out>.ca.pem` if one is found).
+
+    ``diagnose`` and ``verified_client_factory`` are test seams; the defaults hit the network.
+    """
     now = now or datetime.now(UTC)
     client = (client_factory or (lambda: httpx.Client(timeout=30.0, follow_redirects=True)))()
+    make_verified = verified_client_factory or (
+        lambda verify: httpx.Client(timeout=30.0, follow_redirects=True, verify=verify)
+    )
+    tls_report: dict[str, Any] = {}
     with client:
         a_probes, stations, coverage = probe_air4thai(client, now, days, chunk_days, pause)
+        a_probes.append(probe_history_host(client, now))
+        tls_report = (diagnose or tls.diagnose_air4thai)(
+            client,
+            [
+                ("station_list", AIR4THAI_STATIONS_URL, None),
+                ("history", AIR4THAI_HISTORY_URL, history_params(now)),
+            ],
+            now,
+        )
+        failed = not a_probes[0].ok or not a_probes[-1].ok
+        if failed and tls_report.get("bundle_pem"):
+            a_probes, stations, coverage, tls_report = _retry_with_bundle(
+                out,
+                tls_report,
+                make_verified,
+                (a_probes, stations, coverage),
+                now,
+                days,
+                chunk_days,
+                pause,
+            )
         om_probes = probe_open_meteo(client, now, days)
         key = os.environ.get("OPENAQ_API_KEY") or None
         oaq_probes, locations, matches = probe_openaq(client, key, stations)
     report = build_report(
-        now, a_probes + om_probes + oaq_probes, stations, coverage, locations, matches
+        now, a_probes + om_probes + oaq_probes, stations, coverage, locations, matches, tls_report
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.with_suffix(".json").write_text(json.dumps(report, indent=2, default=str))

@@ -48,3 +48,10 @@ All timestamps are UTC, in code, storage and logs.
   Air-quality data contains modified Copernicus Atmosphere Monitoring Service (CAMS) information.
 - PM2.5 station observations: Air4Thai, Pollution Control Department (PCD), Thailand.
 - Historical backfill and coverage metrics: [OpenAQ](https://openaq.org/).
+
+## Air4Thai TLS (KAN-35)
+
+If Air4Thai fails with `CERTIFICATE_VERIFY_FAILED`, re-run the `api-probe` workflow (Actions tab,
+"Run workflow") and read the "Air4Thai TLS diagnosis" section of the job summary or the
+`probe-report` artifact. See `certs/README.md` for what to do with the result and
+`AIR4THAI_CA_BUNDLE` in `.env.example`.
