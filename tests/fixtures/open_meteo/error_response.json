@@ -1,0 +1,6 @@
+{
+ "_synthetic": true,
+ "_note": "Hand-written test data, not a recorded API response.",
+ "error": true,
+ "reason": "Latitude must be in range of -90 to 90\u00b0. Given: 123."
+}
