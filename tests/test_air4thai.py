@@ -3,7 +3,7 @@
 import gzip
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -142,3 +142,61 @@ def test_default_timeout_is_set() -> None:
 def test_station_ids_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AIR4THAI_STATION_IDS", "a1, b2,,")
     assert Settings(_env_file=None).station_id_list == ["a1", "b2"]
+
+
+def test_all_stations_unparseable_raises() -> None:
+    with pytest.raises(Air4ThaiError):
+        parse_response({"stations": [{"nameEN": "no id"}, {"stationID": "x", "AQILast": {}}]})
+
+
+def test_empty_stations_list_is_not_an_error() -> None:
+    assert parse_response({"stations": []}) == []
+
+
+def test_all_pm25_none_logs_error(caplog: pytest.LogCaptureFixture) -> None:
+    payload = {"stations": [{"stationID": "a", "AQILast": {"date": "2026-10-26", "time": "08:00"}}]}
+    with caplog.at_level(logging.ERROR):
+        obs = parse_response(payload)
+    assert obs[0].pm25 is None
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad", ["99:00", "12:60", "25:00", "-1:00", "12", "1:2:3:4", "ab:cd"])
+def test_bad_times_rejected(bad: str) -> None:
+    with pytest.raises(ValueError):
+        parse_local_timestamp("2026-10-26", bad)
+
+
+def test_time_with_seconds_accepted() -> None:
+    assert parse_local_timestamp("2026-10-26", "08:30:15") == datetime(
+        2026, 10, 26, 1, 30, 15, tzinfo=UTC
+    )
+
+
+def test_aware_non_utc_ts_rejected() -> None:
+    bkk = timezone(timedelta(hours=7))
+    with pytest.raises(ValueError):
+        Observation(station_id="a", ts=datetime(2026, 1, 1, tzinfo=bkk), pm25=1.0)
+
+
+def test_archive_unexpected_exception_does_not_block(body: bytes) -> None:
+    def bad(raw: bytes, at: datetime) -> None:
+        raise RuntimeError("boom")
+
+    client = make_client(lambda r: httpx.Response(200, content=body), archive=bad)
+    assert len(client.fetch()) == 4
+
+
+def test_close_only_closes_owned_client() -> None:
+    http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    Air4ThaiClient(client=http).close()
+    assert not http.is_closed
+    owned = Air4ThaiClient()
+    owned.close()
+    assert owned._client.is_closed
+    assert owned._client.follow_redirects
+
+
+def test_default_archive_dir_is_gitignored() -> None:
+    assert Path("data/raw/air4thai") == air4thai.DEFAULT_ARCHIVE_DIR
+    assert "*.json.gz" in (Path(__file__).parent.parent / ".gitignore").read_text()

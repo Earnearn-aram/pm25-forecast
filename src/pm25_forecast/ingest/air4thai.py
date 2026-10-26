@@ -30,6 +30,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ARCHIVE_DIR = Path("data/raw/air4thai")
 AIR4THAI_URL = "http://air4thai.pcd.go.th/services/getNewAQI_JSON.php"
 SOURCE = "air4thai"
 BANGKOK_TZ = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -129,10 +130,19 @@ class Observation(BaseModel):
 
 
 def parse_local_timestamp(date: str, time: str) -> datetime:
-    """Convert Air4Thai local (Bangkok) ``YYYY-MM-DD`` and ``HH:MM`` strings to aware UTC."""
+    """Convert Air4Thai local (Bangkok) ``YYYY-MM-DD`` and ``HH:MM[:SS]`` strings to aware UTC.
+
+    Hours 0-24 are accepted (``24:00`` is midnight at the end of the day); anything else raises.
+    """
     day = datetime.strptime(date.strip(), "%Y-%m-%d")  # noqa: DTZ007 - made aware below
-    hh, _, mm = time.strip().partition(":")
-    local = day.replace(tzinfo=BANGKOK_TZ) + timedelta(hours=int(hh), minutes=int(mm or 0))
+    parts = time.strip().split(":")
+    if not 2 <= len(parts) <= 3:
+        raise ValueError(f"unrecognised time {time!r}")
+    hh, mm = int(parts[0]), int(parts[1])
+    ss = int(parts[2]) if len(parts) == 3 else 0
+    if not (0 <= hh <= 24 and 0 <= mm < 60 and 0 <= ss < 60):
+        raise ValueError(f"time out of range: {time!r}")
+    local = day.replace(tzinfo=BANGKOK_TZ) + timedelta(hours=hh, minutes=mm, seconds=ss)
     return local.astimezone(UTC)
 
 
@@ -141,6 +151,9 @@ def parse_response(payload: Any) -> list[Observation]:
 
     Raises ``Air4ThaiError`` only if the top-level shape is unusable. Per-station problems are
     logged and the station is skipped; stations without a reading are skipped quietly.
+    Schema drift is not silent: if stations were returned but none parsed, ``Air4ThaiError`` is
+    raised, and if every parsed PM2.5 value is ``None`` an ERROR is logged so the collector
+    (KAN-18) can alert on it.
     """
     stations = payload.get("stations") if isinstance(payload, dict) else None
     if not isinstance(stations, list):
@@ -163,6 +176,13 @@ def parse_response(payload: Any) -> list[Observation]:
             )
         except (ValidationError, ValueError) as exc:
             logger.warning("air4thai: invalid station entry #%d skipped: %s", index, exc)
+    if stations and not observations:
+        raise Air4ThaiError(f"none of {len(stations)} station entries could be parsed")
+    if observations and all(o.pm25 is None for o in observations):
+        logger.error(
+            "air4thai: all %d parsed stations have no PM2.5 value (possible schema drift)",
+            len(observations),
+        )
     return observations
 
 
@@ -201,6 +221,12 @@ class Air4ThaiClient:
 
     Station ids are passed in (configurable, see ``Settings.air4thai_station_ids``); with no ids
     all stations returned by the endpoint are kept. One request is made per call to be polite.
+
+    ``timeout`` applies only to a client created here; an injected ``client`` keeps its own
+    timeout and is not closed by ``close()``. The endpoint is plain ``http://``, so responses
+    can be tampered with in transit: payloads are range-validated, and ``AIR4THAI_URL`` should
+    move to https if the host ever supports it. Raw archives default to ``data/raw/air4thai``
+    (git-ignored, see ``DEFAULT_ARCHIVE_DIR``); ``*.json.gz`` must never be committed.
     """
 
     def __init__(
@@ -213,7 +239,8 @@ class Air4ThaiClient:
         max_attempts: int = MAX_ATTEMPTS,
         wait_max: float = 30.0,
     ) -> None:
-        self._client = client or httpx.Client(timeout=timeout)
+        self._owns_client = client is None
+        self._client = client or httpx.Client(timeout=timeout, follow_redirects=True)
         self._url = url
         self._archive = archive
         self._fetch = retry(
@@ -236,7 +263,7 @@ class Air4ThaiClient:
         if self._archive is not None:
             try:
                 self._archive(body, fetched_at)
-            except OSError:
+            except Exception:  # an archive problem must never lose the observations
                 logger.exception("air4thai: raw archive failed; continuing")
         try:
             payload = httpx.Response(200, content=body).json()
@@ -259,4 +286,6 @@ class Air4ThaiClient:
         return len(observations)
 
     def close(self) -> None:
-        self._client.close()
+        """Close the HTTP client only if this object created it."""
+        if self._owns_client:
+            self._client.close()

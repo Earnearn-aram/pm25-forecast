@@ -20,6 +20,7 @@ htmlcov/
 # Data and artifacts (never commit data dumps)
 /data/
 *.parquet
+*.json.gz
 !tests/fixtures/**
 *.duckdb
 mlruns/
