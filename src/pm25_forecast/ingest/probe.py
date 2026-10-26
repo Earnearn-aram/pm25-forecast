@@ -542,11 +542,19 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _presented_text(count: int | None) -> str:
+    if count is None:
+        return "unknown (openssl unavailable)"
+    return str(count) if count else "0 (openssl could not obtain any; connection failed)"
+
+
 def render_tls_markdown(diag: dict[str, Any]) -> list[str]:
     """The KAN-35 section: redirects, presented chains, downloaded intermediates."""
     if not diag:
         return []
     lines = ["", "## Air4Thai TLS diagnosis (KAN-35)", ""]
+    if diag.get("error"):
+        lines += [f"Diagnosis failed: {diag['error']}", ""]
     lines += ["| Request | HTTP | Location | Error |", "|---|---|---|---|"]
     for r in diag.get("redirects", []):
         lines.append(
@@ -560,7 +568,7 @@ def render_tls_markdown(diag: dict[str, Any]) -> list[str]:
             continue
         lines += [
             f"TLS: {h.get('tls_version')} {h.get('cipher')}; certificates presented by server: "
-            f"{h.get('presented_count') or 'unknown (openssl unavailable)'}",
+            f"{_presented_text(h.get('presented_count'))}",
             "",
             "| Source | Subject | Issuer | notAfter (UTC) | Expired | AIA caIssuers | SHA-256 |",
             "|---|---|---|---|---|---|---|",
@@ -572,11 +580,11 @@ def render_tls_markdown(diag: dict[str, Any]) -> list[str]:
                 f"| {', '.join(c.get('ca_issuers') or []) or '-'} | {c.get('sha256')} |"
             )
         for d in h.get("issuer_downloads", []):
-            lines += ["", f"AIA download {d['url']}: " + (d["error"] or "ok")]
+            lines += ["", f"AIA download {d['url']}: " + (d.get("error") or "ok")]
             if d.get("ok"):
                 lines.append(
-                    f"subject: {d['subject']}; matches leaf issuer: {d['matches_issuer']}; "
-                    f"SHA-256: {d['sha256']}"
+                    f"subject: {d.get('subject')}; matches leaf issuer: {d.get('matches_issuer')}; "
+                    f"SHA-256: {d.get('sha256')}"
                 )
     bundle = diag.get("bundle_pem")
     retry = diag.get("retry_with_bundle")
@@ -585,8 +593,10 @@ def render_tls_markdown(diag: dict[str, Any]) -> list[str]:
             "",
             "### Candidate CA bundle (intermediate fetched over plain http: review before use)",
             "",
-            "Owner: compare the SHA-256 above with the CA's published value, then save as "
-            "`certs/air4thai-ca.pem` and set `AIR4THAI_CA_BUNDLE`.",
+            "Owner: this certificate was fetched over plain http and is UNVERIFIED. Compare its "
+            "SHA-256 (one per intermediate) with the CA's published value and run the checks in "
+            "`certs/README.md` (`openssl verify` must say OK) before saving it as "
+            "`certs/air4thai-ca.pem` and setting `AIR4THAI_CA_BUNDLE`.",
             "",
             "```",
             bundle.rstrip(),
@@ -654,14 +664,17 @@ def run(
     with client:
         a_probes, stations, coverage = probe_air4thai(client, now, days, chunk_days, pause)
         a_probes.append(probe_history_host(client, now))
-        tls_report = (diagnose or tls.diagnose_air4thai)(
-            client,
-            [
-                ("station_list", AIR4THAI_STATIONS_URL, None),
-                ("history", AIR4THAI_HISTORY_URL, history_params(now)),
-            ],
-            now,
-        )
+        try:
+            tls_report = (diagnose or tls.diagnose_air4thai)(
+                client,
+                [
+                    ("station_list", AIR4THAI_STATIONS_URL, None),
+                    ("history", AIR4THAI_HISTORY_URL, history_params(now)),
+                ],
+                now,
+            )
+        except Exception as exc:  # diagnosis must never take the probe down
+            tls_report = {"error": type(exc).__name__}
         failed = not a_probes[0].ok or not a_probes[-1].ok
         if failed and tls_report.get("bundle_pem"):
             a_probes, stations, coverage, tls_report = _retry_with_bundle(

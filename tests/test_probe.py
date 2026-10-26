@@ -201,6 +201,8 @@ def test_tls_failure_is_flagged_and_retried_with_bundle(pki: Pki, tmp_path: Path
     assert report["target_stations"][0]["station_id"] == "02t"  # data came from the verified retry
     assert len(seen) == 1 and isinstance(seen[0], ssl.SSLContext)
     assert seen[0].verify_mode == ssl.CERT_REQUIRED and seen[0].check_hostname
+    # the bundle is never a trust anchor: the chain must still reach a default root
+    assert not seen[0].verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
     assert (tmp_path / "r.ca.pem").read_text() == bundle
     md = (tmp_path / "r.md").read_text()
     assert "Air4Thai TLS diagnosis" in md and bundle.strip() in md
@@ -279,3 +281,54 @@ def test_render_tls_markdown_full_host_section(pki: Pki) -> None:
     assert "http://ca.test/inter.der" in md
     assert "matches leaf issuer: True" in md
     assert "BEGIN CERTIFICATE" in md and "certs/air4thai-ca.pem" in md
+
+
+def test_diagnosis_crash_is_recorded_not_raised(tmp_path: Path) -> None:
+    def explode(client: httpx.Client, requests: list, now: datetime) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    report = p.run(
+        tmp_path / "r",
+        days=5,
+        pause=0,
+        now=NOW,
+        client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_handler)),
+        diagnose=explode,
+    )
+    assert report["air4thai_tls"] == {"error": "RuntimeError"}
+    assert "Diagnosis failed: RuntimeError" in (tmp_path / "r.md").read_text()
+
+
+def test_ca_pem_file_and_report_carry_unverified_header(pki: Pki, tmp_path: Path) -> None:
+    from pm25_forecast.ingest import tls
+
+    host = {
+        "issuer_downloads": [
+            {
+                "url": "http://ca.test/inter.der",
+                "pem": tls.der_to_pem(pki.inter_der),
+                "sha256": "cd" * 32,
+                "fetched_at": NOW.isoformat(),
+            }
+        ]
+    }
+    bundle = tls.bundle_from_report([host])
+    report = p.run(
+        tmp_path / "r",
+        days=5,
+        pause=0,
+        now=NOW,
+        client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_tls_failing_handler)),
+        diagnose=lambda c, r, n: {"hosts": [host], "bundle_pem": bundle},
+        verified_client_factory=lambda v: httpx.Client(transport=httpx.MockTransport(_handler)),
+    )
+    assert report["air4thai_tls"]["retry_with_bundle"]
+    for text in ((tmp_path / "r.ca.pem").read_text(), (tmp_path / "r.md").read_text()):
+        assert "# UNVERIFIED: fetched over plain http from http://ca.test/inter.der" in text
+        assert "SHA-256 (DER): " + "cd" * 32 in text
+
+
+def test_presented_count_rendering() -> None:
+    assert "openssl unavailable" in p._presented_text(None)
+    assert "connection failed" in p._presented_text(0)
+    assert p._presented_text(2) == "2"

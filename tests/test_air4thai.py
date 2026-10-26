@@ -200,3 +200,9 @@ def test_close_only_closes_owned_client() -> None:
 def test_default_archive_dir_is_gitignored() -> None:
     assert Path("data/raw/air4thai") == air4thai.DEFAULT_ARCHIVE_DIR
     assert "*.json.gz" in (Path(__file__).parent.parent / ".gitignore").read_text()
+
+
+def test_certificate_verify_failures_are_not_retried() -> None:
+    tls_error = httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer")
+    assert air4thai._is_retryable(tls_error) is False
+    assert air4thai._is_retryable(httpx.ConnectError("connection reset")) is True

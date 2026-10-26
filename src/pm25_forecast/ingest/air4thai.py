@@ -28,7 +28,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from pm25_forecast.ingest.tls import build_verify
+from pm25_forecast.ingest.tls import build_verify, is_tls_verify_error
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +212,8 @@ def gzip_file_archive(directory: Path) -> RawArchive:
 
 
 def _is_retryable(exc: BaseException) -> bool:
+    if is_tls_verify_error(exc):  # a certificate problem will not fix itself on retry
+        return False
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
         return code == 429 or code >= 500

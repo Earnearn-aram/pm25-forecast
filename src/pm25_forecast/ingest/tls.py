@@ -63,9 +63,10 @@ def build_verify(ca_bundle: str | Path | None = None) -> ssl.SSLContext | bool:
 
     With no bundle this is ``True``: httpx's default trust store, verification on. With a bundle
     (PEM file) it is an ``SSLContext`` holding the default trust store *plus* the bundle, so a
-    missing intermediate can be supplied without dropping the normal roots. The bundle is a
-    trust decision made by the owner; the partial-chain flag lets a bundle that holds only an
-    intermediate act as an anchor. Verification (chain and hostname) is never disabled.
+    missing intermediate can be supplied without dropping the normal roots. Chain and hostname
+    verification are never disabled, and the partial-chain flag is deliberately NOT set: a
+    certificate in the bundle (typically an intermediate fetched over plain http) is never a
+    trust anchor by itself and must still chain to a root in the default trust store.
     """
     if ca_bundle is None or str(ca_bundle).strip() == "":
         return True
@@ -74,7 +75,6 @@ def build_verify(ca_bundle: str | Path | None = None) -> ssl.SSLContext | bool:
         raise FileNotFoundError(f"CA bundle not found: {path}")
     context = httpx.create_ssl_context(verify=True)
     context.load_verify_locations(cafile=str(path))
-    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
     return context
 
 
@@ -209,6 +209,8 @@ def _ca_issuers(buf: bytes, start: int, end: int) -> list[str]:
 
 def parse_cert(der: bytes) -> CertInfo:
     """Parse a DER certificate into ``CertInfo``; raises ``CertParseError`` on bad input."""
+    if len(der) > MAX_CERT_BYTES:
+        raise CertParseError("certificate too large")
     try:
         tag, s, _ = _tlv(der, 0)
         if tag != 0x30:
@@ -298,6 +300,8 @@ def redirect_info(client: httpx.Client, url: str, params: dict[str, Any] | None 
     except httpx.HTTPError as exc:
         record["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         record["tls_verify_failed"] = is_tls_verify_error(exc)
+    except (httpx.InvalidURL, ValueError) as exc:  # e.g. a malformed Location header
+        record["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
     return record
 
 
@@ -337,13 +341,16 @@ def verified_handshake_error(host: str, port: int = 443, timeout: float = HANDSH
         return {"verify_code": None, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
 
-def presented_chain_pems(host: str, port: int = 443, timeout: float = HANDSHAKE_TIMEOUT):
+def presented_chain_pems(
+    host: str, port: int = 443, timeout: float = HANDSHAKE_TIMEOUT
+) -> list[str] | None:
     """DIAGNOSTIC ONLY: the PEM chain the server sends, via ``openssl s_client`` if installed.
 
-    stdin is closed immediately, so no application data is sent or read. Returns [] when
-    openssl is missing or fails.
+    stdin is closed immediately, so no application data is sent or read. Returns ``None`` when
+    openssl is unavailable (cannot run), and ``[]`` when it ran but no certificate was obtained.
     """
-    cmd = ["openssl", "s_client", "-showcerts", "-servername", host, "-connect", f"{host}:{port}"]
+    target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    cmd = ["openssl", "s_client", "-showcerts", "-servername", host, "-connect", target]
     try:
         done = subprocess.run(
             cmd,
@@ -353,9 +360,11 @@ def presented_chain_pems(host: str, port: int = 443, timeout: float = HANDSHAKE_
             timeout=timeout + 5,
             check=False,
         )
+    except FileNotFoundError:
+        return None
     except (OSError, subprocess.SubprocessError):
         return []
-    return [der_to_pem(d) for d in pem_to_ders(done.stdout)]
+    return [der_to_pem(d) for d in pem_to_ders(done.stdout) if len(d) <= MAX_CERT_BYTES]
 
 
 def _describe(info: CertInfo, now: datetime, source: str) -> dict[str, Any]:
@@ -385,25 +394,36 @@ def download_issuers(
     seen: set[str] = set()
     for _ in range(MAX_AIA_HOPS):
         url = next((u for u in child.ca_issuers if u not in seen), None)
-        if url is None or urlsplit(url).scheme not in ("http", "https"):
+        if url is None:
+            break
+        try:
+            scheme = urlsplit(url).scheme
+        except ValueError:
+            records.append({"url": url, "ok": False, "error": "malformed URL", "pem": None})
+            break
+        if scheme not in ("http", "https"):
             break
         seen.add(url)
         record: dict[str, Any] = {"url": url, "ok": False, "error": None, "pem": None}
         records.append(record)
         try:
-            resp = client.get(url, follow_redirects=True)
-            resp.raise_for_status()
-            if len(resp.content) > MAX_CERT_BYTES:
-                raise CertParseError("download too large")
-            der = der_from_download(resp.content)
+            with client.stream("GET", url, follow_redirects=True) as resp:
+                resp.raise_for_status()
+                body = b""
+                for chunk in resp.iter_bytes():
+                    body += chunk
+                    if len(body) > MAX_CERT_BYTES:  # stop reading: never buffer more
+                        raise CertParseError("download too large")
+            der = der_from_download(body)
             info = parse_cert(der)
-        except (httpx.HTTPError, CertParseError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             record["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
             break
         matches = info.subject == child.issuer
         record.update(
             ok=True,
             matches_issuer=matches,
+            fetched_at=(now or datetime.now(UTC)).isoformat(),
             **_describe(info, now or datetime.now(UTC), "aia"),
         )
         if matches and not info.self_signed:
@@ -438,12 +458,14 @@ def diagnose_host(
     try:
         der, details = peek(host, port)
         leaf = parse_cert(der)
-    except (OSError, ssl.SSLError, CertParseError) as exc:
+    except (OSError, ssl.SSLError, ValueError) as exc:  # CertParseError is a ValueError
         result["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         return result
     result.update(details)
-    presented = chain(host, port)
-    result["presented_count"] = len(presented) or None  # None: openssl unavailable
+    presented_raw = chain(host, port)
+    presented = presented_raw or []
+    # None: openssl unavailable; 0: openssl ran but obtained no certificate (connection failed)
+    result["presented_count"] = None if presented_raw is None else len(presented)
     certs = [_describe(leaf, now, "leaf")]
     for pem in presented[1:]:
         for extra in pem_to_ders(pem):
@@ -462,23 +484,42 @@ def https_targets(urls: list[str], redirects: list[dict[str, Any]]) -> list[tupl
     targets: list[tuple[str, int]] = []
     candidates = list(urls) + [r["location"] for r in redirects if r.get("location")]
     for url in candidates:
-        parts = urlsplit(url)
-        if parts.hostname and parts.scheme in ("http", "https"):
-            pair = (parts.hostname, parts.port or 443 if parts.scheme == "https" else 443)
+        try:
+            parts = urlsplit(url)
+            host, port = parts.hostname, parts.port
+        except ValueError:  # malformed URL or port: skip it
+            continue
+        if host and parts.scheme in ("http", "https"):
+            pair = (host, (port or 443) if parts.scheme == "https" else 443)
             if pair not in targets:
                 targets.append(pair)
     return targets
 
 
+def _unverified_header(record: dict[str, Any]) -> str:
+    url = re.sub(r"[^\x21-\x7e]", "?", str(record.get("url", "")))
+    how = "plain http" if url.startswith("http:") else "https"
+    return (
+        f"# UNVERIFIED: fetched over {how} from {url} on {record.get('fetched_at')}; "
+        f"SHA-256 (DER): {record.get('sha256')}; verify before committing\n"
+    )
+
+
 def bundle_from_report(hosts: list[dict[str, Any]]) -> str:
-    """Concatenate the matching, non-self-signed issuer PEMs found for all hosts (deduplicated)."""
-    pems: list[str] = []
+    """Concatenate the matching, non-self-signed issuer PEMs found for all hosts (deduplicated).
+
+    Each certificate is preceded by an ``# UNVERIFIED`` comment (source URL, UTC time, SHA-256);
+    PEM readers ignore text outside the BEGIN/END lines.
+    """
+    seen: set[str] = set()
+    parts: list[str] = []
     for host in hosts:
         for rec in host.get("issuer_downloads", []):
             pem = rec.get("pem")
-            if pem and pem not in pems:
-                pems.append(pem)
-    return "".join(pems)
+            if pem and pem not in seen:
+                seen.add(pem)
+                parts.append(_unverified_header(rec) + pem)
+    return "".join(parts)
 
 
 def diagnose_air4thai(

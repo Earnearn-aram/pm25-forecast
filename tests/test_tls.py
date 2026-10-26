@@ -170,7 +170,13 @@ def test_diagnose_host_with_injected_network(pki: Pki) -> None:
     assert report["verify_error"]["verify_code"] == 20
     assert [c["source"] for c in report["chain"]] == ["leaf"]
     assert report["chain"][0]["ca_issuers"] == ["http://ca.test/inter.der"]
-    assert tls.bundle_from_report([report]) == tls.der_to_pem(pki.inter_der)
+    bundle = tls.bundle_from_report([report])
+    assert bundle.endswith(tls.der_to_pem(pki.inter_der))
+    header = bundle.splitlines()[0]
+    assert header.startswith("# UNVERIFIED: fetched over plain http from http://ca.test/inter.der")
+    assert "2026-10-26T00:00:00+00:00" in header and "SHA-256 (DER): " in header
+    assert header.endswith("verify before committing")
+    assert tls.pem_to_ders(bundle) == [pki.inter_der]  # header does not disturb PEM readers
 
 
 def test_diagnose_host_records_unreachable_host() -> None:
@@ -210,7 +216,11 @@ def test_diagnose_air4thai_combines_redirects_and_hosts(pki: Pki, monkeypatch) -
     )
     assert [r["status"] for r in out["redirects"]] == [301, 301]
     assert [h["host"] for h in out["hosts"]] == ["a.test", "b.test"]
-    assert out["bundle_pem"] == tls.der_to_pem(pki.inter_der)  # deduplicated across hosts
+    pem = tls.der_to_pem(pki.inter_der)
+    assert out["bundle_pem"].count(pem) == 1  # deduplicated across hosts
+    assert out["bundle_pem"].startswith(
+        "# UNVERIFIED: fetched over plain http from http://ca.test/"
+    )
 
 
 # ---------------------------------------------------------------- CA bundle option
@@ -227,7 +237,8 @@ def test_build_verify_with_bundle_keeps_verification_on(pki: Pki) -> None:
     ctx = tls.build_verify(pki.inter_pem)
     assert isinstance(ctx, ssl.SSLContext)
     assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
-    assert ctx.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
+    # A bundled intermediate must never be a trust anchor on its own.
+    assert not ctx.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
 
 
 def test_settings_ca_bundle_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,7 +263,8 @@ def test_client_rejects_bundle_with_injected_client(pki: Pki) -> None:
 def tls_server(pki: Pki) -> Iterator[int]:
     """A local HTTPS server that sends leaf + intermediate (not the root)."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(str(pki.chain_pem), str(pki.leaf_key))
+    # The server sends the leaf only, i.e. it omits the intermediate (the KAN-35 failure mode).
+    context.load_cert_chain(str(pki.leaf_pem), str(pki.leaf_key))
     body = FIXTURE.read_bytes()
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -291,15 +303,68 @@ def tls_server(pki: Pki) -> Iterator[int]:
     listener.close()
 
 
+@pytest.fixture
+def root_trusted(pki: Pki, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the throwaway root the only default trust anchor (httpx honours SSL_CERT_FILE)."""
+    monkeypatch.setenv("SSL_CERT_FILE", str(pki.root_pem))
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+
+@pytest.mark.usefixtures("root_trusted")
 def test_missing_intermediate_fails_verified_and_bundle_fixes_it(pki: Pki, tls_server: int) -> None:
     url = f"https://127.0.0.1:{tls_server}/"
-    with pytest.raises(httpx.ConnectError) as err, httpx.Client() as plain:
+    with pytest.raises(httpx.ConnectError) as err, httpx.Client(verify=True) as plain:
         plain.get(url)
     assert tls.is_tls_verify_error(err.value)
+    # The intermediate chains to the trusted root, so the bundle makes verification succeed.
     with httpx.Client(verify=tls.build_verify(pki.inter_pem)) as fixed:
         assert fixed.get(url).status_code == 200
 
 
+@pytest.mark.usefixtures("root_trusted")
+def test_bundle_with_headers_from_report_still_loads_and_verifies(
+    pki: Pki, tls_server: int, tmp_path: Path
+) -> None:
+    host = {
+        "issuer_downloads": [
+            {
+                "url": "http://ca.test/inter.der",
+                "pem": tls.der_to_pem(pki.inter_der),
+                "sha256": "ab" * 32,
+                "fetched_at": NOW.isoformat(),
+            }
+        ]
+    }
+    bundle = tmp_path / "bundle.pem"
+    bundle.write_text(tls.bundle_from_report([host]))
+    with httpx.Client(verify=tls.build_verify(bundle)) as client:
+        assert client.get(f"https://127.0.0.1:{tls_server}/").status_code == 200
+
+
+@pytest.mark.usefixtures("root_trusted")
+def test_forged_intermediate_in_bundle_is_rejected(pki: Pki, tls_server: int) -> None:
+    """Same subject DN, different key, self-signed: must not make the leaf verify."""
+    url = f"https://127.0.0.1:{tls_server}/"
+    with (
+        pytest.raises(httpx.ConnectError) as err,
+        httpx.Client(verify=tls.build_verify(pki.forged_inter_pem)) as client,
+    ):
+        client.get(url)
+    assert tls.is_tls_verify_error(err.value)
+
+
+def test_intermediate_alone_is_not_a_trust_anchor(pki: Pki, tls_server: int) -> None:
+    """Without the root in the default store, the downloaded intermediate must not be enough."""
+    url = f"https://127.0.0.1:{tls_server}/"
+    with (
+        pytest.raises(httpx.ConnectError) as err,
+        httpx.Client(verify=tls.build_verify(pki.inter_pem)) as client,
+    ):
+        client.get(url)
+    assert tls.is_tls_verify_error(err.value)
+
+
+@pytest.mark.usefixtures("root_trusted")
 def test_air4thai_client_uses_ca_bundle(pki: Pki, tls_server: int) -> None:
     url = f"https://127.0.0.1:{tls_server}/"
     client = Air4ThaiClient(url=url, ca_bundle=pki.inter_pem, max_attempts=1)
@@ -322,8 +387,87 @@ def test_diagnostic_handshake_reads_certificate_only(pki: Pki, tls_server: int) 
     failure = tls.verified_handshake_error("127.0.0.1", tls_server)
     assert failure is not None and failure["verify_code"] in (20, 21)
     chain = tls.presented_chain_pems("127.0.0.1", tls_server)
-    if chain:  # openssl s_client present
-        assert [tls.parse_cert(d).subject for p in chain for d in tls.pem_to_ders(p)] == [
-            "CN=localhost",
-            "C=TH, O=Test Org, CN=Test Intermediate",
-        ]
+    assert chain is not None  # openssl is required by the pki fixture
+    assert [tls.parse_cert(d).subject for p in chain for d in tls.pem_to_ders(p)] == [
+        "CN=localhost"  # the server omitted the intermediate
+    ]
+
+
+# ---------------------------------------------------------------- never raises / limits
+
+
+def test_redirect_info_survives_malformed_location() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(302, headers={"Location": "http://[::1/x"})
+        )
+    )
+    info = tls.redirect_info(client, "http://h.test/x")
+    assert info["location"] is None and info["error"]  # recorded, not raised
+
+
+def test_malformed_aia_url_is_recorded_not_raised(pki: Pki) -> None:
+    leaf = tls.parse_cert(pki.leaf_der).model_copy(update={"ca_issuers": ["http://[bad/x"]})
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404)))
+    records = tls.download_issuers(client, leaf, NOW)
+    assert records[0]["ok"] is False and records[0]["error"]
+    assert tls.https_targets(["http://[bad/x", "http://h.test:notaport/"], []) == []
+
+
+def test_download_stops_reading_after_the_cap(pki: Pki) -> None:
+    leaf = tls.parse_cert(pki.leaf_der)
+    sent = 0
+
+    def endless():
+        nonlocal sent
+        while True:
+            sent += 1
+            yield b"x" * 10_000
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, content=endless()))
+    )
+    records = tls.download_issuers(client, leaf, NOW)
+    assert "too large" in records[0]["error"]
+    assert sent <= tls.MAX_CERT_BYTES // 10_000 + 2
+
+
+def test_parse_cert_rejects_oversized_input() -> None:
+    with pytest.raises(tls.CertParseError, match="too large"):
+        tls.parse_cert(b"\x30" * (tls.MAX_CERT_BYTES + 1))
+
+
+def test_openssl_unavailable_vs_connection_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    def missing(cmd, **kw):
+        commands.append(cmd)
+        raise FileNotFoundError("openssl")
+
+    monkeypatch.setattr(tls.subprocess, "run", missing)
+    assert tls.presented_chain_pems("::1", 8443) is None
+    assert commands[0][-1] == "[::1]:8443"  # IPv6 literal is bracketed
+
+    class Done:
+        stdout = "CONNECTED(00000003)\nconnect:errno=111\n"
+
+    monkeypatch.setattr(tls.subprocess, "run", lambda cmd, **kw: Done())
+    assert tls.presented_chain_pems("h.test") == []
+
+
+def test_presented_count_distinguishes_none_from_zero(pki: Pki) -> None:
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404)))
+
+    def run(chain_result: list[str] | None) -> dict:
+        return tls.diagnose_host(
+            client,
+            "h.test",
+            443,
+            NOW,
+            peek=lambda h, p: (pki.leaf_der, {}),
+            verify_error=lambda h, p: None,
+            chain=lambda h, p: chain_result,
+        )
+
+    assert run(None)["presented_count"] is None
+    assert run([])["presented_count"] == 0
