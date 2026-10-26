@@ -168,7 +168,7 @@ def do_run(tmp_path, fake_db, *, now=NOW, http=None, alert=None, **kw):
 def test_run_writes_observation_and_cams_vintage(tmp_path, fake_db):
     result = do_run(tmp_path, fake_db)
     assert result.failures == []
-    assert result.observations_written == 1
+    assert result.observations_upserted == 1
     assert [r[:2] for r in fake_db.rows("observations")] == [("TST01", TST01_TS.isoformat())]
     assert fake_db.rows("observations")[0][2:4] == (17.5, "air4thai")
     preds = fake_db.rows("predictions")
@@ -267,6 +267,17 @@ def test_stale_station_alerts_once_as_it_crosses_the_threshold(tmp_path, fake_db
     assert alerts == []
 
 
+def test_stale_alert_window_across_runs_is_not_silent(tmp_path, fake_db):
+    alerts: list[str] = []
+    for offset in (timedelta(hours=2, minutes=55), timedelta(hours=3, minutes=40)):
+        do_run(tmp_path, fake_db, now=TST01_TS + offset, alert=alerts.append)
+        if offset < timedelta(hours=3):
+            assert alerts == []  # not stale yet
+    assert len(alerts) == 1  # fires at 3h40, inside the 60 minute window
+    do_run(tmp_path, fake_db, now=TST01_TS + timedelta(hours=4, minutes=10), alert=alerts.append)
+    assert len(alerts) == 1  # past the window: quiet
+
+
 def test_fresh_station_is_not_stale(tmp_path, fake_db):
     assert do_run(tmp_path, fake_db, now=TST01_TS + timedelta(hours=2)).stale_stations == []
 
@@ -310,7 +321,7 @@ def test_air4thai_failure_is_reported_but_cams_still_stored(tmp_path, fake_db):
     http = make_http(status={"air4thai.pcd.go.th": 404})
     result = do_run(tmp_path, fake_db, http=http)
     assert result.failures == ["air4thai fetch failed: HTTPStatusError"]
-    assert result.observations_written == 0
+    assert result.observations_upserted == 0
     assert result.predictions_written == 3
 
 
@@ -318,7 +329,7 @@ def test_open_meteo_failure_is_reported_but_observations_still_stored(tmp_path, 
     http = make_http(status={"air-quality-api.open-meteo.com": 400})
     result = do_run(tmp_path, fake_db, http=http)
     assert result.failures == ["open-meteo cams failed for TST01"]
-    assert result.observations_written == 1
+    assert result.observations_upserted == 1
     assert fake_db.rows("predictions") == []
 
 
@@ -326,14 +337,14 @@ def test_null_pm25_and_future_readings_are_dropped_not_stored(tmp_path, fake_db)
     air = copy.deepcopy(load("air4thai_getNewAQI_synthetic.json"))
     air["stations"][0]["AQILast"]["PM25"]["value"] = ""
     result = do_run(tmp_path, fake_db, http=make_http(air=air))
-    assert (result.observations_written, result.observations_dropped) == (0, 1)
+    assert (result.observations_upserted, result.observations_dropped) == (0, 1)
     assert "air4thai returned no usable observations" in result.failures
 
     air = copy.deepcopy(load("air4thai_getNewAQI_synthetic.json"))
     air["stations"][0]["AQILast"]["date"] = "2026-10-28"
     fake_db2 = FakeDb()
     result = do_run(tmp_path, fake_db2, http=make_http(air=air))
-    assert (result.observations_written, result.observations_dropped) == (0, 1)
+    assert (result.observations_upserted, result.observations_dropped) == (0, 1)
     assert fake_db2.rows("observations") == []
 
 
@@ -454,7 +465,7 @@ def test_multi_station_run(tmp_path, fake_db):
         tmp_path, fake_db, http=http, station_locations="TST01=13.75,100.5;TST02=14,101"
     )
     assert result.failures == []
-    assert result.observations_written == 2
+    assert result.observations_upserted == 2
     assert {r[0] for r in fake_db.rows("observations")} == {"TST01", "TST02"}
     assert {r[0] for r in fake_db.rows("predictions")} == {"TST01", "TST02"}
     assert len(fake_db.rows("predictions")) == 6
@@ -469,7 +480,7 @@ def test_circuit_breaker_skips_remaining_stations_for_a_dead_host(tmp_path, fake
     assert http.calls.count("air-quality-api.open-meteo.com") == 4  # one station's retries only
     cams_failures = [f for f in result.failures if f.startswith("open-meteo cams")]
     assert len(cams_failures) == 1
-    assert result.observations_written == 1  # Air4Thai half unaffected
+    assert result.observations_upserted == 1  # Air4Thai half unaffected
 
 
 def test_deadline_stops_fetching_and_records_one_failure(tmp_path, fake_db):
@@ -534,6 +545,23 @@ def test_connect_gives_up_after_three_attempts(monkeypatch):
     assert len(attempts) == 3
 
 
+@pytest.mark.parametrize("state", ["28P01", "3D000"])
+def test_connect_does_not_retry_permanent_operational_errors(monkeypatch, state):
+    attempts = []
+
+    class Permanent(psycopg.OperationalError):
+        sqlstate = state
+
+    def bad(url, **kw):
+        attempts.append(1)
+        raise Permanent("auth failed")
+
+    monkeypatch.setattr(db.psycopg, "connect", bad)
+    with pytest.raises(psycopg.OperationalError):
+        db.connect("u")
+    assert len(attempts) == 1
+
+
 def test_connect_does_not_retry_programming_error(monkeypatch):
     attempts = []
 
@@ -571,3 +599,24 @@ def test_main_alerts_with_exception_type_only_on_crash(patched_main, monkeypatch
     assert collector.main() == 1
     assert alerts == ["collector crashed: KeyError"]
     assert "collector crashed" in caplog.text  # logger.exception keeps the traceback in the log
+
+
+def test_config_error_sends_alert_without_secrets(patched_main, monkeypatch):
+    alerts: list[str] = []
+    monkeypatch.setattr(collector, "make_alert", lambda _url: alerts.append)
+
+    def bad_config(*_a, **_k):
+        raise ConfigError("DATABASE_URL is not set")
+
+    patched_main(bad_config)
+    assert collector.main() == 2
+    assert alerts == ["configuration error: DATABASE_URL is not set"]
+
+
+def test_invalid_settings_trigger_the_crash_alert_with_type_only(monkeypatch):
+    alerts: list[str] = []
+    monkeypatch.setattr(collector, "make_alert", lambda _url: alerts.append)
+    monkeypatch.setenv("COLLECT_WEATHER", "not-a-bool-s3cret")
+    monkeypatch.setattr(collector, "get_settings", lambda: Settings(_env_file=None))
+    assert collector.main() == 1
+    assert alerts == ["collector crashed: ValidationError"]

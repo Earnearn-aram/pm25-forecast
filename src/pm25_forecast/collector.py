@@ -68,7 +68,9 @@ logger = logging.getLogger(__name__)
 STEP = timedelta(hours=1)  # Air4Thai publishes one reading per station per hour
 MAX_FUTURE_SKEW = timedelta(hours=1)  # a reading further ahead than this is a bad timestamp
 STALE_AFTER = timedelta(hours=3)
-STALE_ALERT_WINDOW = timedelta(minutes=20)  # one poll interval: alert as a station crosses
+# Alert while a station is 3-4 h stale. Stateless, so a crossing alerts 1-3 times (20 min polls,
+# late or skipped runs); persistent alert state is a follow-up (KAN-30/KAN-19).
+STALE_ALERT_WINDOW = timedelta(minutes=60)
 FETCH_DEADLINE_S = 240.0  # whole fetch phase; the workflow timeout is 10 minutes
 EXIT_FAILED, EXIT_CONFIG = 1, 2
 
@@ -94,7 +96,7 @@ class Gap:
 @dataclass
 class CollectorResult:
     run_id: str
-    observations_written: int = 0
+    observations_upserted: int = 0
     observations_dropped: int = 0
     predictions_written: int = 0
     cams_duplicates_skipped: list[str] = field(default_factory=list)
@@ -302,7 +304,7 @@ def write_observations(
         logger.warning("GAP %s", gap)
     for sid in result.stale_stations:
         logger.warning("station %s has no reading newer than %s", sid, STALE_AFTER)
-    result.observations_written = sql.write_rows(
+    result.observations_upserted = sql.write_rows(
         con, sql.UPSERT_OBSERVATION, [o.model_dump() for o in observations]
     )
 
@@ -414,10 +416,10 @@ def run(
             write_cams(con, cams, result)
 
     logger.info(
-        "run %s: %d observations written (%d dropped), %d predictions written, "
+        "run %s: %d observations upserted (%d dropped), %d predictions written, "
         "%d CAMS repeats skipped, %d gaps, %d failures",
         run_id,
-        result.observations_written,
+        result.observations_upserted,
         result.observations_dropped,
         result.predictions_written,
         len(result.cams_duplicates_skipped),
@@ -432,15 +434,19 @@ def main() -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines log full request URLs
-    settings = get_settings()
-    webhook = settings.alert_webhook_url.get_secret_value() if settings.alert_webhook_url else None
-    alert = make_alert(webhook)
+    alert = make_alert(None)  # replaced once settings are read; until then ERROR log only
     try:
+        settings = get_settings()
+        webhook = (
+            settings.alert_webhook_url.get_secret_value() if settings.alert_webhook_url else None
+        )
+        alert = make_alert(webhook)
         result, code = run_entrypoint(
             lambda: run(settings, alert=alert), alert, connection_errors=db.CONNECTION_ERRORS
         )
-    except ConfigError as exc:
+    except ConfigError as exc:  # messages never contain secret values
         logger.error("configuration error: %s", exc)
+        _safe_alert(alert, f"configuration error: {exc}")
         return EXIT_CONFIG
     except Exception as exc:  # a crash must be red and alerted, with the type only
         logger.exception("collector crashed")

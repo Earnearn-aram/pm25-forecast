@@ -4,7 +4,7 @@ import logging
 
 import psycopg
 from tenacity import Retrying, stop_after_attempt, wait_exponential
-from tenacity.retry import retry_if_exception_type
+from tenacity.retry import retry_if_exception
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,14 @@ CONNECT_ATTEMPTS = 3
 RETRY_WAIT = wait_exponential(multiplier=1, max=4)  # module level so tests can replace it
 
 
+def _is_transient(exc: BaseException) -> bool:
+    """OperationalError worth retrying: not a permanent auth (class 28) or unknown-DB error."""
+    if not isinstance(exc, psycopg.OperationalError):
+        return False
+    state = getattr(exc, "sqlstate", None) or ""
+    return not (state.startswith("28") or state == "3D000")
+
+
 def _log_retry(state) -> None:
     # Type only: connection error messages name hosts, and the URL is a secret.
     exc = state.outcome.exception()
@@ -34,12 +42,13 @@ def _log_retry(state) -> None:
 def connect(database_url: str) -> psycopg.Connection:
     """Open a connection (use as a context manager: commit on success, rollback on error).
 
-    Retries `OperationalError` (a cold Neon compute can refuse the first attempt) up to
-    CONNECT_ATTEMPTS times; only the connect is retried, never work done on the connection.
+    Retries transient `OperationalError` (a cold Neon compute can refuse the first attempt) up to
+    CONNECT_ATTEMPTS times, but not permanent auth/unknown-database errors (SQLSTATE 28xxx and
+    3D000). Only the connect is retried, never work done on the connection.
     The URL is only ever passed to the driver; it is never logged or put in an exception here.
     """
     for attempt in Retrying(
-        retry=retry_if_exception_type(psycopg.OperationalError),
+        retry=retry_if_exception(_is_transient),
         stop=stop_after_attempt(CONNECT_ATTEMPTS),
         wait=RETRY_WAIT,
         before_sleep=_log_retry,
