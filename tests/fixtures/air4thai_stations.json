@@ -1,0 +1,8 @@
+{"stations":[
+ {"stationID":"02t","nameEN":"Synthetic Dindaeng","areaEN":"Din Daeng, Bangkok","lat":"13.7640","long":"100.5530","AQILast":{"PM25":{"value":"21.5"}}},
+ {"stationID":"03t","nameEN":"Synthetic Bang Khun Thian","areaEN":"Bang Khun Thian, Bangkok","lat":"13.6510","long":"100.4380","AQILast":{"PM25":{"value":"-1"}}},
+ {"stationID":"50t","nameEN":"Synthetic Chiang Mai","areaEN":"Mueang, Chiang Mai","lat":"18.84","long":"98.97","AQILast":{"PM25":{"value":"30"}}},
+ {"stationID":"bad","nameEN":"Malformed","areaEN":"Bangkok","AQILast":"n/a"},
+ {"nameEN":"No id","areaEN":"Bangkok"},
+ "garbage"
+]}
