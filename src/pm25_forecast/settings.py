@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     openaq_api_key: SecretStr | None = None
     alert_webhook_url: SecretStr | None = None
     heartbeat_url: SecretStr | None = None
+    # Comma-separated Air4Thai station ids (KAN-9 will choose them); empty keeps all stations.
+    air4thai_station_ids: str = ""
+
+    @property
+    def station_id_list(self) -> list[str]:
+        return [s.strip() for s in self.air4thai_station_ids.split(",") if s.strip()]
 
 
 @lru_cache
