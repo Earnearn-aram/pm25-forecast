@@ -1,0 +1,16 @@
+{
+  "_note": "SYNTHETIC fixture written from the documented shape of getNewAQI_JSON, not a real recording. Station ids and values are invented.",
+  "stations": [
+    {"stationID": "TST01", "nameEN": "Synthetic A", "lat": "13.75", "long": "100.50",
+     "AQILast": {"date": "2026-10-26", "time": "08:00",
+                 "PM25": {"color_id": "2", "aqi": "40", "value": "17.5"},
+                 "PM10": {"value": "30"}, "extra_unknown_field": 1}},
+    {"stationID": "TST02", "nameEN": "Synthetic B", "lat": "13.80", "long": "100.60",
+     "AQILast": {"date": "2026-10-26", "time": "08:00", "PM25": {"value": "-1", "aqi": "-1"}}},
+    {"stationID": "TST03", "AQILast": {"date": "2026-10-26", "time": "08:00"}},
+    {"stationID": "TST04", "lat": "n/a", "AQILast": {"date": "2026-10-26", "time": "07:00", "PM25": {"value": ""}}},
+    {"stationID": "TST05", "AQILast": {"date": "not-a-date", "time": "08:00", "PM25": {"value": "9"}}},
+    {"nameEN": "No id"},
+    {"stationID": "TST06", "AQILast": "broken"}
+  ]
+}
