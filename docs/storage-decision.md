@@ -17,7 +17,7 @@ Sources: https://neon.com/pricing, https://supabase.com/pricing, https://develop
 
 Neon free-tier Postgres. Idempotent upserts on natural keys are a single SQL statement, runners stay stateless, and nothing is committed to git. Supabase's one-week pause is a real risk for a portfolio project that may sit idle. R2 would force us to hand-build upsert and dedup on top of files.
 
-Estimated volume is corrected in Open decisions below: the earlier 'well under 100 MB per year' figure was wrong once forecast vintages are counted.
+Estimated volume is corrected in Decisions below: the earlier 'well under 100 MB per year' figure was wrong once forecast vintages are counted.
 
 ## Model binary
 
@@ -40,8 +40,18 @@ The predict step runs inside `run_predict_step` (`storage/guard.py`). If the dat
 
 Create the Neon project and set `DATABASE_URL` (and `ALERT_WEBHOOK_URL`) as secrets; apply `schema.sql` once.
 
-## Open decisions (Boss)
+## Decisions
 
-(a) DB driver and placeholder style: psycopg (`%(name)s`) vs SQLAlchemy `text` (`:name`). The statements in `sql.py` currently use `:name`; no driver is chosen or added. `run_entrypoint`'s error tuple should be set to the chosen driver's connection errors.
+Decided (Genos, under Boss's delegation):
 
-(b) Storage estimate, corrected: predictions are about 10 stations x 8,760 issues x 24 horizons = about 2.1M rows per year, roughly 0.3-0.4 GB per year, plus scores and the features jsonb. That would hit Neon's 1 GB free limit in about 12-18 months. Options: retention/rollup (raw vintages kept 90 days, scores aggregated), slimmer rows (a `runs` table holding run-level fields so prediction rows shrink), or a paid tier.
+1. Retention: raw prediction vintages are kept 90 days; scores are aggregated to daily after that. If row volume still hurts, slim the rows later with a `runs` table. Purge statement (`sql.PURGE_OLD_PREDICTIONS`, no scheduler in this PR; a later job runs it):
+
+```sql
+DELETE FROM predictions WHERE issue_time < now() - interval '90 days';
+```
+
+2. DB driver: psycopg 3 with `%(name)s` placeholders. `sql.py` statements use this style. psycopg is not added as a dependency in this PR; KAN-18 adds it, and must also set `run_entrypoint`'s `connection_errors` to the driver's connection errors (the `OSError`/`ConnectionError` default is a placeholder). Tests stay offline: a tiny test helper translates `%(name)s` to `:name` for the SQLite fixture.
+
+3. CAMS repeats: dedupe on content at ingest (a KAN-18 concern).
+
+Storage estimate, corrected: predictions are about 10 stations x 8,760 issues x 24 horizons = about 2.1M rows per year, roughly 0.3-0.4 GB per year, plus scores and the features jsonb. Without retention that would hit Neon's 1 GB free limit in about 12-18 months; with the 90-day raw retention above, prediction storage stays around 0.1 GB at steady state. Owner should re-check once real row sizes are known.

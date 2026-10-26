@@ -39,10 +39,10 @@ def run_entrypoint[T](
     """Entrypoint helper returning (result, exit_code).
 
     Driver-level connection errors (`connection_errors`, default OSError/ConnectionError; pass
-    the chosen driver's error classes once KAN-18+ picks one) become DatabaseUnavailableError.
+    psycopg's error classes in KAN-18) become DatabaseUnavailableError. The OSError default is
+    a placeholder: KAN-18 must set it to the driver's connection errors.
     The caller MUST `sys.exit(exit_code)`: a skipped run returns 1 so CI shows red, never green.
-    Note: with the OSError default, non-DB OSErrors inside `step` are also treated as DB-down;
-    narrow the tuple when the driver is known.
+    Note: with the OSError default, non-DB OSErrors inside `step` are also treated as DB-down.
     """
 
     def guarded() -> T:

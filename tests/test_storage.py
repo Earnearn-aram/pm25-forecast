@@ -42,12 +42,22 @@ def _primary_key(body: str) -> tuple[str, ...]:
     return tuple(inline)
 
 
+class _PyformatConnection:
+    """SQLite connection that accepts psycopg-style `%(name)s` placeholders (offline tests)."""
+
+    def __init__(self, con: sqlite3.Connection):
+        self._con = con
+
+    def execute(self, statement, params=()):
+        return self._con.execute(re.sub(r"%\((\w+)\)s", r":\1", statement), params)
+
+
 @pytest.fixture
 def db():
     """In-memory SQLite built from the real schema.sql (no hand-written DDL to drift)."""
     con = sqlite3.connect(":memory:")
     con.executescript(SCHEMA.replace("DEFAULT now()", "DEFAULT CURRENT_TIMESTAMP"))
-    return con
+    return _PyformatConnection(con)
 
 
 def _pred(issue, pm25, run_id="r1", model_version="m1", valid=None):

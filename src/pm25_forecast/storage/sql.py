@@ -1,4 +1,4 @@
-"""Upsert statements (named parameters; valid on PostgreSQL and SQLite >= 3.24)."""
+"""Upsert statements using psycopg 3 style `%(name)s` placeholders (driver added in KAN-18)."""
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
@@ -17,7 +17,7 @@ def require_utc(value: datetime) -> datetime:
 
 UPSERT_OBSERVATION = """
 INSERT INTO observations (station_id, ts, pm25, source)
-VALUES (:station_id, :ts, :pm25, :source)
+VALUES (%(station_id)s, %(ts)s, %(pm25)s, %(source)s)
 ON CONFLICT (station_id, ts) DO UPDATE SET
     pm25 = COALESCE(excluded.pm25, observations.pm25),
     source = excluded.source,
@@ -27,13 +27,17 @@ ON CONFLICT (station_id, ts) DO UPDATE SET
 # Append-only forecast vintage: re-running the same issue never overwrites the first write.
 INSERT_PREDICTION = """
 INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id, pm25_pred)
-VALUES (:station_id, :issue_time, :valid_time, :model_version, :run_id, :pm25_pred)
+VALUES (
+    %(station_id)s, %(issue_time)s, %(valid_time)s, %(model_version)s, %(run_id)s, %(pm25_pred)s
+)
 ON CONFLICT (station_id, issue_time, valid_time, model_version) DO NOTHING
 """
 
 UPSERT_SCORE = """
 INSERT INTO scores (station_id, issue_time, valid_time, model_version, pm25_obs, abs_error)
-VALUES (:station_id, :issue_time, :valid_time, :model_version, :pm25_obs, :abs_error)
+VALUES (
+    %(station_id)s, %(issue_time)s, %(valid_time)s, %(model_version)s, %(pm25_obs)s, %(abs_error)s
+)
 ON CONFLICT (station_id, issue_time, valid_time, model_version)
 DO UPDATE SET pm25_obs = excluded.pm25_obs, abs_error = excluded.abs_error
 """
@@ -66,3 +70,10 @@ def write_rows(
         len(prepared),
     )
     return affected
+
+
+# Retention (Decided): raw prediction vintages are kept 90 days. Run by a job added later
+# (no scheduler in KAN-17). Scores are aggregated to daily before their raw rows are purged.
+PURGE_OLD_PREDICTIONS = """
+DELETE FROM predictions WHERE issue_time < now() - interval '90 days'
+"""
