@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# uv / virtualenv
+.venv/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Data and artifacts (never commit data dumps)
+data/
+*.parquet
+*.duckdb
+mlruns/
