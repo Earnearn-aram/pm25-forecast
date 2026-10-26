@@ -13,3 +13,4 @@ Project: Bangkok PM2.5 24h forecast (MLOps portfolio). Plan and diagrams live in
 - Do not add dependencies or change scope beyond the ticket; raise scope changes as a ticket comment.
 - Before pushing, all of these must pass: `uv sync --locked`, `uv run ruff check`, `uv run ruff format --check`, `uv run pytest`, `uv run pre-commit run --all-files`.
 - Training and live inference share one feature module (`src/pm25_forecast/features/`, see KAN-31); do not duplicate feature logic.
+- The ruff version is pinned in `uv.lock` and in the `.pre-commit-config.yaml` rev; bump both together.

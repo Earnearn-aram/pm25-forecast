@@ -18,7 +18,14 @@ htmlcov/
 !.env.example
 
 # Data and artifacts (never commit data dumps)
-data/
+/data/
 *.parquet
+!tests/fixtures/**
 *.duckdb
 mlruns/
+
+# Tooling and editors
+.mypy_cache/
+.idea/
+.vscode/
+*.sqlite*
