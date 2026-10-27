@@ -332,3 +332,100 @@ def test_presented_count_rendering() -> None:
     assert "openssl unavailable" in p._presented_text(None)
     assert "connection failed" in p._presented_text(0)
     assert p._presented_text(2) == "2"
+
+
+# ---------------------------------------------------------------- KAN-9 history retention
+
+RETAINED = "air4thai_history_retained.json"  # the endpoint's whole retained archive for 02t
+EARLIEST = datetime(2025, 12, 19, 17, tzinfo=UTC)  # 2025-12-20 00:00 Asia/Bangkok
+
+
+def _retention_handler(request: httpx.Request) -> httpx.Response:
+    """Serve history like Air4Thai: rows inside the retained window, else 200 with no rows."""
+    if "getHistoryData" not in str(request.url):
+        return _handler(request)
+    q = request.url.params
+    archive = load(RETAINED)
+    rows = [
+        r for r in archive["stations"][0]["data"] if q["sdate"] <= r["DATETIC"][:10] <= q["edate"]
+    ]
+    if not rows:
+        return httpx.Response(200, json=load("air4thai_history_empty.json"))
+    archive["stations"][0]["data"] = rows
+    return httpx.Response(200, json=archive)
+
+
+def test_retention_detected_from_empty_old_chunks(tmp_path: Path) -> None:
+    report = p.run(
+        tmp_path / "r",
+        days=62,
+        chunk_days=10,
+        pause=0,
+        now=NOW,
+        client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_retention_handler)),
+    )
+    h = report["air4thai_history"]
+    assert h["stations"]["02t"]["chunks_empty"] == 4  # Nov 1 .. Dec 11 local: 200, no rows
+    assert h["stations"]["02t"]["chunks_with_rows"] == 3
+    assert h["stations"]["02t"]["chunks_failed"] == 0
+    assert h["earliest"] == EARLIEST
+    assert h["latest"] == datetime(2026, 1, 2, 11, tzinfo=UTC)
+    assert h["retention_days"] == 13.8  # EARLIEST -> NOW (requested end)
+    assert h["requested_days"] == 62.0
+    assert h["truncated"] and h["rolling_window"]
+    assert h["missing_pct_in_window"] == {"02t": 0.3}  # 1 null hour in 331
+    assert h["stations"]["02t"]["missing_pct_requested"] == 77.82  # 330 of 1488 hours
+    assert h["complete_in_window"] == ["02t"]
+    assert report["target_stations"][0]["missing_pct_in_window"] == 0.3
+    hist = next(x for x in report["probes"] if x["name"] == "air4thai_history_endpoint")
+    assert hist["detail"]["requests_ok_empty"] == 4
+    d = report["decision"]
+    assert d["decision"] == "NO-GO"  # thresholds and logic unchanged
+    assert d["reason"].startswith(
+        "Air4Thai history is a rolling ~14-day window (earliest 2025-12-19T17:00:00+00:00; "
+        "4 chunk requests returned HTTP 200 with no rows); 2-year (>= 700-day) backfill "
+        "impossible from Air4Thai; stations complete within window (<= 15.0% missing): 02t; "
+    )
+    assert "neither source meets the bar (0 good Air4Thai stations" in d["reason"]
+    md = (tmp_path / "r.md").read_text()
+    assert "## Air4Thai history retention" in md
+    assert "| 02t | 3 | 4 | 0 | 2025-12-19 17:00:00+00:00 | 77.82 | 0.3 |" in md
+    assert "Rolling retention window detected: True" in md
+
+
+def _hist_cov(
+    first: datetime, hours: int, empty: int, start: datetime, end: datetime
+) -> p.Coverage:
+    series: dict[datetime, float | None] = {first + timedelta(hours=h): 1.0 for h in range(hours)}
+    cov = p.compute_coverage(series, start, end)
+    return cov.model_copy(update={"chunks_empty": empty, "chunks_with_rows": 1})
+
+
+def test_summarize_history_pure() -> None:
+    end = datetime(2026, 10, 26, tzinfo=UTC)
+    start = end - timedelta(days=730)
+    first = datetime(2026, 7, 31, 17, tzinfo=UTC)
+    full = int((end - first).total_seconds() // 3600)
+    cov = {
+        "59t": _hist_cov(first, full, 21, start, end),
+        "bad": _hist_cov(first, full // 2, 21, start, end),
+    }
+    r = p.summarize_history(cov)
+    assert r.earliest == first and r.retention_days == 86.3
+    assert r.missing_pct_in_window == {"59t": 0.0, "bad": 50.02}  # 1035 of 2071 hours
+    assert r.complete_in_window == ["59t"]
+    assert r.rolling_window and r.chunks_empty == 42
+    assert cov["59t"].missing_pct > 85  # the old "missing 88%" measure, still reported
+    text = p.retention_text(r)
+    assert "rolling ~86-day window (earliest 2026-07-31T17:00:00+00:00" in text
+    assert text.endswith("stations complete within window (<= 15.0% missing): 59t")
+    # no retention diagnosis when history covers the requested window or nothing came back
+    whole = {"a": _hist_cov(start, 730 * 24, 0, start, end)}
+    assert not p.summarize_history(whole).truncated
+    assert p.retention_text(p.summarize_history(whole)) == ""
+    assert p.retention_text(p.summarize_history({})) == ""
+    assert p.decide({"a": _cov(10, 50)}, [], NOW)["reason"].startswith("neither source")
+    # truncated but old chunks failed instead of returning empty: not called "rolling"
+    failed = {"a": cov["59t"].model_copy(update={"chunks_empty": 0, "chunks_failed": 3})}
+    assert "only a ~86-day window" in p.retention_text(p.summarize_history(failed))
+    assert p.render_history_markdown({}) == []

@@ -74,6 +74,8 @@ def build_verify(ca_bundle: str | Path | None = None) -> ssl.SSLContext | bool:
     if not path.is_file():
         raise FileNotFoundError(f"CA bundle not found: {path}")
     context = httpx.create_ssl_context(verify=True)
+    # Python 3.13+ turns partial-chain on by default; force it off so bundle certs never anchor.
+    context.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
     context.load_verify_locations(cafile=str(path))
     return context
 

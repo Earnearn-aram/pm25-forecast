@@ -37,6 +37,11 @@ body carries both `text` and `content`). Without it, alerts are logged only, wit
 (`docs/heartbeat-workflow.yml.txt`). Each run logs one `RUN_SUMMARY {json}` line; log timestamps
 are UTC.
 
+Backfill (KAN-12 part 1, KAN-34): `uv run python -m pm25_forecast.backfill [--lookback-days 120]
+[--stations 59t,61t]` upserts whatever hourly history Air4Thai still holds (a rolling window of
+about 3 months) into `observations`. Same settings as the collector; idempotent, so it runs daily
+as gap recovery. Workflow draft: `docs/backfill-workflow.yml.txt`.
+
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).
 
