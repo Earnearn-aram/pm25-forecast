@@ -26,15 +26,9 @@ from typing import Any
 
 import httpx
 
-from pm25_forecast.collector import (
-    MAX_FUTURE_SKEW,
-    ConfigError,
-    _safe_alert,
-    as_utc,
-    make_alert,
-    open_db,
-)
+from pm25_forecast.collector import MAX_FUTURE_SKEW, ConfigError, as_utc, open_db
 from pm25_forecast.ingest.air4thai import HISTORY_PAUSE_S, Air4ThaiClient, Observation
+from pm25_forecast.monitoring.alerts import make_alert, safe_alert
 from pm25_forecast.settings import Settings, get_settings
 from pm25_forecast.storage import db, sql
 from pm25_forecast.storage.guard import RunSkipped, run_entrypoint
@@ -231,19 +225,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except ConfigError as exc:  # messages never contain secret values
         logger.error("configuration error: %s", exc)
-        _safe_alert(alert, f"backfill configuration error: {exc}")
+        safe_alert(alert, f"backfill configuration error: {exc}")
         return EXIT_CONFIG
     except Exception as exc:  # a crash must be red and alerted, with the type only
         logger.exception("backfill crashed")
-        _safe_alert(alert, f"backfill crashed: {type(exc).__name__}")
+        safe_alert(alert, f"backfill crashed: {type(exc).__name__}")
         return EXIT_FAILED
     if isinstance(result, RunSkipped):
         return code
     if result.total_failure:
-        _safe_alert(alert, "backfill failed: no usable rows from any station")
+        safe_alert(alert, "backfill failed: no usable rows from any station")
         return EXIT_FAILED
     if result.failures:
-        _safe_alert(alert, "backfill completed with problems: " + "; ".join(result.failures))
+        safe_alert(alert, "backfill completed with problems: " + "; ".join(result.failures))
     return code
 
 
