@@ -47,6 +47,11 @@ SELECT_LAST_OBSERVATION_TS = """
 SELECT station_id, max(ts) FROM observations WHERE source = %(source)s GROUP BY station_id
 """
 
+# Heartbeat (KAN-19): observations whose data timestamp is at or after `since`.
+SELECT_OBSERVATION_COUNT_SINCE = """
+SELECT count(*) FROM observations WHERE source = %(source)s AND ts >= %(since)s
+"""
+
 # Backfill (KAN-12): rows already stored for a station in a range, to report how many were new.
 COUNT_OBSERVATIONS_IN_RANGE = """
 SELECT count(*) FROM observations
