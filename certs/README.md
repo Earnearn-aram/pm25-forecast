@@ -1,8 +1,8 @@
 # certs/
 
-Placeholder for an optional extra CA bundle for Air4Thai (KAN-35). **No certificate is committed
-yet.** Nothing here is a secret (CA certificates are public), but only add a PEM that was obtained
-and reviewed by the owner.
+Extra CA bundle for Air4Thai (KAN-35). `air4thai-ca.pem` was verified and committed on 2026-10-27
+(KAN-43); `tests/test_ca_bundle.py` pins its fingerprints. Nothing here is a secret (CA certificates
+are public), but only add a PEM that was obtained and reviewed by the owner.
 
 How it gets here:
 
@@ -33,3 +33,21 @@ certificate in the report, the certificate must not be expired, and `openssl ver
 `OK` (the intermediate chains to a root in the normal trust store). Do not commit a PEM that fails
 any check. The client does not treat the bundle as a trust anchor: the chain must still end at a
 root in the default trust store.
+
+## How the committed bundle was verified (2026-10-27, KAN-43)
+
+The committed `air4thai-ca.pem` came from the official files served over HTTPS at
+`https://letsencrypt.org/certs/gen-y/` (int-yr1/2/3 and root-yr-by-x1). They were cross-checked
+against the fingerprints in the probe report for YR1 and Root YR. YR1 has no self-signed root in
+the default stores yet, so verify each intermediate through the cross-signed Root YR:
+
+```bash
+openssl verify -no-CApath -no-CAstore -CAfile "$(python -m certifi)" \
+  -untrusted root-yr-by-x1.pem int-yr1.pem
+```
+
+YR2 and YR3 are included because Let's Encrypt may issue the next Air4Thai leaf from any of them.
+Known gap: ECDSA intermediates (YE1-3, via Root YE / ISRG Root X2) are not included. Add them if
+Air4Thai moves to an ECDSA key. Remove the bundle once Air4Thai serves a correct chain (the probe's
+default-trust-store handshake passes without it). `tests/test_ca_bundle.py` pins the fingerprints,
+re-checks the chains and fails 90 days before any certificate expires.
