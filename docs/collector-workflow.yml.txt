@@ -10,7 +10,7 @@
 # Cost: 3 runs/hour is about 2,200 runs/month. Each should take 1-2 minutes: check the repo
 # visibility (public repos have free Actions minutes; private ones draw on the plan's quota) and
 # lower the frequency if minutes run short.
-# Follow-ups, not in this file: heartbeat ping (KAN-30), TLS fix for Air4Thai (separate ticket).
+# Follow-ups, not in this file: heartbeat ping (KAN-30). Air4Thai TLS: AIR4THAI_CA_BUNDLE (KAN-43).
 # Notes: GitHub cron is best effort (10-40 min late, sometimes skipped) and scheduled workflows are
 # disabled after 60 days without repo activity; the collector keys on data timestamps, so late or
 # doubled runs are safe. Air4Thai only exposes its latest reading, so we poll every 20 minutes
@@ -51,6 +51,7 @@ jobs:
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
           RAW_ARCHIVE_DIR: raw
+          AIR4THAI_CA_BUNDLE: certs/air4thai-ca.pem # verified intermediates (KAN-43)
         run: uv run --no-dev python -m pm25_forecast.collector
       - name: Upload raw-response archive (first weeks only)
         if: always()

@@ -1,8 +1,8 @@
 # certs/
 
-Placeholder for an optional extra CA bundle for Air4Thai (KAN-35). **No certificate is committed
-yet.** Nothing here is a secret (CA certificates are public), but only add a PEM that was obtained
-and reviewed by the owner.
+Extra CA bundle for Air4Thai (KAN-35). `air4thai-ca.pem` was verified and committed on 2026-10-27
+(KAN-43); `tests/test_ca_bundle.py` pins its fingerprints. Nothing here is a secret (CA certificates
+are public), but only add a PEM that was obtained and reviewed by the owner.
 
 How it gets here:
 
