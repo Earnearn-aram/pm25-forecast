@@ -47,6 +47,12 @@ SELECT_LAST_OBSERVATION_TS = """
 SELECT station_id, max(ts) FROM observations WHERE source = %(source)s GROUP BY station_id
 """
 
+# Backfill (KAN-12): rows already stored for a station in a range, to report how many were new.
+COUNT_OBSERVATIONS_IN_RANGE = """
+SELECT count(*) FROM observations
+WHERE station_id = %(station_id)s AND ts >= %(start)s AND ts <= %(end)s
+"""
+
 SELECT_LATEST_VINTAGE = """
 SELECT issue_time, valid_time, pm25_pred FROM predictions
 WHERE station_id = %(station_id)s AND model_version = %(model_version)s

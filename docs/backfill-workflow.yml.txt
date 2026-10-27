@@ -1,0 +1,59 @@
+# DRAFT for KAN-12 part 1 / KAN-34. The agent token has no `workflow` scope, so this is committed
+# as text. Owner: copy to .github/workflows/backfill.yml (drop the .txt), then:
+#   1. Merge PR #8 (KAN-43) first: it adds certs/air4thai-ca.pem, which AIR4THAI_CA_BUNDLE below
+#      points at. Without that file every run fails with "CA bundle not found".
+#   2. Same secrets/variables as the collector: secrets DATABASE_URL, ALERT_WEBHOOK_URL; variable
+#      STATION_LOCATIONS (the backfill uses only the ids, e.g. 59t, 61t, bkp100t, bkp101t, 02t).
+#   3. Run it once with "Run workflow" (workflow_dispatch) and read the per-station log lines
+#      (rows fetched / upserted / new, earliest and latest ts, empty and failed chunks) before
+#      relying on cron. Do this before 2026-11-01 (Bangkok): if Air4Thai keeps "current month + 2
+#      previous months", August drops out of the window that day.
+# What it does: fetches now-120 days .. now per station from getHistoryData.php in chunks of at
+# most 31 days with a pause between requests, and upserts into observations on (station_id, ts).
+# Re-runs and overlaps with the collector never duplicate rows, so the daily run is also gap
+# recovery for the collector (which only sees each station's latest reading).
+# Exit code: non-zero only on total failure (no usable rows from any station), DB down, or a
+# configuration error; a partial failure is logged and alerted but the job stays green.
+# Cost: one run/day, about 20 requests and 1-3 minutes.
+name: Backfill
+
+on:
+  schedule:
+    - cron: "37 1 * * *" # daily 01:37 UTC = 08:37 Bangkok, off the collector's minutes
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Days back from now to request (Air4Thai keeps about 3 months)"
+        required: false
+        default: "120"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # normal run is a few minutes; retries on a slow host can add more
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Backfill
+        # Secrets come in through env only; they are never echoed or put on a command line.
+        # The input goes through env too (not interpolated into the script).
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
+          AIR4THAI_CA_BUNDLE: certs/air4thai-ca.pem
+          LOOKBACK_DAYS: ${{ inputs.lookback_days || '120' }}
+        run: uv run --no-dev python -m pm25_forecast.backfill --lookback-days "$LOOKBACK_DAYS"

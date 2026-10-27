@@ -1,0 +1,16 @@
+{"result":"OK","error":"","stations":[
+ {"stationID":"OTHER","data":[{"DATETIMEDATA":"2026-10-01 06:00:00","PM25":999}]},
+ {"stationID":"59t","params":["PM25"],"data":[
+  {"DATETIMEDATA":"2026-09-30 23:00:00","PM25":20.5},
+  {"DATETIMEDATA":"2026-10-01 06:00:00","PM25":"21"},
+  {"DATETIC":"2026-10-01 07:00:00","PM25":22},
+  {"DATETIMEDATA":"2026-10-01 08:00:00","PM25":null},
+  {"DATETIMEDATA":"2026-10-01 09:00:00","PM25":"-"},
+  {"DATETIMEDATA":"2026-10-01 10:00:00","PM25":-1},
+  {"DATETIMEDATA":"2026-10-01 11:00:00","PM25":{"value":"25.5"}},
+  {"DATETIMEDATA":"not a date","PM25":1},
+  {"PM25":2},
+  "garbage",
+  {"DATETIMEDATA":"2026-10-01 12:00:00","PM25":26,"NEW_FIELD":"x"}
+ ]}
+]}
