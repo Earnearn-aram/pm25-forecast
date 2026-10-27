@@ -1,0 +1,60 @@
+# DRAFT for KAN-19. The agent token has no `workflow` scope, so this is committed as text.
+# Owner: copy to .github/workflows/heartbeat.yml (drop the .txt). It uses the same repo secrets
+# (DATABASE_URL, ALERT_WEBHOOK_URL) and variable (STATION_LOCATIONS) as the collector workflow.
+# Run it once with "Run workflow" (workflow_dispatch) and check the message arrives.
+#
+# Once a day it posts one line to ALERT_WEBHOOK_URL: observation rows with a timestamp in the last
+# 24 h and the newest observation per station (stations over 3 h old are marked STALE). If the
+# database is unreachable it alerts instead; zero rows in 24 h is also sent as an alert. Both make
+# the job red, so the last step adds a job-failure alert with the run link.
+# A missing heartbeat (this workflow not running at all) is NOT detected here: that needs an
+# external dead-man switch (KAN-30). GitHub disables scheduled workflows after 60 days without
+# repo activity, which would silence this too.
+name: Heartbeat
+
+on:
+  schedule:
+    - cron: "17 1 * * *" # 01:17 UTC = 08:17 Bangkok; off the hour to avoid the busiest minute
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Heartbeat
+        # Secrets come in through env only; they are never echoed or put on a command line.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
+        run: uv run --no-dev python -m pm25_forecast.monitoring.heartbeat
+      # Same failure step as the collector workflow (see the comments there).
+      - name: Alert on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          uv run --no-dev python -m pm25_forecast.monitoring.notify failure && exit 0
+          [ -n "$ALERT_WEBHOOK_URL" ] || { echo "ALERT_WEBHOOK_URL is not set"; exit 0; }
+          msg="[pm25 ci] ${JOB_STATUS:-failure} (fallback): workflow ${GITHUB_WORKFLOW}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -

@@ -47,6 +47,11 @@ SELECT_LAST_OBSERVATION_TS = """
 SELECT station_id, max(ts) FROM observations WHERE source = %(source)s GROUP BY station_id
 """
 
+# Heartbeat (KAN-19): observations whose data timestamp is at or after `since`.
+SELECT_OBSERVATION_COUNT_SINCE = """
+SELECT count(*) FROM observations WHERE source = %(source)s AND ts >= %(since)s
+"""
+
 SELECT_LATEST_VINTAGE = """
 SELECT issue_time, valid_time, pm25_pred FROM predictions
 WHERE station_id = %(station_id)s AND model_version = %(model_version)s

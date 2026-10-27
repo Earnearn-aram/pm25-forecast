@@ -30,6 +30,13 @@ cp .env.example .env        # optional: local settings, never commit .env
 Collector (KAN-18): `uv run python -m pm25_forecast.collector` needs `DATABASE_URL` and
 `STATION_LOCATIONS` (see `.env.example`). The workflow draft (every 20 minutes) is `docs/collector-workflow.yml.txt`.
 
+Alerts and heartbeat (KAN-19): everything goes to `ALERT_WEBHOOK_URL` (Telegram or Discord; the
+body carries both `text` and `content`). Without it, alerts are logged only, with a warning.
+`python -m pm25_forecast.monitoring.notify failure` is the workflows' `if: failure()` step;
+`python -m pm25_forecast.monitoring.heartbeat` posts a daily one-line summary
+(`docs/heartbeat-workflow.yml.txt`). Each run logs one `RUN_SUMMARY {json}` line; log timestamps
+are UTC.
+
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).
 

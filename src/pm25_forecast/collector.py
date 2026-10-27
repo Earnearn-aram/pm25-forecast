@@ -59,6 +59,8 @@ from pm25_forecast.ingest.open_meteo import (
     _RetryableError,
     to_prediction_rows,
 )
+from pm25_forecast.monitoring.alerts import make_alert, safe_alert
+from pm25_forecast.monitoring.logs import configure_logging, log_summary
 from pm25_forecast.settings import Settings, get_settings
 from pm25_forecast.storage import db, sql
 from pm25_forecast.storage.guard import RunSkipped, run_entrypoint
@@ -161,25 +163,6 @@ def gzip_open_meteo_archive(directory: Path) -> Callable[[RawResponse], None]:
         path.write_bytes(gzip.compress(raw.model_dump_json().encode()))
 
     return archive
-
-
-def make_alert(webhook_url: str | None) -> Callable[[str], None]:
-    """Alert function posting ``{"text": ...}`` to the webhook; without one it logs at ERROR.
-
-    The webhook URL is a secret: failures are re-raised without the URL (httpx puts it in its
-    messages) so the guard's traceback logging cannot leak it.
-    """
-
-    def alert(message: str) -> None:
-        logger.error("ALERT: %s", message)
-        if not webhook_url:
-            return
-        try:
-            httpx.post(webhook_url, json={"text": f"[pm25 collector] {message}"}, timeout=10.0)
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"alert webhook failed: {type(exc).__name__}") from None
-
-    return alert
 
 
 def default_run_id(now: datetime) -> str:
@@ -339,15 +322,6 @@ def open_db(connect: Callable[[str], Any], url: str) -> Any:
         raise ConfigError("DATABASE_URL is malformed") from None
 
 
-def _safe_alert(alert: Callable[[str], None] | None, message: str) -> None:
-    if alert is None:
-        return
-    try:
-        alert(message)
-    except Exception:
-        logger.exception("alert failed: %s", message)
-
-
 def run(
     settings: Settings,
     *,
@@ -391,9 +365,9 @@ def run(
     with open_db(connect, url) as con:
         write_observations(con, observations, station_ids, now, result)
     for gap in result.gaps:
-        _safe_alert(alert, f"gap in Air4Thai data: {gap}")
+        safe_alert(alert, f"gap in Air4Thai data: {gap}")
     if result.newly_stale_stations:
-        _safe_alert(
+        safe_alert(
             alert,
             f"stations with no reading for over {STALE_AFTER}: "
             + ", ".join(result.newly_stale_stations),
@@ -419,25 +393,28 @@ def run(
         with open_db(connect, url) as con:
             write_cams(con, cams, result)
 
-    logger.info(
-        "run %s: %d observations upserted (%d dropped), %d predictions written, "
-        "%d CAMS repeats skipped, %d gaps, %d failures",
-        run_id,
-        result.observations_upserted,
-        result.observations_dropped,
-        result.predictions_written,
-        len(result.cams_duplicates_skipped),
-        len(result.gaps),
-        len(result.failures),
+    log_summary(
+        logger,
+        "collector",
+        {
+            "run_id": run_id,
+            "status": "failed" if result.failures else "ok",
+            "started_at": now,
+            "finished_at": clock(),
+            "observations_upserted": result.observations_upserted,
+            "observations_dropped": result.observations_dropped,
+            "predictions_written": result.predictions_written,
+            "cams_repeats_skipped": len(result.cams_duplicates_skipped),
+            "gaps": len(result.gaps),
+            "stale_stations": result.stale_stations,
+            "failures": result.failures,
+        },
     )
     return result
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines log full request URLs
+    configure_logging()  # UTC timestamps; quietens httpx, whose INFO lines log full URLs
     alert = make_alert(None)  # replaced once settings are read; until then ERROR log only
     try:
         settings = get_settings()
@@ -450,16 +427,19 @@ def main() -> int:
         )
     except ConfigError as exc:  # messages never contain secret values
         logger.error("configuration error: %s", exc)
-        _safe_alert(alert, f"configuration error: {exc}")
+        safe_alert(alert, f"configuration error: {exc}")
+        log_summary(logger, "collector", {"status": "config_error"})
         return EXIT_CONFIG
     except Exception as exc:  # a crash must be red and alerted, with the type only
         logger.exception("collector crashed")
-        _safe_alert(alert, f"collector crashed: {type(exc).__name__}")
+        safe_alert(alert, f"collector crashed: {type(exc).__name__}")
+        log_summary(logger, "collector", {"status": "crashed", "error": type(exc).__name__})
         return EXIT_FAILED
-    if isinstance(result, RunSkipped):
+    if isinstance(result, RunSkipped):  # DB down: the guard has already alerted
+        log_summary(logger, "collector", {"status": "db_unreachable"})
         return code
     if result.failures:
-        _safe_alert(alert, "run completed with failures: " + "; ".join(result.failures))
+        safe_alert(alert, "run completed with failures: " + "; ".join(result.failures))
         return EXIT_FAILED
     return code
 
