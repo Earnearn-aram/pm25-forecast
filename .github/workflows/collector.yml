@@ -1,0 +1,62 @@
+# DRAFT for KAN-18. The agent token has no `workflow` scope, so this is committed as text.
+# Owner: copy to .github/workflows/collector.yml (drop the .txt), then:
+#   1. Repo secrets: DATABASE_URL (Neon), ALERT_WEBHOOK_URL. Repo variable: STATION_LOCATIONS
+#      (not secret), e.g. "ID1=13.75,100.50;ID2=13.80,100.55" once KAN-9 picks the stations.
+#   2. Apply src/pm25_forecast/storage/schema.sql to the database once.
+#   3. All actions are pinned by commit sha (checkout and setup-uv copied from ci.yml;
+#      upload-artifact v7.0.2 looked up from the tag, KAN-38).
+#   4. Run it once with "Run workflow" (workflow_dispatch) and check the log before relying on cron.
+# Cost: 3 runs/hour is about 2,200 runs/month. Each should take 1-2 minutes: check the repo
+# visibility (public repos have free Actions minutes; private ones draw on the plan's quota) and
+# lower the frequency if minutes run short.
+# Follow-ups, not in this file: heartbeat ping (KAN-30). Air4Thai TLS: AIR4THAI_CA_BUNDLE (KAN-43).
+# Notes: GitHub cron is best effort (10-40 min late, sometimes skipped) and scheduled workflows are
+# disabled after 60 days without repo activity; the collector keys on data timestamps, so late or
+# doubled runs are safe. Air4Thai only exposes its latest reading, so we poll every 20 minutes
+# (upserts are idempotent, CAMS repeats are deduped); anything still missed is flagged by the gap
+# check, not recovered (true backfill: KAN-34).
+name: Collector
+
+on:
+  schedule:
+    - cron: "7,27,47 * * * *" # every 20 minutes, off the hour to avoid the busiest minute
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time. Do not cancel a running job: a half-finished run would skip its writes.
+concurrency:
+  group: collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # normal run is well under 2 minutes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Collect
+        # Secrets come in through env only; they are never echoed or put on a command line.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
+          RAW_ARCHIVE_DIR: raw
+          AIR4THAI_CA_BUNDLE: certs/air4thai-ca.pem # verified intermediates (KAN-43)
+        run: uv run --no-dev python -m pm25_forecast.collector
+      - name: Upload raw-response archive (first weeks only)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: raw-${{ github.run_id }}
+          path: raw/
+          retention-days: 14
+          if-no-files-found: ignore
