@@ -62,6 +62,8 @@ MAX_STATIONS = 5
 MIN_HISTORY_DAYS = 700  # "2+ years" with a little slack
 MAX_MISSING_PCT = 15.0
 MATCH_RADIUS_M = 1000.0
+# Data starting this much later than the requested start counts as "truncated at the start".
+RETENTION_SLACK = timedelta(days=1)
 
 
 class Station(BaseModel):
@@ -87,6 +89,31 @@ class Coverage(BaseModel):
     last: datetime | None = None
     span_days: float = 0.0
     longest_gap_hours: int = 0
+    start: datetime | None = None  # requested window [start, end), UTC
+    end: datetime | None = None
+    # Air4Thai history chunk outcomes (set by probe_air4thai).
+    chunks_with_rows: int = 0
+    chunks_empty: int = 0  # HTTP 200 but zero parsed rows
+    chunks_failed: int = 0
+
+
+class HistoryRetention(BaseModel):
+    """How much Air4Thai history the endpoint actually serves, across probed stations."""
+
+    requested_start: datetime | None = None
+    requested_end: datetime | None = None
+    requested_days: float = 0.0
+    earliest: datetime | None = None  # earliest hour with data across stations
+    latest: datetime | None = None
+    retention_days: float = 0.0  # earliest -> requested end
+    truncated: bool = False  # data starts well after the requested start
+    rolling_window: bool = False  # truncated, and the old chunks came back 200 with no rows
+    chunks_with_rows: int = 0
+    chunks_empty: int = 0
+    chunks_failed: int = 0
+    # station id -> missing % over [earliest, requested end) (the available window)
+    missing_pct_in_window: dict[str, float] = Field(default_factory=dict)
+    complete_in_window: list[str] = Field(default_factory=list)
 
 
 class Probe(BaseModel):
@@ -193,6 +220,63 @@ def compute_coverage(
         last=unique[-1] if unique else None,
         span_days=round((unique[-1] - unique[0]).total_seconds() / 86400, 1) if unique else 0.0,
         longest_gap_hours=longest,
+        start=start,
+        end=end,
+    )
+
+
+def summarize_history(station_cov: dict[str, Coverage]) -> HistoryRetention:
+    """Diagnose Air4Thai history retention from per-station coverage (pure).
+
+    The available window is [earliest hour with data across stations, requested end). Missing %
+    inside it separates "the endpoint only keeps N days" from "the stations are bad".
+    """
+    covs = list(station_cov.values())
+    starts = [c.start for c in covs if c.start]
+    ends = [c.end for c in covs if c.end]
+    firsts = [c.first for c in covs if c.first]
+    lasts = [c.last for c in covs if c.last]
+    req_start = min(starts) if starts else None
+    req_end = max(ends) if ends else None
+    earliest = min(firsts) if firsts else None
+    out = HistoryRetention(
+        requested_start=req_start,
+        requested_end=req_end,
+        requested_days=round((req_end - req_start).total_seconds() / 86400, 1)
+        if req_start and req_end
+        else 0.0,
+        earliest=earliest,
+        latest=max(lasts) if lasts else None,
+        chunks_with_rows=sum(c.chunks_with_rows for c in covs),
+        chunks_empty=sum(c.chunks_empty for c in covs),
+        chunks_failed=sum(c.chunks_failed for c in covs),
+    )
+    if earliest is None or req_end is None:
+        return out
+    window_hours = max(int((req_end - earliest).total_seconds() // 3600), 0)
+    out.retention_days = round((req_end - earliest).total_seconds() / 86400, 1)
+    out.truncated = req_start is not None and earliest > req_start + RETENTION_SLACK
+    out.rolling_window = out.truncated and out.chunks_empty > 0
+    for sid, c in sorted(station_cov.items()):
+        pct = 100.0 if window_hours == 0 else 100.0 * (1 - c.hours_with_data / window_hours)
+        out.missing_pct_in_window[sid] = round(max(pct, 0.0), 2)
+    out.complete_in_window = [
+        sid for sid, pct in out.missing_pct_in_window.items() if pct <= MAX_MISSING_PCT
+    ]
+    return out
+
+
+def retention_text(r: HistoryRetention) -> str:
+    """One-line diagnosis of Air4Thai history retention, or "" when it does not apply."""
+    if not r.truncated or r.earliest is None:
+        return ""
+    kind = "a rolling" if r.rolling_window else "only a"
+    complete = ", ".join(r.complete_in_window) or "none"
+    return (
+        f"Air4Thai history is {kind} ~{r.retention_days:.0f}-day window "
+        f"(earliest {r.earliest.isoformat()}; {r.chunks_empty} chunk requests returned HTTP 200 "
+        f"with no rows); 2-year (>= {MIN_HISTORY_DAYS}-day) backfill impossible from Air4Thai; "
+        f"stations complete within window (<= {MAX_MISSING_PCT}% missing): {complete}"
     )
 
 
@@ -306,17 +390,19 @@ def decide(
         }
     cutoff = now - timedelta(days=MIN_HISTORY_DAYS)
     deep = [loc for loc in openaq if loc.first and loc.first <= cutoff]
+    why = retention_text(summarize_history(station_cov))
+    why = f"{why}; " if why else ""
     if len(deep) >= MIN_STATIONS:
         return {
             "decision": "GO-openaq",
-            "reason": f"Air4Thai history insufficient ({len(good)} good stations); "
+            "reason": f"{why}Air4Thai history insufficient ({len(good)} good stations); "
             f"{len(deep)} OpenAQ Bangkok PM2.5 locations start >= {MIN_HISTORY_DAYS} days ago",
         }
     if not station_cov and not openaq:
         return {"decision": "UNDETERMINED", "reason": "no source returned usable data"}
     return {
         "decision": "NO-GO",
-        "reason": f"neither source meets the bar ({len(good)} good Air4Thai stations, "
+        "reason": f"{why}neither source meets the bar ({len(good)} good Air4Thai stations, "
         f"{len(deep)} deep OpenAQ locations); consider PCD report downloads",
     }
 
@@ -366,6 +452,7 @@ def probe_air4thai(
     chunk_ok = chunk_total = 0
     for s in stations[:12]:
         series: dict[datetime, float | None] = {}
+        counts = {"chunks_with_rows": 0, "chunks_empty": 0, "chunks_failed": 0}
         for a, b in _chunks(start, end, chunk_days):
             local_a, local_b = a + BKK_TZ, b + BKK_TZ
             p, data = _get(
@@ -384,14 +471,20 @@ def probe_air4thai(
             )
             chunk_total += 1
             chunk_ok += int(p.ok)
-            if p.ok:
-                series.update(parse_air4thai_history(data))
+            rows = parse_air4thai_history(data) if p.ok else {}
+            series.update(rows)
+            key = "chunks_failed" if not p.ok else "chunks_with_rows" if rows else "chunks_empty"
+            counts[key] += 1
             history_probe.status = p.status
             history_probe.error = p.error or history_probe.error
             time.sleep(pause)
-        coverage[s.station_id] = compute_coverage(series, start, end)
+        coverage[s.station_id] = compute_coverage(series, start, end).model_copy(update=counts)
     history_probe.ok = chunk_ok > 0 and any(c.hours_with_data for c in coverage.values())
-    history_probe.detail = {"requests_ok": chunk_ok, "requests_total": chunk_total}
+    history_probe.detail = {
+        "requests_ok": chunk_ok,
+        "requests_total": chunk_total,
+        "requests_ok_empty": sum(c.chunks_empty for c in coverage.values()),
+    }
     probes.append(history_probe)
     return probes, stations, coverage
 
@@ -485,9 +578,24 @@ def build_report(
     ranked = sorted(coverage.items(), key=lambda kv: kv[1].missing_pct)
     chosen = [sid for sid, _ in ranked[:MAX_STATIONS]]
     by_id = {s.station_id: s for s in stations}
+    retention = summarize_history(coverage)
     return {
         "generated_at": now.isoformat(),
         "decision": decide(coverage, openaq, now),
+        "air4thai_history": {
+            **retention.model_dump(),
+            "stations": {
+                sid: {
+                    "chunks_with_rows": c.chunks_with_rows,
+                    "chunks_empty": c.chunks_empty,
+                    "chunks_failed": c.chunks_failed,
+                    "first": c.first,
+                    "missing_pct_requested": c.missing_pct,
+                    "missing_pct_in_window": retention.missing_pct_in_window.get(sid),
+                }
+                for sid, c in sorted(coverage.items())
+            },
+        },
         "target_stations": [
             {
                 "station_id": sid,
@@ -495,6 +603,7 @@ def build_report(
                 "area": by_id[sid].area,
                 "hours_available": coverage[sid].hours_with_data,
                 "missing_pct": coverage[sid].missing_pct,
+                "missing_pct_in_window": retention.missing_pct_in_window.get(sid),
                 "first": coverage[sid].first,
                 "last": coverage[sid].last,
                 "span_days": coverage[sid].span_days,
@@ -520,13 +629,15 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Generated: {report['generated_at']}",
         f"**Decision: {d['decision']}**: {d['reason']}",
         "",
-        "| Station | Name | Hours | Missing % | First (UTC) | Last (UTC) | Span (d) | OpenAQ id |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Station | Name | Hours | Missing % (requested) | Missing % (available window) "
+        "| First (UTC) | Last (UTC) | Span (d) | OpenAQ id |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for s in report["target_stations"]:
         lines.append(
             f"| {s['station_id']} | {s['name']} | {s['hours_available']} | {s['missing_pct']} "
-            f"| {s['first']} | {s['last']} | {s['span_days']} | {s['openaq_location_id']} |"
+            f"| {s.get('missing_pct_in_window')} | {s['first']} | {s['last']} | {s['span_days']} "
+            f"| {s['openaq_location_id']} |"
         )
     same = report["openaq_same_stations"]
     lines += [
@@ -534,12 +645,40 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"OpenAQ matches within {MATCH_RADIUS_M:.0f} m: {same['matched']}/{same['of']}",
         "",
     ]
+    lines += render_history_markdown(report.get("air4thai_history") or {})
     lines += ["| Probe | OK | HTTP | Detail |", "|---|---|---|---|"]
     for p in report["probes"]:
         detail = p["error"] or json.dumps(p["detail"], default=str)
         lines.append(f"| {p['name']} | {p['ok']} | {p['status']} | {detail} |")
     lines += render_tls_markdown(report.get("air4thai_tls") or {})
     return "\n".join(lines) + "\n"
+
+
+def render_history_markdown(h: dict[str, Any]) -> list[str]:
+    """The Air4Thai history-retention section: what the endpoint serves vs what was asked."""
+    if not h or not h.get("stations"):
+        return []
+    lines = [
+        "## Air4Thai history retention",
+        "",
+        f"Requested: {h.get('requested_start')} to {h.get('requested_end')} UTC "
+        f"({h.get('requested_days')} days)",
+        f"Earliest available (any station): {h.get('earliest')}; latest: {h.get('latest')}; "
+        f"retention: {h.get('retention_days')} days",
+        f"Chunk requests: {h.get('chunks_with_rows')} with rows, {h.get('chunks_empty')} "
+        f"HTTP 200 with zero rows, {h.get('chunks_failed')} failed",
+        f"Rolling retention window detected: {h.get('rolling_window')}",
+        "",
+        "| Station | Chunks with rows | Chunks 200 + empty | Chunks failed | First (UTC) "
+        "| Missing % (requested) | Missing % (available window) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for sid, s in h["stations"].items():
+        lines.append(
+            f"| {sid} | {s['chunks_with_rows']} | {s['chunks_empty']} | {s['chunks_failed']} "
+            f"| {s['first']} | {s['missing_pct_requested']} | {s['missing_pct_in_window']} |"
+        )
+    return [*lines, ""]
 
 
 def _presented_text(count: int | None) -> str:
