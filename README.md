@@ -30,6 +30,11 @@ cp .env.example .env        # optional: local settings, never commit .env
 Collector (KAN-18): `uv run python -m pm25_forecast.collector` needs `DATABASE_URL` and
 `STATION_LOCATIONS` (see `.env.example`). The workflow draft (every 20 minutes) is `docs/collector-workflow.yml.txt`.
 
+Backfill (KAN-12 part 1, KAN-34): `uv run python -m pm25_forecast.backfill [--lookback-days 120]
+[--stations 59t,61t]` upserts whatever hourly history Air4Thai still holds (a rolling window of
+about 3 months) into `observations`. Same settings as the collector; idempotent, so it runs daily
+as gap recovery. Workflow draft: `docs/backfill-workflow.yml.txt`.
+
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).
 

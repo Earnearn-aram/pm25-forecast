@@ -1,4 +1,4 @@
-"""Air4Thai (PCD Thailand) ingestion client for the ``getNewAQI_JSON`` endpoint.
+"""Air4Thai (PCD Thailand) ingestion client: ``getNewAQI_JSON`` (latest) and history (KAN-12/34).
 
 The API is undocumented, so everything it returns is untrusted data: payloads are validated with
 pydantic, unknown fields are ignored, missing or malformed readings become ``None`` instead of
@@ -6,6 +6,10 @@ failing the whole batch, and stations that fail validation are logged and skippe
 
 Timestamps: Air4Thai reports local Bangkok time (UTC+7) as separate ``date`` and ``time`` strings.
 They are converted to timezone-aware UTC here. Note ``24:00`` style times are tolerated.
+
+History (``getHistoryData.php``) only keeps a rolling window (KAN-9: every station starts
+2026-08-01 00:00 Bangkok time), so older chunks come back as an empty ``data`` list. That is
+normal and is reported as an empty chunk, not an error.
 """
 
 from __future__ import annotations
@@ -13,13 +17,22 @@ from __future__ import annotations
 import gzip
 import logging
 import math
+import time
 from collections.abc import Callable, Iterable, Sequence
-from datetime import UTC, datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+)
 from tenacity import (
     before_sleep_log,
     retry,
@@ -34,6 +47,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ARCHIVE_DIR = Path("data/raw/air4thai")
 AIR4THAI_URL = "http://air4thai.pcd.go.th/services/getNewAQI_JSON.php"
+AIR4THAI_HISTORY_URL = "http://air4thai.com/forweb/getHistoryData.php"
+HISTORY_CHUNK_DAYS = 31  # local calendar days per history request (both ends inclusive)
+HISTORY_PAUSE_S = 2.0  # pause between history requests, to be polite to the host
 SOURCE = "air4thai"
 BANGKOK_TZ = timezone(timedelta(hours=7), name="Asia/Bangkok")
 # Physically plausible bounds for hourly PM2.5 in ug/m3; anything else is treated as a gap.
@@ -188,6 +204,112 @@ def parse_response(payload: Any) -> list[Observation]:
     return observations
 
 
+# --- history (KAN-12 part 1 / KAN-34) ------------------------------------------------------
+
+
+class HistoryRow(BaseModel):
+    """One hourly history row, e.g. ``{"DATETIMEDATA": "2026-10-25 00:00:00", "PM25": 12.2}``.
+
+    The time key has changed between observations (``DATETIMEDATA`` in recordings, ``DATETIC``
+    in older notes), so several spellings are accepted. PM2.5 may be a number, a string, null
+    or a sentinel; anything implausible becomes ``None``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    local_time: str = Field(
+        validation_alias=AliasChoices("DATETIMEDATA", "DATETIC", "DATETIME", "datetime")
+    )
+    pm25: float | None = Field(default=None, validation_alias=AliasChoices("PM25", "pm25"))
+
+    @field_validator("pm25", mode="before")
+    @classmethod
+    def _tolerant_number(cls, v: Any) -> float | None:
+        if isinstance(v, dict):
+            v = v.get("value")
+        return _to_float(v)
+
+
+def parse_history_timestamp(value: str) -> datetime:
+    """``YYYY-MM-DD HH:MM[:SS]`` local Bangkok time (``T`` separator tolerated) to aware UTC."""
+    day, sep, clock = value.strip().replace("T", " ").partition(" ")
+    if not sep:
+        raise ValueError(f"unrecognised history timestamp {value!r}")
+    return parse_local_timestamp(day, clock)
+
+
+def parse_history_response(payload: Any, station_id: str) -> list[Observation]:
+    """Validate a decoded ``getHistoryData.php`` payload into observations for one station.
+
+    Raises ``Air4ThaiError`` if the top-level shape is unusable or ``result`` is not ``OK``.
+    An empty ``data`` list is a normal empty chunk (outside the retention window) and returns
+    ``[]``. Rows with an unparseable time are skipped and counted in one WARNING; rows with no
+    usable PM2.5 are kept with ``pm25=None`` (the caller decides whether to store gaps).
+    Entries for other station ids are ignored.
+    """
+    if not isinstance(payload, dict):
+        raise Air4ThaiError("history response is not an object")
+    result = payload.get("result")
+    if result is not None and str(result).upper() != "OK":
+        raise Air4ThaiError(f"history result is {str(result)[:40]!r}")
+    stations = payload.get("stations")
+    if not isinstance(stations, list):
+        raise Air4ThaiError("history response has no 'stations' list")
+
+    observations: dict[datetime, Observation] = {}
+    skipped = 0
+    for entry in stations:
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("stationID")
+        if sid is not None and str(sid).strip() != station_id:
+            continue
+        rows = entry.get("data")
+        for raw in rows if isinstance(rows, list) else []:
+            try:
+                row = HistoryRow.model_validate(raw)
+                ts = parse_history_timestamp(row.local_time)
+            except (ValidationError, ValueError, TypeError):
+                skipped += 1
+                continue
+            observations[ts] = Observation(station_id=station_id, ts=ts, pm25=row.pm25)
+    if skipped:
+        logger.warning("air4thai history %s: %d malformed rows skipped", station_id, skipped)
+    return sorted(observations.values(), key=lambda o: o.ts)
+
+
+def history_chunks(
+    start: date, end: date, days: int = HISTORY_CHUNK_DAYS
+) -> list[tuple[date, date]]:
+    """Split the inclusive local date range ``start..end`` into non-overlapping inclusive chunks
+    of at most ``days`` days, oldest first."""
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    chunks: list[tuple[date, date]] = []
+    cur = start
+    while cur <= end:
+        last = min(cur + timedelta(days=days - 1), end)
+        chunks.append((cur, last))
+        cur = last + timedelta(days=1)
+    return chunks
+
+
+@dataclass
+class HistoryResult:
+    """Outcome of one station's history fetch. Chunks are ``(sdate, edate)`` in local dates."""
+
+    station_id: str
+    observations: list[Observation] = field(default_factory=list)
+    chunks: list[tuple[date, date]] = field(default_factory=list)
+    empty_chunks: list[tuple[date, date]] = field(default_factory=list)
+    failed_chunks: list[tuple[date, date]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def total_failure(self) -> bool:
+        return bool(self.chunks) and len(self.failed_chunks) == len(self.chunks)
+
+
 # --- hooks ---------------------------------------------------------------------------------
 
 # Raw-response archive hook: called with the raw body and the UTC fetch time before parsing.
@@ -248,6 +370,7 @@ class Air4ThaiClient:
         archive: RawArchive | None = None,
         max_attempts: int = MAX_ATTEMPTS,
         wait_max: float = 30.0,
+        history_url: str = AIR4THAI_HISTORY_URL,
     ) -> None:
         if client is not None and ca_bundle:
             raise ValueError("ca_bundle applies only to a client created by Air4ThaiClient")
@@ -256,6 +379,7 @@ class Air4ThaiClient:
             timeout=timeout, follow_redirects=True, verify=build_verify(ca_bundle)
         )
         self._url = url
+        self._history_url = history_url
         self._archive = archive
         self._fetch = retry(
             retry=retry_if_exception(_is_retryable),
@@ -265,8 +389,8 @@ class Air4ThaiClient:
             reraise=True,
         )(self._fetch_once)
 
-    def _fetch_once(self) -> bytes:
-        response = self._client.get(self._url)
+    def _fetch_once(self, url: str | None = None, params: dict[str, str] | None = None) -> bytes:
+        response = self._client.get(url or self._url, params=params)
         response.raise_for_status()
         return response.content
 
@@ -298,6 +422,69 @@ class Air4ThaiClient:
         if observations:
             sink(observations)
         return len(observations)
+
+    def fetch_history(
+        self,
+        station_id: str,
+        start: datetime,
+        end: datetime,
+        *,
+        chunk_days: int = HISTORY_CHUNK_DAYS,
+        pause: float = HISTORY_PAUSE_S,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> HistoryResult:
+        """Hourly PM2.5 history for one station between aware ``start`` and ``end`` (inclusive).
+
+        The UTC range is converted to Bangkok local dates and requested in chunks of at most
+        ``chunk_days`` days (``stime=00``, ``etime=23``), pausing ``pause`` seconds between
+        requests. Each chunk gets the client's retries; a chunk that still fails is recorded in
+        ``failed_chunks`` and the remaining chunks are still fetched. Returned observations are
+        deduplicated on ``ts``, limited to ``start..end`` and sorted; ``pm25`` may be ``None``.
+        Raw history bodies are not archived (the archive hook is for the latest-reading feed).
+        """
+        if start.tzinfo is None or end.tzinfo is None:
+            raise ValueError("start and end must be timezone-aware")
+        result = HistoryResult(station_id=station_id)
+        result.chunks = history_chunks(
+            start.astimezone(BANGKOK_TZ).date(), end.astimezone(BANGKOK_TZ).date(), chunk_days
+        )
+        by_ts: dict[datetime, Observation] = {}
+        for index, (sdate, edate) in enumerate(result.chunks):
+            if index and pause > 0:
+                sleep(pause)
+            params = {
+                "stationID": station_id,
+                "param": "PM25",
+                "type": "hr",
+                "sdate": sdate.isoformat(),
+                "edate": edate.isoformat(),
+                "stime": "00",
+                "etime": "23",
+            }
+            try:
+                body = self._fetch(self._history_url, params)
+                try:
+                    payload = httpx.Response(200, content=body).json()
+                except ValueError as exc:
+                    raise Air4ThaiError("history response is not valid JSON") from exc
+                chunk = parse_history_response(payload, station_id)
+            except (httpx.HTTPError, Air4ThaiError) as exc:
+                # Type and our own message only: httpx messages carry the full request URL.
+                detail = str(exc) if isinstance(exc, Air4ThaiError) else type(exc).__name__
+                result.failed_chunks.append((sdate, edate))
+                result.errors.append(f"{sdate}..{edate}: {detail}")
+                logger.error(
+                    "air4thai history %s %s..%s failed: %s", station_id, sdate, edate, detail
+                )
+                continue
+            if not chunk:
+                result.empty_chunks.append((sdate, edate))
+                logger.info("air4thai history %s %s..%s: empty chunk", station_id, sdate, edate)
+            for obs in chunk:
+                if start <= obs.ts <= end:
+                    by_ts[obs.ts] = obs
+        result.observations = sorted(by_ts.values(), key=lambda o: o.ts)
+        return result
 
     def close(self) -> None:
         """Close the HTTP client only if this object created it."""
