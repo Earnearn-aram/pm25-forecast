@@ -40,6 +40,7 @@ OPENAQ_PAGE_LIMIT = 1000
 OPENAQ_MAX_PAGES = 30  # 730 days of hourly values is 18 pages of 1000
 OPENAQ_MAX_RETRIES = 3
 OPENAQ_MAX_RETRY_WAIT_S = 60.0
+OPENAQ_TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
 OPEN_METEO_CANDIDATES: list[tuple[str, str, str]] = [
     # (name, url, hourly variable)
     (
@@ -319,6 +320,7 @@ class OpenAQLocation(BaseModel):
     lon: float
     first: datetime | None = None
     last: datetime | None = None
+    sensor_ids: list[int] = Field(default_factory=list)
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -347,6 +349,7 @@ def parse_openaq_locations(payload: Any) -> list[OpenAQLocation]:
                     lon=coords["longitude"],
                     first=_parse_dt(row.get("datetimeFirst")),
                     last=_parse_dt(row.get("datetimeLast")),
+                    sensor_ids=_parse_openaq_sensor_rows(row.get("sensors")),
                 )
             )
         except (KeyError, TypeError, ValidationError):
@@ -424,6 +427,7 @@ class OpenAQCandidate(BaseModel):
     location_id: int
     name: str | None = None
     distance_m: float
+    sensor_ids: list[int] = Field(default_factory=list)
 
 
 class OpenAQStationCoverage(BaseModel):
@@ -445,9 +449,8 @@ class OpenAQStationCoverage(BaseModel):
     missing_pct_span: float | None = None  # over first..last inclusive
 
 
-def parse_openaq_sensors(payload: Any, parameter_id: int = OPENAQ_PM25_PARAMETER_ID) -> list[int]:
-    """Sensor ids measuring the given parameter (PM2.5 only) in a /locations/{id}/sensors reply."""
-    rows = payload.get("results", []) if isinstance(payload, dict) else []
+def _parse_openaq_sensor_rows(rows: Any, parameter_id: int = OPENAQ_PM25_PARAMETER_ID) -> list[int]:
+    """Parse unique sensor ids for one parameter from an untrusted list of sensor rows."""
     ids: list[int] = []
     for row in rows if isinstance(rows, list) else []:
         param = row.get("parameter") if isinstance(row, dict) else None
@@ -457,6 +460,12 @@ def parse_openaq_sensors(payload: Any, parameter_id: int = OPENAQ_PM25_PARAMETER
         if isinstance(sid, int) and not isinstance(sid, bool) and sid not in ids:
             ids.append(sid)
     return ids
+
+
+def parse_openaq_sensors(payload: Any, parameter_id: int = OPENAQ_PM25_PARAMETER_ID) -> list[int]:
+    """Sensor ids measuring the given parameter (PM2.5 only) in a location-sensors reply."""
+    rows = payload.get("results", []) if isinstance(payload, dict) else []
+    return _parse_openaq_sensor_rows(rows, parameter_id)
 
 
 def parse_openaq_hours(payload: Any) -> dict[datetime, float | None]:
@@ -486,6 +495,7 @@ def rank_openaq_candidates(
             location_id=loc.id,
             name=loc.name,
             distance_m=round(haversine_m(station.lat, station.lon, loc.lat, loc.lon), 1),
+            sensor_ids=loc.sensor_ids,
         )
         for loc in locations
     ]
@@ -556,7 +566,7 @@ def fetch_station_lookup(client: httpx.Client, fallback: Iterable[Station]) -> d
 def _openaq_get(
     client: httpx.Client, name: str, path: str, api_key: str, params: dict[str, Any], pause: float
 ) -> tuple[Probe, Any]:
-    """GET an OpenAQ v3 path; on HTTP 429 wait (Retry-After, capped) and retry a few times."""
+    """GET OpenAQ v3, retrying bounded rate limits and transient server failures."""
     probe = Probe(name=name)
     for attempt in range(OPENAQ_MAX_RETRIES + 1):
         probe = Probe(name=name)
@@ -570,6 +580,10 @@ def _openaq_get(
                 except ValueError:
                     wait = 2.0 * (attempt + 1)
                 time.sleep(min(max(wait, pause), OPENAQ_MAX_RETRY_WAIT_S))
+                continue
+            if resp.status_code in OPENAQ_TRANSIENT_STATUSES and attempt < OPENAQ_MAX_RETRIES:
+                wait = max(pause, 2.0**attempt)
+                time.sleep(min(wait, OPENAQ_MAX_RETRY_WAIT_S))
                 continue
             resp.raise_for_status()
             probe.ok = True
@@ -653,15 +667,19 @@ def _openaq_station_coverage(
     best = ranked[0]
     runner = ranked[1] if len(ranked) > 1 else None
     notes = [f"{len(ranked)} candidates within {MATCH_RADIUS_M:.0f} m; nearest chosen"]
-    path = f"/locations/{best.location_id}/sensors"
-    p, payload = _openaq_get(
-        client, f"openaq_v3_sensors:{best.location_id}", path, api_key, {}, pause
-    )
-    time.sleep(pause)
-    if not p.ok:
-        note = f"sensor lookup failed: {p.error} (HTTP {p.status})"
-        return fail("error", note, matched=best, runner_up=runner)
-    sensors = parse_openaq_sensors(payload)
+    sensors = best.sensor_ids
+    if sensors:
+        notes.append("PM2.5 sensors read from location response")
+    else:
+        path = f"/locations/{best.location_id}/sensors"
+        p, payload = _openaq_get(
+            client, f"openaq_v3_sensors:{best.location_id}", path, api_key, {}, pause
+        )
+        time.sleep(pause)
+        if not p.ok:
+            note = f"sensor lookup failed: {p.error} (HTTP {p.status})"
+            return fail("error", note, matched=best, runner_up=runner)
+        sensors = parse_openaq_sensors(payload)
     if not sensors:
         note = "matched location has no PM2.5 sensor"
         return fail("no_pm25_sensor", note, matched=best, runner_up=runner)
