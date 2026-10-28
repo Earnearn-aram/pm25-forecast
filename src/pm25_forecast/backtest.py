@@ -15,6 +15,27 @@ from pm25_forecast.models.baselines import HORIZONS_H, persistence_forecast, req
 
 HOUR = timedelta(hours=1)
 BASELINES = ("persistence-24h", "seasonal-naive", "cams")
+RESERVED_FIELDS = frozenset(
+    {
+        "actual",
+        "station",
+        "station_id",
+        "origin",
+        "prediction_time",
+        "target",
+        "valid_time",
+        "issue_time",
+        "available_at",
+        "horizon",
+        "horizon_h",
+        "month",
+        "model",
+        "n",
+        "mae",
+        "rmse",
+        "aqi_category_accuracy",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -132,8 +153,8 @@ def evaluate(
     if list(aqi_breakpoints) != sorted(set(aqi_breakpoints)):
         raise ValueError("AQI breakpoints must be strictly increasing")
     challengers = challengers or {}
-    if set(challengers) & set(BASELINES):
-        raise ValueError("challenger names must not replace baselines")
+    if set(challengers) & (set(BASELINES) | RESERVED_FIELDS):
+        raise ValueError("challenger names must not replace baselines or reserved scoring fields")
     _validate(observations, vintages)
     models = (*BASELINES, *challengers)
     actuals = {(o.station_id, o.ts): o for o in observations if o.available_at <= as_of}

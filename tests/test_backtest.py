@@ -221,3 +221,33 @@ def test_cli_reports_insufficient_data_without_inventing_values(tmp_path, monkey
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "insufficient_data"
     assert report["beats_cams"]["candidate"]["beats_cams"] is None
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "actual",
+        "station",
+        "station_id",
+        "origin",
+        "prediction_time",
+        "target",
+        "valid_time",
+        "issue_time",
+        "available_at",
+        "horizon",
+        "horizon_h",
+        "month",
+        "model",
+        "n",
+        "mae",
+        "rmse",
+        "aqi_category_accuracy",
+        "cams",
+        "persistence-24h",
+        "seasonal-naive",
+    ],
+)
+def test_challenger_cannot_overwrite_ground_truth_or_scoring_fields(reserved):
+    with pytest.raises(ValueError, match="reserved scoring fields"):
+        run(challengers={reserved: lambda *_: 0})
