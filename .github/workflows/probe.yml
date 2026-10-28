@@ -18,6 +18,7 @@ jobs:
       - name: Run probe
         env:
           OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
+          AIR4THAI_CA_BUNDLE: certs/air4thai-ca.pem
         run: uv run python -m pm25_forecast.ingest.probe --out probe-report --days "${{ inputs.days }}"
       - name: Job summary
         if: always()
