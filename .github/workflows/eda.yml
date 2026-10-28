@@ -1,0 +1,38 @@
+name: PM2.5 EDA
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pm25-eda
+  cancel-in-progress: false
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Generate aggregate-only report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: uv run --no-dev python -m pm25_forecast.eda --output-dir eda-report
+      - name: Add report to job summary
+        run: cat eda-report/kan-13-eda.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload aggregate report and charts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kan-13-eda-${{ github.run_id }}
+          path: |
+            eda-report/kan-13-eda.md
+            eda-report/kan-13-metrics.json
+            eda-report/kan-13-monthly.svg
+            eda-report/kan-13-hourly.svg
+          retention-days: 30
+          if-no-files-found: error
