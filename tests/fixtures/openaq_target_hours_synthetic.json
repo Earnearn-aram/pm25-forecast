@@ -1,0 +1,14 @@
+{"_note":"SYNTHETIC fixture (KAN-46): OpenAQ v3 /sensors/{id}/hours-shaped replies keyed by sensor id. 9001: 4 valued hours, 1 null, 1 malformed row; 9003: no rows; 9004: only nulls.",
+ "9001":{"results":[
+  {"value":10.0,"period":{"datetimeFrom":{"utc":"2025-06-01T00:00:00Z"}}},
+  {"value":12.5,"period":{"datetimeFrom":{"utc":"2025-06-01T01:00:00Z"}}},
+  {"value":9.0,"period":{"datetimeFrom":{"utc":"2025-06-01T03:00:00Z"}}},
+  {"value":null,"period":{"datetimeFrom":{"utc":"2025-06-01T04:00:00Z"}}},
+  {"value":20.0,"period":{"datetimeFrom":{"utc":"2026-01-02T10:00:00Z"}}},
+  {"value":5.0,"period":"bad"}
+ ]},
+ "9003":{"results":[]},
+ "9004":{"results":[
+  {"value":null,"period":{"datetimeFrom":{"utc":"2025-06-01T00:00:00Z"}}}
+ ]}
+}

@@ -1,0 +1,9 @@
+{"_note":"SYNTHETIC fixture (KAN-46): OpenAQ v3 /locations-shaped reply with invented ids; 59t has two candidates (202 near, 203 farther), 61t none, bkp100t one (205, PM10 only).",
+ "results":[
+ {"id":201,"name":"Synthetic near 02t","provider":{"name":"Synthetic"},"coordinates":{"latitude":13.7641,"longitude":100.5531},"datetimeFirst":{"utc":"2016-01-01T00:00:00Z"},"datetimeLast":{"utc":"2026-01-02T10:00:00Z"}},
+ {"id":202,"name":"Synthetic near 59t","provider":{"name":"Synthetic"},"coordinates":{"latitude":13.7002,"longitude":100.5002},"datetimeFirst":{"utc":"2020-01-01T00:00:00Z"},"datetimeLast":{"utc":"2026-01-02T10:00:00Z"}},
+ {"id":203,"name":"Synthetic farther from 59t","provider":{"name":"Synthetic"},"coordinates":{"latitude":13.7050,"longitude":100.5050},"datetimeFirst":{"utc":"2021-01-01T00:00:00Z"},"datetimeLast":{"utc":"2026-01-02T10:00:00Z"}},
+ {"id":204,"name":"Synthetic near bkp101t","provider":{"name":"Synthetic"},"coordinates":{"latitude":13.9003,"longitude":100.7003},"datetimeFirst":{"utc":"2022-01-01T00:00:00Z"},"datetimeLast":{"utc":"2026-01-02T10:00:00Z"}},
+ {"id":205,"name":"Synthetic near bkp100t","provider":{"name":"Synthetic"},"coordinates":{"latitude":13.6001,"longitude":100.4001},"datetimeFirst":{"utc":"2022-01-01T00:00:00Z"},"datetimeLast":{"utc":"2026-01-02T10:00:00Z"}},
+ {"id":206,"coordinates":null}
+]}

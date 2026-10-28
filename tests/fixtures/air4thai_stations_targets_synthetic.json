@@ -1,0 +1,8 @@
+{"_note":"SYNTHETIC fixture (KAN-46): invented coordinates, not a recorded Air4Thai payload.",
+ "stations":[
+ {"stationID":"59t","nameEN":"Synthetic 59t","areaEN":"Bangkok","lat":"13.7000","long":"100.5000","AQILast":{"PM25":{"value":"20"}}},
+ {"stationID":"61t","nameEN":"Synthetic 61t","areaEN":"Bangkok","lat":"13.8000","long":"100.6000","AQILast":{"PM25":{"value":"20"}}},
+ {"stationID":"bkp100t","nameEN":"Synthetic bkp100t","areaEN":"Bangkok","lat":"13.6000","long":"100.4000","AQILast":{"PM25":{"value":"20"}}},
+ {"stationID":"bkp101t","nameEN":"Synthetic bkp101t","areaEN":"Bangkok","lat":"13.9000","long":"100.7000","AQILast":{"PM25":{"value":"-1"}}},
+ {"stationID":"02t","nameEN":"Synthetic 02t","areaEN":"Bangkok","lat":"13.7640","long":"100.5530","AQILast":{"PM25":{"value":"21.5"}}}
+]}

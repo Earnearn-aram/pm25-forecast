@@ -429,3 +429,163 @@ def test_summarize_history_pure() -> None:
     failed = {"a": cov["59t"].model_copy(update={"chunks_empty": 0, "chunks_failed": 3})}
     assert "only a ~86-day window" in p.retention_text(p.summarize_history(failed))
     assert p.render_history_markdown({}) == []
+
+
+# ---------------------------------------------------------------- KAN-46 OpenAQ target coverage
+# All payloads below are SYNTHETIC (see the "_note" in each fixture); no network.
+
+OAQ_FIRST = datetime(2025, 6, 1, 0, tzinfo=UTC)
+OAQ_LAST = datetime(2026, 1, 2, 10, tzinfo=UTC)
+
+
+def _target_stations() -> dict[str, p.Station]:
+    parsed = p.parse_air4thai_stations(load("air4thai_stations_targets_synthetic.json"))
+    return {s.station_id: s for s in parsed}
+
+
+def _oaq_handler(request: httpx.Request) -> httpx.Response:
+    url = request.url
+    path = url.path
+    if "getNewAQI_JSON" in str(url):
+        return httpx.Response(200, json=load("air4thai_stations_targets_synthetic.json"))
+    if "openaq" not in str(url):
+        return httpx.Response(404)
+    assert request.headers["X-API-Key"] == "dummy-value"
+    if path.endswith("/v3/locations"):
+        assert url.params["parameters_id"] == "2"  # PM2.5 only
+        return httpx.Response(200, json=load("openaq_target_locations_synthetic.json"))
+    parts = path.strip("/").split("/")  # v3/locations/<id>/sensors or v3/sensors/<id>/hours
+    if parts[1] == "locations" and parts[-1] == "sensors":
+        return httpx.Response(200, json=load("openaq_target_sensors_synthetic.json")[parts[2]])
+    if parts[1] == "sensors" and parts[-1] == "hours":
+        return httpx.Response(200, json=load("openaq_target_hours_synthetic.json")[parts[2]])
+    return httpx.Response(404)
+
+
+def test_target_constant_includes_bkp101t() -> None:
+    assert p.TARGET_STATION_IDS == ("59t", "61t", "bkp100t", "bkp101t", "02t")
+
+
+def test_openaq_parsers_pm25_only_and_tolerant() -> None:
+    sensors = load("openaq_target_sensors_synthetic.json")
+    assert p.parse_openaq_sensors(sensors["201"]) == [9001]  # pm10, bad id, garbage dropped
+    assert p.parse_openaq_sensors(None) == []
+    hours = p.parse_openaq_hours(load("openaq_target_hours_synthetic.json")["9001"])
+    assert hours[OAQ_FIRST] == 10.0
+    assert hours[OAQ_FIRST + timedelta(hours=4)] is None
+    assert len(hours) == 5 and all(t.tzinfo for t in hours)  # malformed row dropped
+    assert p.parse_openaq_hours({"results": "x"}) == {}
+
+
+def test_rank_candidates_nearest_first_with_runner_up() -> None:
+    stations = _target_stations()
+    locs = p.parse_openaq_locations(load("openaq_target_locations_synthetic.json"))
+    ranked = p.rank_openaq_candidates(stations["59t"], locs)
+    assert [c.location_id for c in ranked] == [202, 203]
+    assert ranked[0].distance_m < 50 < ranked[1].distance_m < p.MATCH_RADIUS_M
+    assert p.rank_openaq_candidates(stations["61t"], locs) == []
+    assert p.rank_openaq_candidates(p.Station(station_id="x"), locs) == []
+
+
+def test_summarize_openaq_series_window_and_span() -> None:
+    hours = p.parse_openaq_hours(load("openaq_target_hours_synthetic.json")["9001"])
+    end = NOW.replace(minute=0)
+    cov = p.summarize_openaq_series("02t", hours, end - timedelta(days=730), end)
+    span_hours = int((OAQ_LAST - OAQ_FIRST).total_seconds() // 3600) + 1
+    assert (cov.status, cov.hours_with_data, cov.window_hours) == ("ok", 4, 17520)
+    assert (cov.first, cov.last) == (OAQ_FIRST, OAQ_LAST)
+    assert cov.missing_pct_window == round(100 * (1 - 4 / 17520), 2)
+    assert cov.missing_pct_span == round(100 * (1 - 4 / span_hours), 2)
+    assert cov.span_days == round((OAQ_LAST - OAQ_FIRST).total_seconds() / 86400, 1)
+    empty = p.summarize_openaq_series("x", {}, end - timedelta(days=730), end)
+    assert empty.status == "no_data" and empty.missing_pct_window == 100.0
+    assert empty.missing_pct_span is None
+
+
+def _run_oaq(tmp_path: Path, handler: Any) -> dict[str, Any]:
+    return p.run(
+        tmp_path / "r",
+        days=5,
+        pause=0,
+        now=NOW,
+        client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_run_reports_openaq_coverage_for_all_five_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAQ_API_KEY", "dummy-value")
+    report = _run_oaq(tmp_path, _oaq_handler)
+    section = report["openaq_target_coverage"]
+    assert section["targets"] == ["59t", "61t", "bkp100t", "bkp101t", "02t"]
+    rows = {r["station_id"]: r for r in section["stations"]}
+    assert list(rows) == section["targets"]
+    assert rows["02t"]["status"] == "ok"
+    assert rows["02t"]["matched"]["location_id"] == 201
+    assert rows["02t"]["sensor_ids"] == [9001]  # PM2.5 sensor only, not the PM10 one
+    assert rows["02t"]["first"] == OAQ_FIRST and rows["02t"]["last"] == OAQ_LAST
+    assert rows["59t"]["matched"]["location_id"] == 202
+    assert rows["59t"]["runner_up"]["location_id"] == 203
+    assert rows["59t"]["status"] == "no_data"  # the sensor returned an empty page
+    assert rows["61t"]["status"] == "no_match" and rows["61t"]["matched"] is None
+    assert rows["bkp100t"]["status"] == "no_pm25_sensor"
+    assert rows["bkp101t"]["matched"]["location_id"] == 204  # no current PM2.5 in Air4Thai list
+    assert rows["bkp101t"]["status"] == "no_data"  # only null values returned
+    md = (tmp_path / "r.md").read_text()
+    assert "## OpenAQ coverage for target stations" in md
+    assert "no match within 1000 m" in md
+    assert all(f"| {sid} |" in md for sid in section["targets"])
+    # the key never reaches the report files; the GO/NO-GO decision is still produced
+    assert all("dummy-value" not in (tmp_path / n).read_text() for n in ("r.json", "r.md"))
+    assert report["decision"]["decision"] in {"GO-air4thai", "GO-openaq", "NO-GO"}
+
+
+def test_openaq_coverage_skipped_without_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAQ_API_KEY", raising=False)
+    report = _run_oaq(tmp_path, _oaq_handler)
+    rows = report["openaq_target_coverage"]["stations"]
+    assert [r["status"] for r in rows] == ["skipped"] * 5
+    assert "OPENAQ_API_KEY not set; skipped" in (tmp_path / "r.md").read_text()
+
+
+def test_openaq_429_is_retried_and_pagination_followed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(p, "OPENAQ_PAGE_LIMIT", 2)
+    monkeypatch.setattr(p.time, "sleep", lambda s: None)
+    seen: dict[str, Any] = {"limited": 0, "pages": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/locations") and not seen["limited"]:
+            seen["limited"] = 1
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        if request.url.path.endswith("/hours"):
+            page = int(request.url.params["page"])
+            seen["pages"].append(page)
+            rows = load("openaq_target_hours_synthetic.json")["9001"]["results"]
+            return httpx.Response(200, json={"results": rows[(page - 1) * 2 : page * 2]})
+        return _oaq_handler(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    rows = p.probe_openaq_coverage(
+        client, "dummy-value", _target_stations(), NOW, 0, targets=["02t"]
+    )
+    assert seen["limited"] == 1
+    assert seen["pages"] == [1, 2, 3, 4]  # 6 rows at 2 per page; the empty 4th page stops it
+    assert rows[0].status == "ok" and rows[0].hours_with_data == 4
+
+
+def test_openaq_failures_are_recorded_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(p.time, "sleep", lambda s: None)
+
+    def always_429(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "0"})
+
+    client = httpx.Client(transport=httpx.MockTransport(always_429))
+    rows = p.probe_openaq_coverage(
+        client, "dummy-value", _target_stations(), NOW, 0, targets=["02t", "zz"]
+    )
+    assert rows[0].status == "error" and "HTTP 429" in rows[0].note
+    assert rows[1].status == "station_unknown"
+    assert "dummy-value" not in rows[0].model_dump_json()
