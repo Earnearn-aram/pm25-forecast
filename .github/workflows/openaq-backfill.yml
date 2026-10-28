@@ -1,0 +1,108 @@
+name: OpenAQ Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Inclusive UTC start (whole hour)"
+        required: true
+        default: "2024-10-28T00:00:00Z"
+      end:
+        description: "Exclusive UTC end (whole hour)"
+        required: true
+        default: "2026-10-28T00:00:00Z"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openaq-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Backfill 730 days from OpenAQ
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
+          STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+        run: >-
+          uv run --no-dev python -m pm25_forecast.openaq_backfill
+          --start "$START" --end "$END"
+      - name: Verify stored station coverage
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          uv run --no-dev python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from pm25_forecast.storage.db import connect
+
+          station_ids = ("59t", "61t", "bkp100t", "bkp101t", "02t")
+          query = """
+              SELECT station_id, count(*), min(ts), max(ts),
+                     EXTRACT(EPOCH FROM (max(ts) - min(ts))) / 86400.0 AS span_days
+              FROM observations
+              WHERE station_id = ANY(%s) AND pm25 IS NOT NULL
+              GROUP BY station_id
+              ORDER BY station_id
+          """
+          source_query = """
+              SELECT station_id, source, count(*), min(ts), max(ts)
+              FROM observations
+              WHERE station_id = ANY(%s) AND pm25 IS NOT NULL
+              GROUP BY station_id, source
+              ORDER BY station_id, source
+          """
+          with connect(os.environ["DATABASE_URL"]) as connection:
+              combined = connection.execute(query, (list(station_ids),)).fetchall()
+              by_source = connection.execute(source_query, (list(station_ids),)).fetchall()
+
+          found = {row[0] for row in combined}
+          missing = set(station_ids) - found
+          short = {row[0]: float(row[4]) for row in combined if float(row[4]) < 700.0}
+
+          lines = [
+              "## OpenAQ backfill verification",
+              "",
+              "### Combined usable coverage",
+              "",
+              "| station | rows | first UTC | last UTC | span days |",
+              "|---|---:|---|---|---:|",
+          ]
+          lines.extend(
+              f"| {station} | {count} | {first} | {last} | {float(span):.2f} |"
+              for station, count, first, last, span in combined
+          )
+          lines.extend([
+              "",
+              "### Coverage by source",
+              "",
+              "| station | source | rows | first UTC | last UTC |",
+              "|---|---|---:|---|---|",
+          ])
+          lines.extend(
+              f"| {station} | {source} | {count} | {first} | {last} |"
+              for station, source, count, first, last in by_source
+          )
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
+
+          if missing:
+              raise SystemExit(f"missing stations: {sorted(missing)}")
+          if short:
+              raise SystemExit(f"stations below 700-day span: {short}")
+          PY
