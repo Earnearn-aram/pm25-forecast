@@ -23,6 +23,10 @@ from pm25_forecast.storage.db import connect
 TARGET_STATIONS = ("02t", "59t", "61t", "bkp100t", "bkp101t")
 
 
+class EdaDatabaseError(RuntimeError):
+    """Sanitised database failure safe to show in CI logs."""
+
+
 @dataclass(frozen=True)
 class Observation:
     station_id: str
@@ -37,10 +41,15 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _percentile(values: Sequence[float], quantile: float) -> float:
+def _hour_bucket(value: datetime) -> datetime:
+    """Normalise an aware timestamp to its UTC station-hour bucket."""
+    return _utc(value).replace(minute=0, second=0, microsecond=0)
+
+
+def _percentile(values: Sequence[float], quantile: float) -> float | None:
     ordered = sorted(values)
     if not ordered:
-        return math.nan
+        return None
     index = (len(ordered) - 1) * quantile
     lower, upper = math.floor(index), math.ceil(index)
     if lower == upper:
@@ -48,16 +57,24 @@ def _percentile(values: Sequence[float], quantile: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
 
 
-def _max_gap_hours(timestamps: Iterable[datetime]) -> int:
+def _max_gap_hours(timestamps: Iterable[datetime], first: datetime, last: datetime) -> int:
     ordered = sorted(set(timestamps))
-    if len(ordered) < 2:
-        return 0
-    return max(
+    expected = int((last - first).total_seconds() // 3600) + 1
+    if not ordered:
+        return expected
+    gaps = [
+        int((ordered[0] - first).total_seconds() // 3600),
+        int((last - ordered[-1]).total_seconds() // 3600),
+    ]
+    gaps.extend(
         max(int((right - left).total_seconds() // 3600) - 1, 0) for left, right in pairwise(ordered)
     )
+    return max(gaps)
 
 
-def analyze(observations: Iterable[Observation]) -> dict[str, Any]:
+def analyze(
+    observations: Iterable[Observation], station_ids: Sequence[str] | None = None
+) -> dict[str, Any]:
     """Return JSON-serialisable aggregate metrics for observations."""
     rows = [Observation(row.station_id, _utc(row.ts), row.pm25, row.source) for row in observations]
     by_station: dict[str, list[Observation]] = defaultdict(list)
@@ -69,13 +86,36 @@ def analyze(observations: Iterable[Observation]) -> dict[str, Any]:
     monthly: dict[int, list[float]] = defaultdict(list)
     burning: list[float] = []
     other: list[float] = []
-    for station_id in sorted(by_station):
+    configured = tuple(dict.fromkeys(station_ids)) if station_ids is not None else tuple(by_station)
+    for station_id in sorted(configured):
         station_rows = by_station[station_id]
+        if not station_rows:
+            station_metrics.append(
+                {
+                    "station_id": station_id,
+                    "rows": 0,
+                    "usable_rows": 0,
+                    "openaq_rows": 0,
+                    "air4thai_rows": 0,
+                    "first_ts": None,
+                    "last_ts": None,
+                    "expected_hours": 0,
+                    "missing_hours": 0,
+                    "coverage_pct": None,
+                    "invalid_rows": 0,
+                    "mean_pm25": None,
+                    "median_pm25": None,
+                    "p95_pm25": None,
+                    "max_gap_hours": 0,
+                }
+            )
+            continue
         usable = [row for row in station_rows if row.pm25 is not None]
         valid = [row for row in usable if 0 <= float(row.pm25) <= 1000]
         values = [float(row.pm25) for row in valid if row.pm25 is not None]
-        timestamps = [row.ts for row in valid]
-        first, last = min(row.ts for row in station_rows), max(row.ts for row in station_rows)
+        timestamps = [_hour_bucket(row.ts) for row in valid]
+        first = min(_hour_bucket(row.ts) for row in station_rows)
+        last = max(_hour_bucket(row.ts) for row in station_rows)
         expected = int((last - first).total_seconds() // 3600) + 1
         distinct_usable = len(set(timestamps))
         station_metrics.append(
@@ -91,10 +131,14 @@ def analyze(observations: Iterable[Observation]) -> dict[str, Any]:
                 "missing_hours": max(expected - distinct_usable, 0),
                 "coverage_pct": round(100 * distinct_usable / expected, 2),
                 "invalid_rows": len(usable) - len(valid),
-                "mean_pm25": round(statistics.fmean(values), 2) if values else math.nan,
-                "median_pm25": round(statistics.median(values), 2) if values else math.nan,
-                "p95_pm25": round(_percentile(values, 0.95), 2),
-                "max_gap_hours": _max_gap_hours(timestamps),
+                "mean_pm25": round(statistics.fmean(values), 2) if values else None,
+                "median_pm25": round(statistics.median(values), 2) if values else None,
+                "p95_pm25": (
+                    round(percentile, 2)
+                    if (percentile := _percentile(values, 0.95)) is not None
+                    else None
+                ),
+                "max_gap_hours": _max_gap_hours(timestamps, first, last),
             }
         )
         for row in valid:
@@ -110,28 +154,33 @@ def analyze(observations: Iterable[Observation]) -> dict[str, Any]:
             for index in indexes
         }
 
-    burning_mean = statistics.fmean(burning) if burning else math.nan
-    other_mean = statistics.fmean(other) if other else math.nan
-    shift = burning_mean - other_mean
+    burning_mean = statistics.fmean(burning) if burning else None
+    other_mean = statistics.fmean(other) if other else None
+    shift = (
+        burning_mean - other_mean if burning_mean is not None and other_mean is not None else None
+    )
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "stations": station_metrics,
-        "duplicate_station_hours": len(rows) - len({(row.station_id, row.ts) for row in rows}),
+        "duplicate_station_hours": len(rows)
+        - len({(row.station_id, _hour_bucket(row.ts)) for row in rows}),
         "hourly_mean_pm25": means(hourly, range(24)),
         "weekday_mean_pm25": means(weekday, range(7)),
         "monthly_mean_pm25": means(monthly, range(1, 13)),
         "burning_season": {
             "definition": "January-April (UTC month)",
             "rows": len(burning),
-            "mean_pm25": round(burning_mean, 2),
+            "mean_pm25": round(burning_mean, 2) if burning_mean is not None else None,
             "median_pm25": round(statistics.median(burning), 2) if burning else None,
             "non_burning_rows": len(other),
-            "non_burning_mean_pm25": round(other_mean, 2),
+            "non_burning_mean_pm25": round(other_mean, 2) if other_mean is not None else None,
             "non_burning_median_pm25": round(statistics.median(other), 2) if other else None,
-            "mean_shift_pm25": round(shift, 2),
-            "mean_shift_pct": round(100 * shift / other_mean, 2)
-            if other and other_mean
-            else math.nan,
+            "mean_shift_pm25": round(shift, 2) if shift is not None else None,
+            "mean_shift_pct": (
+                round(100 * shift / other_mean, 2)
+                if shift is not None and other_mean not in (None, 0)
+                else None
+            ),
         },
         "source_counts": dict(sorted(Counter(row.source for row in rows).items())),
     }
@@ -145,9 +194,11 @@ def _fmt(value: Any) -> str:
 
 def render_markdown(metrics: dict[str, Any]) -> str:
     station_rows = "\n".join(
-        "| {station_id} | {usable_rows:,} | {openaq_rows:,} | {air4thai_rows:,} | "
-        "{coverage_pct:.2f}% | {missing_hours:,} | {max_gap_hours:,} | {median_pm25} | "
-        "{p95_pm25} | {invalid_rows:,} |".format(**row)
+        f"| {row['station_id']} | {row['usable_rows']:,} | {row['openaq_rows']:,} | "
+        f"{row['air4thai_rows']:,} | "
+        f"{_fmt(row['coverage_pct'])}{'%' if row['coverage_pct'] is not None else ''} | "
+        f"{row['missing_hours']:,} | {row['max_gap_hours']:,} | "
+        f"{_fmt(row['median_pm25'])} | {_fmt(row['p95_pm25'])} | {row['invalid_rows']:,} |"
         for row in metrics["stations"]
     )
     burning = metrics["burning_season"]
@@ -202,9 +253,8 @@ The database URL is read from the environment and never written to the report.
 def render_bar_svg(values: dict[str, float | None], title: str, labels: Sequence[str]) -> str:
     width, height, left, bottom, top = 960, 420, 64, 54, 54
     plot_width, plot_height = width - left - 20, height - top - bottom
-    ceiling = (
-        max((float(value) for value in values.values() if value is not None), default=1.0) * 1.1
-    )
+    maximum = max((float(value) for value in values.values() if value is not None), default=0.0)
+    ceiling = maximum * 1.1 if maximum > 0 else 1.0
     bar_width = plot_width / max(len(labels), 1)
     bars: list[str] = []
     for index, label in enumerate(labels):
@@ -233,18 +283,23 @@ def render_bar_svg(values: dict[str, float | None], title: str, labels: Sequence
 
 def load_observations(database_url: str, stations: Sequence[str]) -> list[Observation]:
     """Load the bounded target dataset without logging the connection string."""
-    with connect(database_url) as con, con.cursor() as cur:
-        cur.execute(
-            "SELECT station_id, ts, pm25, source FROM observations "
-            "WHERE station_id = ANY(%s) ORDER BY station_id, ts",
-            (list(stations),),
-        )
-        return [Observation(station, ts, pm25, source) for station, ts, pm25, source in cur]
+    try:
+        with connect(database_url) as con, con.cursor() as cur:
+            cur.execute(
+                "SELECT station_id, ts, pm25, source FROM observations "
+                "WHERE station_id = ANY(%s) ORDER BY station_id, ts",
+                (list(stations),),
+            )
+            return [Observation(station, ts, pm25, source) for station, ts, pm25, source in cur]
+    except Exception as exc:
+        raise EdaDatabaseError(f"database query failed ({type(exc).__name__})") from None
 
 
 def write_report(metrics: dict[str, Any], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "kan-13-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    (output_dir / "kan-13-metrics.json").write_text(
+        json.dumps(metrics, indent=2, allow_nan=False) + "\n"
+    )
     (output_dir / "kan-13-eda.md").write_text(render_markdown(metrics))
     (output_dir / "kan-13-monthly.svg").write_text(
         render_bar_svg(
@@ -266,9 +321,12 @@ def main() -> None:
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         parser.error("DATABASE_URL must be set")
-    write_report(
-        analyze(load_observations(database_url, args.stations or TARGET_STATIONS)), args.output_dir
-    )
+    stations = args.stations or TARGET_STATIONS
+    try:
+        metrics = analyze(load_observations(database_url, stations), station_ids=stations)
+    except EdaDatabaseError as exc:
+        parser.error(str(exc))
+    write_report(metrics, args.output_dir)
     print(f"wrote aggregate EDA report to {args.output_dir}")
 
 
