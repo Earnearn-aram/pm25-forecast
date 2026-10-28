@@ -47,6 +47,11 @@ and appends `persistence-24h` and `cams` forecasts for +6, +12 and +24 h per sta
 `predictions` (idempotent per issue hour). Same settings as the collector; DB down means skip,
 alert and exit non-zero. Baselines: `models/baselines.py`. Workflow draft: `docs/predict-workflow.yml.txt`.
 
+Backtest (KAN-14): `uv run python -m pm25_forecast.backtest /private/path/input.json` runs
+read-only rolling-origin evaluation with identical scoring pairs, availability gates, and a
+28-day paired CAMS comparison rule. See [input contract and data limitations](docs/backtest.md).
+No historical CAMS results are invented when stored vintages are missing.
+
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).
 
