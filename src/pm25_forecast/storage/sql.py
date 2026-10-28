@@ -15,6 +15,10 @@ def require_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+# Overlap precedence (KAN-49): usable Air4Thai > OpenAQ, regardless of arrival order.
+# OpenAQ fills gaps, never displaces another source. A null Air4Thai value cannot steal
+# OpenAQ provenance; a later usable Air4Thai reading replaces it. Same-source updates
+# remain supported. The WHERE is evaluated atomically by the database on conflict.
 UPSERT_OBSERVATION = """
 INSERT INTO observations (station_id, ts, pm25, source)
 VALUES (%(station_id)s, %(ts)s, %(pm25)s, %(source)s)
@@ -22,6 +26,12 @@ ON CONFLICT (station_id, ts) DO UPDATE SET
     pm25 = COALESCE(excluded.pm25, observations.pm25),
     source = excluded.source,
     ingested_at = CURRENT_TIMESTAMP
+WHERE observations.source = excluded.source
+   OR (excluded.source = 'air4thai' AND excluded.pm25 IS NOT NULL)
+   OR (excluded.source = 'openaq' AND observations.pm25 IS NULL
+       AND excluded.pm25 IS NOT NULL)
+   OR (excluded.source NOT IN ('air4thai', 'openaq')
+       AND observations.source NOT IN ('air4thai', 'openaq'))
 """
 
 # Append-only forecast vintage: re-running the same issue never overwrites the first write.
