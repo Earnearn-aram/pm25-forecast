@@ -9,7 +9,11 @@
 # Cost: 3 runs/hour is about 2,200 runs/month. Each should take 1-2 minutes: check the repo
 # visibility (public repos have free Actions minutes; private ones draw on the plan's quota) and
 # lower the frequency if minutes run short.
-# Follow-ups, not in this file: heartbeat ping (KAN-30). Air4Thai TLS: AIR4THAI_CA_BUNDLE (KAN-43).
+# Failure alerting (KAN-19): the last step posts the job status and run link to ALERT_WEBHOOK_URL
+# when any step fails or the job is cancelled (e.g. timeout). The specific alert the collector
+# sent (if it got that far) arrives too; this one adds the run link. Daily heartbeat:
+# docs/heartbeat-workflow.yml.txt. Follow-ups: dead-man switch and alert dedup/state (KAN-30).
+# Air4Thai TLS: AIR4THAI_CA_BUNDLE (KAN-43).
 # Notes: GitHub cron is best effort (10-40 min late, sometimes skipped) and scheduled workflows are
 # disabled after 60 days without repo activity; the collector keys on data timestamps, so late or
 # doubled runs are safe. Air4Thai only exposes its latest reading, so we poll every 20 minutes
@@ -60,3 +64,21 @@ jobs:
           path: raw/
           retention-days: 14
           if-no-files-found: ignore
+      # KAN-19: alert when any step above failed, or the job was cancelled (timeout-minutes hit).
+      # Independent of the collector: no DB, no collector settings. If uv or the venv is unusable
+      # (setup-uv or the install step failed) a curl fallback posts a fixed message. The webhook
+      # URL is a secret: it comes in through env, reaches curl on stdin (-K -), never the command
+      # line, and is never echoed.
+      - name: Alert on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          uv run --no-dev python -m pm25_forecast.monitoring.notify failure && exit 0
+          [ -n "$ALERT_WEBHOOK_URL" ] || { echo "ALERT_WEBHOOK_URL is not set"; exit 0; }
+          msg="[pm25 ci] ${JOB_STATUS:-failure} (fallback): workflow ${GITHUB_WORKFLOW}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -
