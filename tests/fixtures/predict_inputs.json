@@ -1,0 +1,17 @@
+{
+  "_comment": "Synthetic inputs for tests/test_predict.py. Run time in the tests is 2026-10-28T12:12Z, so issue_time is 12:00Z. 59t has fresh observations and CAMS vintages (including one issued after the run, which must not be used, and no +24h row). 61t's newest observation is 4 h old and it has no CAMS rows.",
+  "observations": [
+    {"station_id": "59t", "ts": "2026-10-28T12:00:00+00:00", "pm25": 40.0},
+    {"station_id": "59t", "ts": "2026-10-28T11:00:00+00:00", "pm25": 38.0},
+    {"station_id": "59t", "ts": "2026-10-28T10:00:00+00:00", "pm25": null},
+    {"station_id": "59t", "ts": "2026-10-28T12:30:00+00:00", "pm25": 777.0},
+    {"station_id": "61t", "ts": "2026-10-28T08:00:00+00:00", "pm25": 20.0}
+  ],
+  "cams_vintages": [
+    {"station_id": "59t", "issue_time": "2026-10-28T00:07:00+00:00", "valid_time": "2026-10-28T18:00:00+00:00", "pm25_pred": 30.0},
+    {"station_id": "59t", "issue_time": "2026-10-28T00:07:00+00:00", "valid_time": "2026-10-29T00:00:00+00:00", "pm25_pred": 31.0},
+    {"station_id": "59t", "issue_time": "2026-10-28T06:07:00+00:00", "valid_time": "2026-10-28T18:00:00+00:00", "pm25_pred": 35.0},
+    {"station_id": "59t", "issue_time": "2026-10-28T06:07:00+00:00", "valid_time": "2026-10-29T00:00:00+00:00", "pm25_pred": 36.0},
+    {"station_id": "59t", "issue_time": "2026-10-28T12:30:00+00:00", "valid_time": "2026-10-28T18:00:00+00:00", "pm25_pred": 999.0}
+  ]
+}

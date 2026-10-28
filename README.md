@@ -42,6 +42,11 @@ Backfill (KAN-12 part 1, KAN-34): `uv run python -m pm25_forecast.backfill [--lo
 about 3 months) into `observations`. Same settings as the collector; idempotent, so it runs daily
 as gap recovery. Workflow draft: `docs/backfill-workflow.yml.txt`.
 
+Predict (KAN-28): `uv run python -m pm25_forecast.predict` reads stored observations and CAMS rows
+and appends `persistence-24h` and `cams` forecasts for +6, +12 and +24 h per station to
+`predictions` (idempotent per issue hour). Same settings as the collector; DB down means skip,
+alert and exit non-zero. Baselines: `models/baselines.py`. Workflow draft: `docs/predict-workflow.yml.txt`.
+
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).
 

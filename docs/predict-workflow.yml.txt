@@ -1,0 +1,71 @@
+# DRAFT for KAN-28. The agent token has no `workflow` scope, so this is committed as text.
+# Owner: copy to .github/workflows/predict.yml (drop the .txt), then:
+#   1. Same secrets/variables as the collector: DATABASE_URL, ALERT_WEBHOOK_URL (secrets),
+#      STATION_LOCATIONS (variable, e.g. "59t=lat,lon;61t=lat,lon;bkp100t=...;bkp101t=...;02t=...").
+#   2. Run it once with "Run workflow" (workflow_dispatch) and check the RUN_SUMMARY line before
+#      relying on cron. CAMS rows only exist from the day the collector started (2026-10-27), so
+#      early runs may list skipped CAMS horizons in the summary; that is expected, not a failure.
+#   3. Actions are pinned by commit sha, copied from docs/collector-workflow.yml.txt.
+# Cron: minute 12 of every hour. The collector runs at :07, :27 and :47 and takes 1-2 minutes, so
+# by :12 the :07 ingest has finished and the hour's observation and newest CAMS vintage are stored.
+# Off the hour to avoid the busiest minute. GitHub cron is best effort (10-40 min late, sometimes
+# skipped): issue_time is the run time floored to the UTC hour and rows are DO NOTHING on
+# (station_id, issue_time, valid_time, model_version), so late or doubled runs never duplicate.
+# A missed hour is simply an hour with no new vintage; nothing is back-filled or invented.
+# The predict step only reads the database (no HTTP clients). If the DB is unreachable it skips
+# the run, alerts and exits non-zero (storage/guard.py); it never falls back to stale data.
+# Failure alerting: the last step posts the job status and run link to ALERT_WEBHOOK_URL
+# when any step fails or the job is cancelled (e.g. timeout), as in the collector template.
+name: Predict
+
+on:
+  schedule:
+    - cron: "12 * * * *" # hourly, 5 minutes after the collector's :07 ingest
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time. Do not cancel a running job: a half-finished run would skip its writes.
+concurrency:
+  group: predict
+  cancel-in-progress: false
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # normal run is well under 2 minutes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Predict
+        # Secrets come in through env only; they are never echoed or put on a command line.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
+          AIR4THAI_CA_BUNDLE: certs/air4thai-ca.pem # not used by predict; kept identical to the collector
+        run: uv run --no-dev python -m pm25_forecast.predict
+      # Alert when any step above failed, or the job was cancelled (timeout-minutes hit).
+      # Independent of the predict module: no DB, no settings. If uv or the venv is unusable a curl
+      # fallback posts a fixed message. The webhook URL is a secret: it comes in through env,
+      # reaches curl on stdin (-K -), never the command line, and is never echoed.
+      - name: Alert on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          uv run --no-dev python -m pm25_forecast.monitoring.notify failure && exit 0
+          [ -n "$ALERT_WEBHOOK_URL" ] || { echo "ALERT_WEBHOOK_URL is not set"; exit 0; }
+          msg="[pm25 ci] ${JOB_STATUS:-failure} (fallback): workflow ${GITHUB_WORKFLOW}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -
