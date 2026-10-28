@@ -475,6 +475,14 @@ def test_openaq_parsers_pm25_only_and_tolerant() -> None:
     assert hours[OAQ_FIRST + timedelta(hours=4)] is None
     assert len(hours) == 5 and all(t.tzinfo for t in hours)  # malformed row dropped
     assert p.parse_openaq_hours({"results": "x"}) == {}
+    locations = p.parse_openaq_locations(load("openaq_target_locations_synthetic.json"))
+    assert {location.id: location.sensor_ids for location in locations} == {
+        201: [9001],
+        202: [9003],
+        203: [],
+        204: [9004],
+        205: [],
+    }
 
 
 def test_rank_candidates_nearest_first_with_runner_up() -> None:
@@ -574,6 +582,85 @@ def test_openaq_429_is_retried_and_pagination_followed(monkeypatch: pytest.Monke
     assert seen["limited"] == 1
     assert seen["pages"] == [1, 2, 3, 4]  # 6 rows at 2 per page; the empty 4th page stops it
     assert rows[0].status == "ok" and rows[0].hours_with_data == 4
+
+
+def test_embedded_pm25_sensors_bypass_location_sensor_lookup() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/locations/201/sensors"):
+            pytest.fail("embedded PM2.5 sensor should bypass the location-sensors endpoint")
+        return _oaq_handler(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    rows = p.probe_openaq_coverage(
+        client, "dummy-value", _target_stations(), NOW, 0, targets=["02t"]
+    )
+    assert rows[0].sensor_ids == [9001]
+    assert rows[0].status == "ok"
+    assert "/v3/locations/201/sensors" not in seen
+
+
+@pytest.mark.parametrize("embedded", [None, "malformed", [{"id": "bad", "parameter": {"id": 2}}]])
+def test_missing_or_malformed_embedded_sensors_use_compatibility_fallback(embedded: Any) -> None:
+    locations = load("openaq_target_locations_synthetic.json")
+    location = next(row for row in locations["results"] if row.get("id") == 201)
+    if embedded is None:
+        location.pop("sensors", None)
+    else:
+        location["sensors"] = embedded
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/locations"):
+            return httpx.Response(200, json=locations)
+        return _oaq_handler(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    rows = p.probe_openaq_coverage(
+        client, "dummy-value", _target_stations(), NOW, 0, targets=["02t"]
+    )
+    assert rows[0].sensor_ids == [9001]
+    assert "/v3/locations/201/sensors" in seen
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_openaq_transient_5xx_retries_are_bounded(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(p.time, "sleep", sleeps.append)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    probe, payload = p._openaq_get(client, "test", "/locations", "dummy-value", {}, 0)
+    assert calls == p.OPENAQ_MAX_RETRIES + 1
+    assert sleeps == [1.0, 2.0, 4.0]
+    assert not probe.ok and probe.status == status and payload is None
+
+
+def test_openaq_transient_5xx_recovers_before_retry_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(p.time, "sleep", lambda seconds: None)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503 if calls < 3 else 200, json={"results": []})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    probe, payload = p._openaq_get(client, "test", "/locations", "dummy-value", {}, 0)
+    assert calls == 3
+    assert probe.ok and payload == {"results": []}
 
 
 def test_openaq_failures_are_recorded_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
