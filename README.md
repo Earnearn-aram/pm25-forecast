@@ -75,3 +75,8 @@ If Air4Thai fails with `CERTIFICATE_VERIFY_FAILED`, re-run the `api-probe` workf
 "Run workflow") and read the "Air4Thai TLS diagnosis" section of the job summary or the
 `probe-report` artifact. See `certs/README.md` for what to do with the result and
 `AIR4THAI_CA_BUNDLE` in `.env.example`.
+
+OpenAQ 730-day history for the five project stations (KAN-49):
+`uv run python -m pm25_forecast.openaq_backfill`. See the
+[operator guide](docs/openaq-backfill.md) for configuration, restart behavior, source precedence
+and post-merge owner actions.
