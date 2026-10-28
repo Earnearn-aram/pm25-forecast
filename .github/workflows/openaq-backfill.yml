@@ -45,9 +45,13 @@ jobs:
       - name: Verify stored station coverage
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
         run: |
           uv run --no-dev python - <<'PY'
           import os
+          import sys
+          from datetime import datetime
           from pathlib import Path
 
           from pm25_forecast.storage.db import connect
@@ -58,6 +62,7 @@ jobs:
                      EXTRACT(EPOCH FROM (max(ts) - min(ts))) / 86400.0 AS span_days
               FROM observations
               WHERE station_id = ANY(%s) AND pm25 IS NOT NULL
+                    AND ts >= %s AND ts < %s
               GROUP BY station_id
               ORDER BY station_id
           """
@@ -65,12 +70,20 @@ jobs:
               SELECT station_id, source, count(*), min(ts), max(ts)
               FROM observations
               WHERE station_id = ANY(%s) AND pm25 IS NOT NULL
+                    AND ts >= %s AND ts < %s
               GROUP BY station_id, source
               ORDER BY station_id, source
           """
-          with connect(os.environ["DATABASE_URL"]) as connection:
-              combined = connection.execute(query, (list(station_ids),)).fetchall()
-              by_source = connection.execute(source_query, (list(station_ids),)).fetchall()
+          start = datetime.fromisoformat(os.environ["START"].replace("Z", "+00:00"))
+          end = datetime.fromisoformat(os.environ["END"].replace("Z", "+00:00"))
+          params = (list(station_ids), start, end)
+          try:
+              with connect(os.environ["DATABASE_URL"]) as connection:
+                  combined = connection.execute(query, params).fetchall()
+                  by_source = connection.execute(source_query, params).fetchall()
+          except Exception as exc:
+              print(f"database verification failed: {type(exc).__name__}", file=sys.stderr)
+              raise SystemExit(1) from None
 
           found = {row[0] for row in combined}
           missing = set(station_ids) - found
