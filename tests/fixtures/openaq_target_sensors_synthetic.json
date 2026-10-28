@@ -1,0 +1,11 @@
+{"_note":"SYNTHETIC fixture (KAN-46): OpenAQ v3 /locations/{id}/sensors-shaped replies keyed by location id; parameter id 2 is PM2.5, 1 is PM10.",
+ "201":{"results":[
+  {"id":9002,"parameter":{"id":1,"name":"pm10"}},
+  {"id":9001,"parameter":{"id":2,"name":"pm25"}},
+  {"id":"bad","parameter":{"id":2}},
+  "garbage"
+ ]},
+ "202":{"results":[{"id":9003,"parameter":{"id":2,"name":"pm25"}}]},
+ "204":{"results":[{"id":9004,"parameter":{"id":2,"name":"pm25"}}]},
+ "205":{"results":[{"id":9005,"parameter":{"id":1,"name":"pm10"}}]}
+}

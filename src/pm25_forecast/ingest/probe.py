@@ -32,6 +32,14 @@ AIR4THAI_STATIONS_URL = "http://air4thai.pcd.go.th/services/getNewAQI_JSON.php"
 AIR4THAI_HISTORY_URL = "http://air4thai.com/forweb/getHistoryData.php"
 OPENAQ_LOCATIONS_URL = "https://api.openaq.org/v3/locations"
 OPENAQ_PM25_PARAMETER_ID = 2
+OPENAQ_API_URL = "https://api.openaq.org/v3"
+# KAN-46: the PROJECT target stations (not the five best-covered ones the first probe used).
+TARGET_STATION_IDS: tuple[str, ...] = ("59t", "61t", "bkp100t", "bkp101t", "02t")
+OPENAQ_COVERAGE_DAYS = 730
+OPENAQ_PAGE_LIMIT = 1000
+OPENAQ_MAX_PAGES = 30  # 730 days of hourly values is 18 pages of 1000
+OPENAQ_MAX_RETRIES = 3
+OPENAQ_MAX_RETRY_WAIT_S = 60.0
 OPEN_METEO_CANDIDATES: list[tuple[str, str, str]] = [
     # (name, url, hourly variable)
     (
@@ -407,6 +415,114 @@ def decide(
     }
 
 
+# ---------------------------------------------------------------- KAN-46 OpenAQ station coverage
+
+
+class OpenAQCandidate(BaseModel):
+    """An OpenAQ location near one Air4Thai station, with its distance in metres."""
+
+    location_id: int
+    name: str | None = None
+    distance_m: float
+
+
+class OpenAQStationCoverage(BaseModel):
+    """What OpenAQ actually returned for one project target station (PM2.5, hourly)."""
+
+    station_id: str
+    status: str  # ok | no_match | no_pm25_sensor | no_data | station_unknown | error | skipped
+    note: str = ""
+    matched: OpenAQCandidate | None = None
+    runner_up: OpenAQCandidate | None = None
+    sensor_ids: list[int] = Field(default_factory=list)
+    first: datetime | None = None  # first hourly value returned (inside the window)
+    last: datetime | None = None
+    hours_with_data: int = 0
+    window_days: int = OPENAQ_COVERAGE_DAYS
+    window_hours: int = 0
+    missing_pct_window: float | None = None  # over the last `window_days` days
+    span_days: float = 0.0  # first -> last timestamp
+    missing_pct_span: float | None = None  # over first..last inclusive
+
+
+def parse_openaq_sensors(payload: Any, parameter_id: int = OPENAQ_PM25_PARAMETER_ID) -> list[int]:
+    """Sensor ids measuring the given parameter (PM2.5 only) in a /locations/{id}/sensors reply."""
+    rows = payload.get("results", []) if isinstance(payload, dict) else []
+    ids: list[int] = []
+    for row in rows if isinstance(rows, list) else []:
+        param = row.get("parameter") if isinstance(row, dict) else None
+        if not isinstance(param, dict) or param.get("id") != parameter_id:
+            continue
+        sid = row.get("id")
+        if isinstance(sid, int) and not isinstance(sid, bool) and sid not in ids:
+            ids.append(sid)
+    return ids
+
+
+def parse_openaq_hours(payload: Any) -> dict[datetime, float | None]:
+    """Parse a /sensors/{id}/hours reply into {UTC hour start: value or None}; skips bad rows."""
+    rows = payload.get("results", []) if isinstance(payload, dict) else []
+    out: dict[datetime, float | None] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        period = row.get("period")
+        stamp = _parse_dt(period.get("datetimeFrom")) if isinstance(period, dict) else None
+        if stamp is None:
+            continue
+        hour = stamp.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+        out[hour] = _num(row.get("value"))
+    return out
+
+
+def rank_openaq_candidates(
+    station: Station, locations: Iterable[OpenAQLocation]
+) -> list[OpenAQCandidate]:
+    """OpenAQ locations within MATCH_RADIUS_M of the station, nearest first."""
+    if station.lat is None or station.lon is None:
+        return []
+    ranked = [
+        OpenAQCandidate(
+            location_id=loc.id,
+            name=loc.name,
+            distance_m=round(haversine_m(station.lat, station.lon, loc.lat, loc.lon), 1),
+        )
+        for loc in locations
+    ]
+    return sorted(
+        (c for c in ranked if c.distance_m <= MATCH_RADIUS_M),
+        key=lambda c: (c.distance_m, c.location_id),
+    )
+
+
+def summarize_openaq_series(
+    station_id: str, series: dict[datetime, float | None], start: datetime, end: datetime
+) -> OpenAQStationCoverage:
+    """First/last timestamp and missing % over the window and over first..last (pure)."""
+    cov = compute_coverage(series, start, end)
+    out = OpenAQStationCoverage(
+        station_id=station_id,
+        status="ok" if cov.hours_with_data else "no_data",
+        first=cov.first,
+        last=cov.last,
+        hours_with_data=cov.hours_with_data,
+        window_days=round((end - start).total_seconds() / 86400),
+        window_hours=cov.expected_hours,
+        missing_pct_window=cov.missing_pct,
+        span_days=cov.span_days,
+    )
+    if cov.first and cov.last:
+        span_hours = int((cov.last - cov.first).total_seconds() // 3600) + 1
+        out.missing_pct_span = round(100.0 * (1 - cov.hours_with_data / span_hours), 2)
+    return out
+
+
+def openaq_coverage_text(rows: list[OpenAQStationCoverage]) -> str:
+    """One-line summary for the report (informational: it does not feed `decide`)."""
+    ok = [r.station_id for r in rows if r.status == "ok"]
+    return f"{len(ok)}/{len(rows)} target stations have OpenAQ PM2.5 hours: {', '.join(ok) or '-'}"
+
+
 # ---------------------------------------------------------------- network (never raises)
 
 
@@ -426,6 +542,166 @@ def _get(
         if tls.is_tls_verify_error(exc):
             probe.detail["tls_verify_failed"] = True
         return probe, None
+
+
+def fetch_station_lookup(client: httpx.Client, fallback: Iterable[Station]) -> dict[str, Station]:
+    """All Air4Thai stations by id (targets may lack a current PM2.5 reading); never raises."""
+    probe, payload = _get(client, "air4thai_station_list_all", AIR4THAI_STATIONS_URL)
+    lookup = {s.station_id: s for s in fallback}
+    if probe.ok:
+        lookup.update({s.station_id: s for s in parse_air4thai_stations(payload)})
+    return lookup
+
+
+def _openaq_get(
+    client: httpx.Client, name: str, path: str, api_key: str, params: dict[str, Any], pause: float
+) -> tuple[Probe, Any]:
+    """GET an OpenAQ v3 path; on HTTP 429 wait (Retry-After, capped) and retry a few times."""
+    probe = Probe(name=name)
+    for attempt in range(OPENAQ_MAX_RETRIES + 1):
+        probe = Probe(name=name)
+        try:
+            url = f"{OPENAQ_API_URL}{path}"
+            resp = client.get(url, params=params, headers={"X-API-Key": api_key})
+            probe.status = resp.status_code
+            if resp.status_code == 429 and attempt < OPENAQ_MAX_RETRIES:
+                try:
+                    wait = float(resp.headers.get("Retry-After", ""))
+                except ValueError:
+                    wait = 2.0 * (attempt + 1)
+                time.sleep(min(max(wait, pause), OPENAQ_MAX_RETRY_WAIT_S))
+                continue
+            resp.raise_for_status()
+            probe.ok = True
+            return probe, resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            # only the exception text is kept; request headers (the API key) never are
+            probe.error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            break
+    return probe, None
+
+
+def _openaq_hours_series(
+    client: httpx.Client,
+    api_key: str,
+    sensors: list[int],
+    start: datetime,
+    end: datetime,
+    pause: float,
+) -> tuple[dict[datetime, float | None], list[str]]:
+    """Page through hourly PM2.5 for each sensor; returns (series, problems)."""
+    series: dict[datetime, float | None] = {}
+    problems: list[str] = []
+    for sensor in sensors:
+        for page in range(1, OPENAQ_MAX_PAGES + 1):
+            params = {
+                "datetime_from": start.isoformat(),
+                "datetime_to": end.isoformat(),
+                "limit": OPENAQ_PAGE_LIMIT,
+                "page": page,
+            }
+            name, path = f"openaq_v3_hours:{sensor}", f"/sensors/{sensor}/hours"
+            p, payload = _openaq_get(client, name, path, api_key, params, pause)
+            time.sleep(pause)
+            if not p.ok:
+                problems.append(f"sensor {sensor} page {page} failed: {p.error} (HTTP {p.status})")
+                break
+            for stamp, value in parse_openaq_hours(payload).items():
+                if value is not None or stamp not in series:
+                    series[stamp] = value
+            raw = payload.get("results") if isinstance(payload, dict) else None
+            if not isinstance(raw, list) or len(raw) < OPENAQ_PAGE_LIMIT:
+                break
+        else:
+            problems.append(f"sensor {sensor} stopped at {OPENAQ_MAX_PAGES} pages")
+    return series, problems
+
+
+def _openaq_station_coverage(
+    client: httpx.Client,
+    api_key: str,
+    station: Station | None,
+    station_id: str,
+    start: datetime,
+    end: datetime,
+    pause: float,
+) -> OpenAQStationCoverage:
+    days = round((end - start).total_seconds() / 86400)
+
+    def fail(status: str, note: str, **kw: Any) -> OpenAQStationCoverage:
+        return OpenAQStationCoverage(
+            station_id=station_id, status=status, note=note, window_days=days, **kw
+        )
+
+    if station is None or station.lat is None or station.lon is None:
+        return fail("station_unknown", "no coordinates for this station in the Air4Thai list")
+    loc_params = {
+        "coordinates": f"{station.lat},{station.lon}",
+        "radius": int(MATCH_RADIUS_M),
+        "parameters_id": OPENAQ_PM25_PARAMETER_ID,
+        "limit": 100,
+    }
+    p, payload = _openaq_get(
+        client, f"openaq_v3_locations:{station_id}", "/locations", api_key, loc_params, pause
+    )
+    time.sleep(pause)
+    if not p.ok:
+        return fail("error", f"locations lookup failed: {p.error} (HTTP {p.status})")
+    ranked = rank_openaq_candidates(station, parse_openaq_locations(payload))
+    if not ranked:
+        return fail("no_match", f"no match within {MATCH_RADIUS_M:.0f} m")
+    best = ranked[0]
+    runner = ranked[1] if len(ranked) > 1 else None
+    notes = [f"{len(ranked)} candidates within {MATCH_RADIUS_M:.0f} m; nearest chosen"]
+    path = f"/locations/{best.location_id}/sensors"
+    p, payload = _openaq_get(
+        client, f"openaq_v3_sensors:{best.location_id}", path, api_key, {}, pause
+    )
+    time.sleep(pause)
+    if not p.ok:
+        note = f"sensor lookup failed: {p.error} (HTTP {p.status})"
+        return fail("error", note, matched=best, runner_up=runner)
+    sensors = parse_openaq_sensors(payload)
+    if not sensors:
+        note = "matched location has no PM2.5 sensor"
+        return fail("no_pm25_sensor", note, matched=best, runner_up=runner)
+    if len(sensors) > 1:
+        notes.append(f"{len(sensors)} PM2.5 sensors merged")
+    series, problems = _openaq_hours_series(client, api_key, sensors, start, end, pause)
+    cov = summarize_openaq_series(station_id, series, start, end)
+    status = "error" if problems and not cov.hours_with_data else cov.status
+    return cov.model_copy(
+        update={
+            "matched": best,
+            "runner_up": runner,
+            "sensor_ids": sensors,
+            "note": "; ".join(notes + problems),
+            "status": status,
+        }
+    )
+
+
+def probe_openaq_coverage(
+    client: httpx.Client,
+    api_key: str | None,
+    stations: dict[str, Station],
+    now: datetime,
+    pause: float,
+    targets: Iterable[str] = TARGET_STATION_IDS,
+    days: int = OPENAQ_COVERAGE_DAYS,
+) -> list[OpenAQStationCoverage]:
+    """KAN-46: per target station, the matched OpenAQ location and its actual PM2.5 hours."""
+    end = now.replace(minute=0, second=0, microsecond=0)
+    start = end - timedelta(days=days)
+    out: list[OpenAQStationCoverage] = []
+    for sid in targets:
+        if not api_key:
+            note = "OPENAQ_API_KEY not set; skipped"
+            out.append(OpenAQStationCoverage(station_id=sid, status="skipped", note=note))
+            continue
+        station = stations.get(sid)
+        out.append(_openaq_station_coverage(client, api_key, station, sid, start, end, pause))
+    return out
 
 
 def _chunks(start: datetime, end: datetime, days: int) -> list[tuple[datetime, datetime]]:
@@ -574,6 +850,7 @@ def build_report(
     openaq: list[OpenAQLocation],
     matches: dict[str, int | None],
     air4thai_tls: dict[str, Any] | None = None,
+    openaq_coverage: list[OpenAQStationCoverage] | None = None,
 ) -> dict[str, Any]:
     ranked = sorted(coverage.items(), key=lambda kv: kv[1].missing_pct)
     chosen = [sid for sid, _ in ranked[:MAX_STATIONS]]
@@ -616,6 +893,11 @@ def build_report(
             "matched": sum(1 for v in matches.values() if v is not None),
             "of": len(matches),
         },
+        "openaq_target_coverage": {
+            "targets": list(TARGET_STATION_IDS),
+            "summary": openaq_coverage_text(openaq_coverage or []),
+            "stations": [r.model_dump() for r in openaq_coverage or []],
+        },
         "probes": [p.model_dump() for p in probes],
         "air4thai_tls": air4thai_tls or {},
     }
@@ -646,6 +928,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
     ]
     lines += render_history_markdown(report.get("air4thai_history") or {})
+    lines += render_openaq_coverage_markdown(report.get("openaq_target_coverage") or {})
     lines += ["| Probe | OK | HTTP | Detail |", "|---|---|---|---|"]
     for p in report["probes"]:
         detail = p["error"] or json.dumps(p["detail"], default=str)
@@ -677,6 +960,39 @@ def render_history_markdown(h: dict[str, Any]) -> list[str]:
         lines.append(
             f"| {sid} | {s['chunks_with_rows']} | {s['chunks_empty']} | {s['chunks_failed']} "
             f"| {s['first']} | {s['missing_pct_requested']} | {s['missing_pct_in_window']} |"
+        )
+    return [*lines, ""]
+
+
+def _fmt_candidate(c: dict[str, Any] | None) -> str:
+    return f"{c['location_id']} ({c['distance_m']} m)" if c else "-"
+
+
+def render_openaq_coverage_markdown(section: dict[str, Any]) -> list[str]:
+    """KAN-46: OpenAQ PM2.5 coverage for the project target stations."""
+    rows = section.get("stations") or []
+    if not rows:
+        return []
+    lines = [
+        "## OpenAQ coverage for target stations",
+        "",
+        f"Targets: {', '.join(section.get('targets', []))}. {section.get('summary', '')}",
+        "Hourly PM2.5 actually returned by OpenAQ v3 for the matched location (PM2.5 sensors "
+        f"only). Window = the last {rows[0].get('window_days')} days; first/last are inside "
+        "that window; span = first to last returned hour.",
+        "",
+        "| Station | Status | OpenAQ location (distance) | Runner-up | First (UTC) | Last (UTC) "
+        "| Span (d) | Hours | Missing % (window) | Missing % (first..last) | Note |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        matched = _fmt_candidate(r.get("matched")) if r.get("matched") else "no match within 1000 m"
+        lines.append(
+            f"| {r['station_id']} | {r['status']} | {matched} "
+            f"| {_fmt_candidate(r.get('runner_up'))} | {r.get('first') or '-'} "
+            f"| {r.get('last') or '-'} | {r.get('span_days')} | {r.get('hours_with_data')} "
+            f"| {r.get('missing_pct_window')} | {r.get('missing_pct_span')} "
+            f"| {r.get('note') or ''} |"
         )
     return [*lines, ""]
 
@@ -829,8 +1145,17 @@ def run(
         om_probes = probe_open_meteo(client, now, days)
         key = os.environ.get("OPENAQ_API_KEY") or None
         oaq_probes, locations, matches = probe_openaq(client, key, stations)
+        lookup = fetch_station_lookup(client, stations) if key else {}
+        oaq_coverage = probe_openaq_coverage(client, key, lookup, now, pause)
     report = build_report(
-        now, a_probes + om_probes + oaq_probes, stations, coverage, locations, matches, tls_report
+        now,
+        a_probes + om_probes + oaq_probes,
+        stations,
+        coverage,
+        locations,
+        matches,
+        tls_report,
+        oaq_coverage,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.with_suffix(".json").write_text(json.dumps(report, indent=2, default=str))
