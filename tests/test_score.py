@@ -101,6 +101,22 @@ def test_rerun_is_idempotent_and_corrected_actual_updates_the_score(fake):
     assert scores(fake) == [("59t", (issue + 24 * H).isoformat(), P, 35.0, 5.0)]
 
 
+def test_actual_corrected_to_null_drops_the_score_from_metrics(fake):
+    issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    add_pred(fake, "59t", issue, 24, P, 40.0)
+    add_obs(fake, "59t", issue + 24 * H, 30.0)
+    assert do_run(fake).metrics[P][24].n == 1
+    add_obs(fake, "59t", issue + 24 * H, None)
+    result = do_run(fake)
+    assert result.waiting[P] == 1 and 24 not in result.metrics.get(P, {})
+
+
+def test_summary_reports_empty_horizons_as_zero(fake, caplog):
+    caplog.set_level("INFO")
+    do_run(fake)
+    assert '"+24h": {"n": 0}' in caplog.text
+
+
 def test_only_persistence_and_challenger_are_scored_not_cams(fake):
     issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
     for model in (P, CHALLENGER, CAMS_PASSTHROUGH_MODEL_VERSION, CAMS_MODEL_VERSION):

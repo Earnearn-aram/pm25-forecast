@@ -110,11 +110,16 @@ WHERE p.model_version = %(model_version)s
   AND p.valid_time >= %(since)s AND p.valid_time <= %(now)s
 """
 
-# Scoring (KAN-20): one model's scores in a rolling window of valid_time, for metrics.
+# Scoring (KAN-20): one model's scores in a rolling window of valid_time, for metrics. Only
+# scores whose actual is still usable count: an observation later corrected to NULL or negative
+# drops its score from the metrics (the row is kept, never deleted).
 SELECT_SCORES_BETWEEN = """
-SELECT station_id, issue_time, valid_time, abs_error FROM scores
-WHERE model_version = %(model_version)s
-  AND valid_time >= %(since)s AND valid_time <= %(now)s
+SELECT s.station_id, s.issue_time, s.valid_time, s.abs_error FROM scores s
+JOIN observations o
+  ON o.station_id = s.station_id AND o.ts = s.valid_time
+ AND o.pm25 IS NOT NULL AND o.pm25 >= 0
+WHERE s.model_version = %(model_version)s
+  AND s.valid_time >= %(since)s AND s.valid_time <= %(now)s
 """
 
 

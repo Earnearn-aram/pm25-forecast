@@ -55,9 +55,12 @@ jobs:
         run: uv run --no-dev python -m pm25_forecast.predict
       # KAN-20: score matured forecasts (persistence + challenger) against arrived actuals.
       # Runs even when Predict failed: it only reads predictions/observations and writes `scores`,
-      # so it cannot cost a forecast. Same DB-down policy (skip, alert, exit 1).
+      # so it cannot cost a forecast. Same DB-down policy (skip, alert, exit 1); when the DB is
+      # down both steps alert (accepted: two lines naming the failing step). Own timeout so a slow
+      # scoring run cannot eat the whole job budget.
       - name: Score
         if: success() || failure()
+        timeout-minutes: 4
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}

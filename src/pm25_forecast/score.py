@@ -13,7 +13,11 @@ metrics by model and horizon.
 * CAMS rows are not scored: CAMS is out of the plan (decided 2026-10-29).
 * Metrics over ``METRICS_WINDOW`` of valid_time, per model and horizon (+6/+12/+24 h): n, MAE,
   RMSE and skill vs persistence = 1 - MAE_model / MAE_persistence on matched pairs (same station,
-  issue_time and valid_time). Positive skill = better than persistence.
+  issue_time and valid_time). Positive skill = better than persistence. ``n`` counts all of the
+  model's scores; ``n_matched`` the pairs behind the skill. A model or horizon with no scores is
+  reported as ``{"n": 0}``; skill is null when there are no matched pairs.
+* A score whose actual is later corrected to unusable (NULL/negative) leaves the metrics; the
+  row is kept, not deleted.
 * Reads and writes only the database. Never touches ``predictions``, so a scoring failure cannot
   cost a forecast. DB down: ``run_entrypoint`` skips the run, alerts, exits non-zero.
 
@@ -235,8 +239,13 @@ def run(
             "written": result.written,
             "metrics_window_days": METRICS_WINDOW.days,
             "metrics": {
-                m: {f"+{h}h": metric.as_dict() for h, metric in per_h.items()}
-                for m, per_h in result.metrics.items()
+                m: {
+                    f"+{h}h": result.metrics[m][h].as_dict()
+                    if h in result.metrics.get(m, {})
+                    else {"n": 0}
+                    for h in HORIZONS_H
+                }
+                for m in models
             },
             "failures": result.failures,
         },
