@@ -65,11 +65,12 @@ def add_pred(fake, station, issue, model):
     fake.con.commit()
 
 
-def seed_obs(fake, station, newest=HOUR - H, hours=25, pm25=30.0, skip=()):
-    """Hourly air4thai readings ending at `newest`, going back `hours` rows."""
+def seed_obs(fake, station, newest=HOUR - H, hours=25, pm25=30.0, skip=(), source="air4thai"):
+    """Hourly readings ending at `newest`, going back `hours` rows (the oldest falls outside
+    the 24 h window, so 24 rows count)."""
     for i in range(hours):
         if i not in skip:
-            add_obs(fake, station, newest - i * H, pm25)
+            add_obs(fake, station, newest - i * H, pm25, source)
 
 
 def seed(fake, stations=STATIONS, forecast_issue=HOUR):
@@ -199,13 +200,13 @@ def test_out_of_range_readings_fail(fake):
 def test_null_rate(fake):
     seed(fake, stations=("60t",))
     seed_obs(fake, "59t")
-    for i in range(2, 6):  # 4 of 25 rows: 16%
+    for i in range(2, 6):  # 4 of 24 rows in the window: 17%
         add_obs(fake, "59t", HOUR - i * H, None)
     assert get(do_run(fake), "air4thai", "59t", "null_rate").status == "ok"
-    for i in range(6, 9):  # 7 of 25 rows: 28%
+    for i in range(6, 9):  # 7 of 24 rows in the window: 29%
         add_obs(fake, "59t", HOUR - i * H, None)
     check = get(do_run(fake), "air4thai", "59t", "null_rate")
-    assert check.status == "warn" and check.value == pytest.approx(0.28)
+    assert check.status == "warn" and check.value == pytest.approx(7 / 24, abs=1e-4)
 
 
 def test_expected_station_without_rows_warns_and_unexpected_one_is_still_checked(fake):
@@ -264,7 +265,7 @@ def test_source_wide_row_with_null_station_is_unique_per_hour(fake):
 def test_naive_datetime_is_rejected(fake):
     seed(fake)
     with pytest.raises(ValueError, match="timezone-aware"):
-        do_run(fake, now=datetime(2026, 10, 30, 12, 20))
+        do_run(fake, now=NOW.replace(tzinfo=None))
     assert stored(fake) == 0
 
 
