@@ -53,3 +53,22 @@ CREATE TABLE IF NOT EXISTS model_champion (
     model_version  text        NOT NULL REFERENCES models(model_version),
     promoted_at    timestamptz NOT NULL DEFAULT now()
 );
+
+-- Drift checks: one row per model and feature (or `target_pm25`) per UTC day.
+-- `checked_at` is the UTC day (midnight) the check belongs to, so a re-run on the same day updates
+-- the row; `computed_at` is when it was last computed. psi is NULL when status = 'insufficient'.
+CREATE TABLE IF NOT EXISTS drift_checks (
+    checked_at     timestamptz      NOT NULL,
+    model_version  text             NOT NULL,
+    feature        text             NOT NULL,
+    psi            double precision,
+    status         text             NOT NULL CHECK (status IN ('ok', 'warn', 'alert', 'insufficient')),
+    ref_start      timestamptz      NOT NULL,
+    ref_end        timestamptz      NOT NULL,
+    recent_start   timestamptz      NOT NULL,
+    recent_end     timestamptz      NOT NULL,
+    n_ref          integer          NOT NULL,
+    n_recent       integer          NOT NULL,
+    computed_at    timestamptz      NOT NULL DEFAULT now(),
+    PRIMARY KEY (checked_at, model_version, feature)
+);
