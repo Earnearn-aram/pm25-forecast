@@ -12,7 +12,8 @@ Per run, per source and station, five checks over the database (see docs/data-qu
 Every result is upserted into ``data_quality_checks`` keyed on (checked_at hour, source, station,
 check), so a re-run in the same hour overwrites instead of duplicating.
 
-Alerting: one alert per run, listing only the ``fail`` items (freshness and out-of-range).
+Alerting: one alert per run, only when something changed: ``fail`` items (freshness and
+out-of-range) that were not failing in the previous snapshot, plus a line for recoveries.
 Missing hours are recorded as ``warn`` and never alerted: the Collector already alerts on gaps.
 A run that found failing data still exits 0 (the alert is the signal, and a red step would make
 the workflow's failure alert fire a second time); exit 1 means the run itself failed.
@@ -52,6 +53,8 @@ PM25_MIN, PM25_MAX = 0.0, 1000.0  # usable = finite and within [PM25_MIN, PM25_M
 MISSING_HOURS_WARN = 3  # never fails: the Collector alerts on gaps
 NULL_RATE_WARN = 0.2  # share of rows with NULL pm25; never fails
 EXPECTED_STATION_MIN_ROWS = 1  # fewer rows than this in the window = warn
+FRESHNESS_LOOKBACK_D = 7  # newest-observation search; older data counts as "none", so a retired
+# station cannot fail forever (only STATION_LOCATIONS stations get a freshness check at all)
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,13 @@ class ObsRow(BaseModel):
 class Newest(BaseModel):
     station_id: str
     newest: AwareDatetime
+
+
+class PreviousFail(BaseModel):
+    checked_at: AwareDatetime
+    source: str
+    station_id: str
+    check_name: str
 
 
 @dataclass(frozen=True)
@@ -116,6 +126,8 @@ class QualityResult:
     checks: list[Check] = field(default_factory=list)
     written: int = 0
     failures: list[str] = field(default_factory=list)  # the run itself failed
+    new_failing: list[Check] = field(default_factory=list)  # fail now, not failing before
+    recovered: list[Check] = field(default_factory=list)  # failed before, ok/warn now
 
     @property
     def failing(self) -> list[Check]:
@@ -134,6 +146,17 @@ VALUES (
 ON CONFLICT (checked_at, source, station_id, check_name)
 DO UPDATE SET status = excluded.status, value = excluded.value,
               threshold = excluded.threshold, detail = excluded.detail
+WHERE (CASE excluded.status WHEN 'fail' THEN 2 WHEN 'warn' THEN 1 ELSE 0 END)
+   >= (CASE data_quality_checks.status WHEN 'fail' THEN 2 WHEN 'warn' THEN 1 ELSE 0 END)
+"""
+
+# Failing checks of the latest stored snapshot at or before this hour (this hour's earlier runs
+# included), read before this run writes. Used to alert on changes only.
+SELECT_PREVIOUS_FAILS = """
+SELECT checked_at, source, station_id, check_name FROM data_quality_checks
+WHERE status = 'fail' AND checked_at = (
+    SELECT max(checked_at) FROM data_quality_checks WHERE checked_at <= %(checked_at)s
+)
 """
 
 SELECT_RECENT_OBSERVATIONS = """
@@ -145,7 +168,7 @@ WHERE ts >= %(since)s AND ts <= %(now)s
 SELECT_NEWEST_USABLE_OBSERVATION = """
 SELECT station_id, max(ts) FROM observations
 WHERE source = %(source)s AND pm25 IS NOT NULL AND pm25 >= %(lo)s AND pm25 <= %(hi)s
-  AND ts <= %(now)s
+  AND ts >= %(since)s AND ts <= %(now)s
 GROUP BY station_id
 """
 
@@ -168,10 +191,18 @@ def usable(value: float | None) -> bool:
 
 
 def freshness_check(
-    source: str, station_id: str, newest: datetime | None, now: datetime, limit: Limit, what: str
+    source: str,
+    station_id: str,
+    newest: datetime | None,
+    now: datetime,
+    limit: Limit,
+    what: str,
+    missing_status: str | None = None,
 ) -> Check:
+    """``missing_status`` is the status when nothing was found (default: fail if the limit can
+    fail, else warn)."""
     if newest is None:
-        status = FAIL if limit.fail is not None else WARN
+        status = missing_status or (FAIL if limit.fail is not None else WARN)
         threshold = limit.fail if limit.fail is not None else limit.warn
         return Check(source, station_id, "freshness", status, None, threshold, f"no {what} found")
     age = (sql.require_utc(now) - sql.require_utc(newest)) / timedelta(hours=1)
@@ -245,7 +276,9 @@ def observation_checks(
     for source, station in sorted(keys):
         mine = window.get((source, station), [])
         limit = OBSERVATION_FRESHNESS.get(source)
-        if limit is not None:
+        # Freshness only for expected stations; OpenAQ only where it has data.
+        has_data = (source, station) in newest or bool(mine)
+        if limit is not None and station in expected and (source == AIR4THAI_SOURCE or has_data):
             found = newest.get((source, station))
             out.append(freshness_check(source, station, found, now, limit, "usable observation"))
         out.append(out_of_range_check(source, station, mine))
@@ -268,8 +301,9 @@ def forecast_checks(
         is_cams = model == CAMS_MODEL_VERSION
         limit = CAMS_FRESHNESS if is_cams else PREDICTION_FRESHNESS
         what = "vintage" if is_cams else "forecast"
+        # A model with no forecast at all (e.g. a newly configured challenger) only warns.
         out.extend(
-            freshness_check(model, station, newest.get((model, station)), now, limit, what)
+            freshness_check(model, station, newest.get((model, station)), now, limit, what, WARN)
             for station in expected
         )
     return out
@@ -285,11 +319,41 @@ def _validated[M: BaseModel](model: type[M], rows: Sequence[Sequence[Any]], name
     return good
 
 
-def alert_text(failing: Sequence[Check], limit: int = 15) -> str:
-    """The one alert body: fail items only, no secrets (ids, numbers and check names)."""
-    shown = "; ".join(c.label() for c in failing[:limit])
-    more = f" (+{len(failing) - limit} more)" if len(failing) > limit else ""
-    return f"{len(failing)} data quality check(s) failing: {shown}{more}"
+def _key(check: Check) -> tuple[str, str, str]:
+    return (check.source, check.station_id, check.check)
+
+
+def changes(
+    checks: Sequence[Check],
+    previous: dict[tuple[str, str, str], datetime],
+    checked_at: datetime,
+) -> tuple[list[Check], list[Check]]:
+    """(new fails, recovered). A fail that persists is neither. ``previous`` maps the failing
+    keys of the last stored snapshot to its hour. A recovery is reported once, when the failing
+    snapshot is from an earlier hour: this hour's rows never downgrade, so a recovery seen
+    within the hour of the failure would otherwise repeat on every run."""
+    new = [c for c in checks if c.status == FAIL and _key(c) not in previous]
+    recovered = [
+        c
+        for c in checks
+        if c.status != FAIL and _key(c) in previous and previous[_key(c)] < checked_at
+    ]
+    return new, recovered
+
+
+def alert_text(new_failing: Sequence[Check], recovered: Sequence[Check] = (), limit: int = 15):
+    """The one alert body: new fail items and recoveries only; ids, numbers and check names,
+    no secrets."""
+    parts = []
+    if new_failing:
+        shown = "; ".join(c.label() for c in new_failing[:limit])
+        more = f" (+{len(new_failing) - limit} more)" if len(new_failing) > limit else ""
+        parts.append(f"{len(new_failing)} new data quality failure(s): {shown}{more}")
+    if recovered:
+        shown = "; ".join(c.label() for c in recovered[:limit])
+        more = f" (+{len(recovered) - limit} more)" if len(recovered) > limit else ""
+        parts.append(f"recovered ({len(recovered)}): {shown}{more}")
+    return "\n".join(parts)
 
 
 def run(
@@ -329,10 +393,17 @@ def run(
         for source in OBSERVATION_FRESHNESS:
             raw = con.execute(
                 SELECT_NEWEST_USABLE_OBSERVATION,
-                {"source": source, "lo": PM25_MIN, "hi": PM25_MAX, "now": now},
+                {
+                    "source": source,
+                    "lo": PM25_MIN,
+                    "hi": PM25_MAX,
+                    "since": now - timedelta(days=FRESHNESS_LOOKBACK_D),
+                    "now": now,
+                },
             ).fetchall()
             for n in _validated(Newest, raw, ("station_id", "newest")):
-                newest_obs[(source, n.station_id)] = n.newest
+                if n.station_id in expected:  # a retired station must not fail forever
+                    newest_obs[(source, n.station_id)] = n.newest
         newest_fc: dict[tuple[str, str], datetime] = {}
         for model in models:
             raw = con.execute(
@@ -343,6 +414,15 @@ def run(
         result.checks = observation_checks(obs, newest_obs, expected, now) + forecast_checks(
             newest_fc, models, expected, now
         )
+        previous = {
+            (p.source, p.station_id, p.check_name): p.checked_at
+            for p in _validated(
+                PreviousFail,
+                con.execute(SELECT_PREVIOUS_FAILS, {"checked_at": checked_at}).fetchall(),
+                ("checked_at", "source", "station_id", "check_name"),
+            )
+        }
+        result.new_failing, result.recovered = changes(result.checks, previous, checked_at)
         result.written = sql.write_rows(
             con, UPSERT_CHECK, [c.row(checked_at) for c in result.checks]
         )
@@ -358,6 +438,8 @@ def run(
             "checks": len(result.checks),
             "by_status": by_status,
             "failing": [c.label() for c in result.failing],
+            "new_failing": [c.label() for c in result.new_failing],
+            "recovered": [c.label() for c in result.recovered],
             "failures": result.failures,
         },
     )
@@ -389,8 +471,8 @@ def main() -> int:
     if isinstance(result, RunSkipped):  # DB down: the guard has already alerted
         log_summary(logger, "quality", {"status": "db_unreachable"})
         return code
-    if result.failing:  # one alert per run, fail items only
-        safe_alert(alert, alert_text(result.failing))
+    if result.new_failing or result.recovered:  # one alert per run; changes only, fails only
+        safe_alert(alert, alert_text(result.new_failing, result.recovered))
     if result.failures:
         safe_alert(alert, "run completed with failures: " + "; ".join(result.failures))
         return EXIT_FAILED

@@ -166,12 +166,29 @@ def test_prediction_freshness_per_served_model(fake, model, age_h, status):
     assert get(result, model, "60t", "freshness").status == "ok"
 
 
-def test_missing_model_forecast_fails_and_no_challenger_means_no_check(fake):
+def test_model_with_no_forecast_ever_only_warns_and_no_challenger_means_no_check(fake):
     seed(fake)
+    fake.con.execute("DELETE FROM predictions WHERE model_version = ?", (CHALLENGER,))
+    result = do_run(fake)
+    check = get(result, CHALLENGER, "59t", "freshness")
+    assert check.status == "warn" and check.value is None
+    assert not result.failing
     fake.con.execute("DELETE FROM predictions WHERE model_version = ?", (P,))
     result = do_run(fake, challenger_model_version=None)
-    assert get(result, P, "59t", "freshness").status == "fail"
+    assert get(result, P, "59t", "freshness").status == "warn"
     assert not [c for c in result.checks if c.source == CHALLENGER]
+
+
+def test_freshness_only_looks_back_seven_days_and_only_for_expected_stations(fake):
+    seed(fake, stations=("60t",))
+    seed_obs(fake, "59t", newest=HOUR - 8 * 24 * H, hours=3)  # expected, but data is 8 days old
+    seed_obs(fake, "retired", newest=HOUR - 20 * 24 * H, hours=3)
+    seed_obs(fake, "other", newest=HOUR - H, hours=3)  # unexpected, with recent data
+    result = do_run(fake)
+    stale = get(result, "air4thai", "59t", "freshness")
+    assert stale.status == "fail" and stale.value is None
+    assert not [c for c in result.checks if c.station_id == "retired"]
+    assert not [c for c in result.checks if c.station_id == "other" and c.check == "freshness"]
 
 
 @pytest.mark.parametrize(("dropped", "status"), [(2, "ok"), (3, "warn"), (12, "warn")])
@@ -295,17 +312,82 @@ def test_one_alert_lists_fail_items_only(fake, monkeypatch, caplog):
     add_obs(fake, "59t", HOUR - 2 * H, -1.0)  # out of range: fail
     fake.con.execute("DELETE FROM predictions WHERE station_id = '60t' AND model_version = ?", (P,))
     fake.con.commit()
-    alerts: list[str] = []
-    monkeypatch.setattr(quality, "get_settings", lambda: settings())
-    monkeypatch.setattr(quality, "make_alert", lambda *_a, **_k: alerts.append)
-    orig = quality.run
-    monkeypatch.setattr(quality, "run", lambda s: orig(s, connect=fake, clock=lambda: NOW))
-    assert quality.main() == 0  # failing data is alerted, not a failed run
+    add_pred(fake, "60t", HOUR - 8 * H, P)  # 8 h old: fail
+    alerts = run_main(fake, monkeypatch)
     assert len(alerts) == 1
     text = alerts[0]
     assert "59t out_of_range" in text and f"{P}/60t freshness" in text
     assert "missing_hours" not in text and "null_rate" not in text
     assert DB_PASSWORD not in text and DB_URL not in text
+
+
+def run_main(fake, monkeypatch, now=NOW) -> list[str]:
+    """Run `main()` against the fake DB at `now`; return the alerts it sent."""
+    alerts: list[str] = []
+    monkeypatch.setattr(quality, "get_settings", lambda: settings())
+    monkeypatch.setattr(quality, "make_alert", lambda *_a, **_k: alerts.append)
+    orig = quality.run
+    monkeypatch.setattr(quality, "run", lambda s: orig(s, connect=fake, clock=lambda: now))
+    assert quality.main() == 0  # failing data is alerted, not a failed run
+    return alerts
+
+
+def test_persisting_fail_alerts_once_then_recovery_is_reported_once(fake, monkeypatch):
+    seed(fake)
+    add_obs(fake, "59t", HOUR - 2 * H, -1.0)  # out of range: fail
+    assert len(run_main(fake, monkeypatch)) == 1  # new
+    assert run_main(fake, monkeypatch, NOW + timedelta(minutes=30)) == []  # same hour: silent
+    assert run_main(fake, monkeypatch, NOW + H) == []  # still failing next hour: silent
+    add_obs(fake, "59t", HOUR - 2 * H, 30.0)  # fixed
+    recovered = run_main(fake, monkeypatch, NOW + 2 * H)
+    assert len(recovered) == 1 and "recovered" in recovered[0]
+    assert "59t out_of_range" in recovered[0] and "new data quality" not in recovered[0]
+    assert run_main(fake, monkeypatch, NOW + 3 * H) == []  # nothing left to report
+
+
+def test_new_fail_alerts_again_after_a_recovery(fake, monkeypatch):
+    seed(fake)
+    add_obs(fake, "59t", HOUR - 2 * H, -1.0)
+    assert len(run_main(fake, monkeypatch)) == 1
+    add_obs(fake, "59t", HOUR - 2 * H, 30.0)
+    assert len(run_main(fake, monkeypatch, NOW + H)) == 1  # recovered
+    add_obs(fake, "59t", HOUR - 2 * H, 2000.0)
+    again = run_main(fake, monkeypatch, NOW + 2 * H)
+    assert len(again) == 1 and "new data quality" in again[0]
+
+
+def test_changes_are_computed_from_the_previous_snapshot():
+    def chk(status, name="out_of_range"):
+        return quality.Check("air4thai", "59t", name, status, 1.0, 0.0, "d")
+
+    key = ("air4thai", "59t", "out_of_range")
+    earlier, same_hour = HOUR - H, HOUR
+    assert quality.changes([chk("fail")], {}, HOUR) == ([chk("fail")], [])
+    assert quality.changes([chk("fail")], {key: earlier}, HOUR) == ([], [])
+    assert quality.changes([chk("ok")], {key: earlier}, HOUR) == ([], [chk("ok")])
+    assert quality.changes([chk("warn")], {key: earlier}, HOUR) == ([], [chk("warn")])
+    assert quality.changes([chk("ok")], {key: same_hour}, HOUR) == ([], [])  # reported next hour
+    assert quality.changes([chk("ok", "null_rate")], {key: earlier}, HOUR) == ([], [])
+
+
+def test_same_hour_rerun_never_downgrades_a_check(fake):
+    seed(fake)
+    add_obs(fake, "59t", HOUR - 2 * H, -1.0)
+    do_run(fake)
+    add_obs(fake, "59t", HOUR - 2 * H, 30.0)  # fixed within the same hour
+    result = do_run(fake, now=NOW + timedelta(minutes=30))
+    assert get(result, "air4thai", "59t", "out_of_range").status == "ok"
+    rows = fake.con.execute(
+        "SELECT status, value, detail FROM data_quality_checks WHERE station_id = '59t' "
+        "AND check_name = 'out_of_range'"
+    ).fetchall()
+    assert len(rows) == 1 and rows[0][0] == "fail" and rows[0][1] == 1.0
+    do_run(fake, now=NOW + H)  # the next hour records the recovery
+    latest = fake.con.execute(
+        "SELECT status FROM data_quality_checks WHERE station_id = '59t' "
+        "AND check_name = 'out_of_range' ORDER BY checked_at DESC LIMIT 1"
+    ).fetchone()
+    assert latest == ("ok",)
 
 
 def test_no_alert_when_everything_is_ok_or_warn(fake, monkeypatch):
