@@ -224,9 +224,7 @@ def compare(
             version: _mae_rmse([(by_key[k], truth[k]) for k in common])
             for version, by_key in preds.items()
         }
-        metrics[PERSISTENCE_MODEL_VERSION] = _mae_rmse(
-            [(persistence[k], truth[k]) for k in common]
-        )
+        metrics[PERSISTENCE_MODEL_VERSION] = _mae_rmse([(persistence[k], truth[k]) for k in common])
         result[horizon] = Comparison(len(common), metrics)
     return result
 

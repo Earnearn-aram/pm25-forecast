@@ -272,9 +272,7 @@ def test_unloadable_champion_means_keep_and_a_failed_run():
     write_model(reg, "bad-champion", artifact, bad)
     reg.champion = "bad-champion"
 
-    result = do_run(
-        reg, alerts, now=NOW + timedelta(hours=1), settings=settings(auto_promote=True)
-    )
+    result = do_run(reg, alerts, now=NOW + timedelta(hours=1), settings=settings(auto_promote=True))
     assert result.decision.action == "keep"
     assert result.status == "failed" and result.failures
     assert reg.champion == "bad-champion"  # never promoted over a champion we could not score
