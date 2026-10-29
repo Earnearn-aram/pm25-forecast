@@ -236,6 +236,7 @@ class Inputs:
         cams = _validated(
             CamsRow, cams_raw, ("station_id", "issue_time", "valid_time", "pm25_pred")
         )
+
         def keep(station: str) -> bool:
             return not station_ids or station in station_ids
 
