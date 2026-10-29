@@ -46,3 +46,10 @@ CREATE TABLE IF NOT EXISTS models (
     manifest       jsonb       NOT NULL,
     created_at     timestamptz NOT NULL DEFAULT now()
 );
+
+-- Keep the mutable production alias separate from immutable model versions.
+CREATE TABLE IF NOT EXISTS model_champion (
+    slot           text        PRIMARY KEY CHECK (slot = 'production'),
+    model_version  text        NOT NULL REFERENCES models(model_version),
+    promoted_at    timestamptz NOT NULL DEFAULT now()
+);

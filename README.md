@@ -53,8 +53,9 @@ read-only rolling-origin evaluation with identical scoring pairs, availability g
 No historical CAMS results are invented when stored vintages are missing.
 
 First local model (KAN-32): on a fresh database, apply `src/pm25_forecast/storage/schema.sql`. On
-an existing database, run `src/pm25_forecast/storage/migrations/001_model_manifest.sql` once. Then
-run this sequence from a fresh clone:
+an existing database, run `src/pm25_forecast/storage/migrations/001_model_manifest.sql` and
+`src/pm25_forecast/storage/migrations/002_model_champion.sql` once. Then run this sequence from a
+fresh clone:
 
 ```sh
 uv sync --locked
@@ -69,7 +70,21 @@ and manifest match the submitted values, and deserializes the LightGBM bundle ag
 ordered feature list. Model versions are immutable: retrying a version with identical content is
 idempotent, while different content is rejected. The export and generated artifacts are local,
 git-ignored files. `DATABASE_URL` comes from the environment or `.env` and is never included in
-logs. The manifest records the UTC training window, held-out metrics, and export hash.
+logs. The manifest records the UTC training window, held-out metrics, ordered feature list, export
+hash, and artifact hash. Registry writes verify that manifest hashes match the exact binary.
+
+Model versions remain immutable. The separate `model_champion` table stores one mutable
+`production` pointer to a registered version; moving it never changes a model row. A freshly
+trained version is stored without changing the pointer by default. To explicitly register and
+promote a model in the same run, add `--promote` to the training command (`--promote` requires
+`--push`). `storage.registry.read_champion` returns the pointer plus the content-verified bundle
+for a consumer. Hourly prediction does not select this pointer yet; that integration remains in
+KAN-29.
+
+Promotions update the single production row. The chosen concurrent-write policy is last successful
+upsert wins if PostgreSQL serializes competing writes on that row; there is no compare-and-swap or
+model ranking guard. The registry test covers sequential replacement only; it does not verify
+concurrent PostgreSQL behavior.
 
 Training uses a strict as-of policy: an observation can be an input only when its exported
 `available_at` is no later than the simulated issue time, and a target must be present in the
@@ -87,9 +102,9 @@ faithful historical feature/label snapshot. Collect immutable, timestamped captu
 before claiming historical training or validation coverage. A current export with less than 24
 hours of post-availability observations cannot supply +24h training targets under this policy.
 
-KAN-32 trains and verifies a registered model but does not connect it to the hourly predict step.
-`pm25_forecast.predict` continues to emit the KAN-28 persistence and CAMS baselines; selecting and
-loading a champion LightGBM model in hourly prediction remains a KAN-29 dependency.
+KAN-32 trains and verifies a registered model. `pm25_forecast.predict` continues to emit the
+KAN-28 persistence and CAMS baselines; selecting and loading a champion LightGBM model in hourly
+prediction remains a KAN-29 dependency.
 
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).
