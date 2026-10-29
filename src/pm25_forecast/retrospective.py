@@ -251,12 +251,6 @@ def evaluate(
                 "category": _category_metrics(y_test, [float(r["persistence"]) for r in test_rows]),
             },
         },
-        "seasonal_naive_not_applicable": None
-        if seasonal_applicable
-        else (
-            f"the target-minus-24h reading is the origin-hour reading, never available under "
-            f"a {lag_hours}h reporting lag"
-        ),
         "coverage": {
             "test_pairs": len(test_rows),
             "test_station_counts": {
@@ -272,7 +266,12 @@ def evaluate(
             },
         },
     }
-    if seasonal_applicable:
+    if not seasonal_applicable:
+        report["seasonal_naive_not_applicable"] = (
+            f"the target-minus-24h reading is the origin-hour reading, never available under "
+            f"a {lag_hours}h reporting lag"
+        )
+    else:
         report["test_metrics"]["seasonal_target_minus_24h"] = {
             **_metrics(y_test, [float(r["seasonal_naive"]) for r in test_rows]),
             "category": _category_metrics(y_test, [float(r["seasonal_naive"]) for r in test_rows]),

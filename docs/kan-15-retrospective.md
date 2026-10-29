@@ -63,9 +63,15 @@ therefore refuses the 0-hour model above. Retraining with `--lag-hours 1` on the
 | LightGBM direct +24h, 1 h lag | 10,729 | 4.5025 | 6.4127 | 66.49% |
 | Persistence, latest measurement within 3h, 1 h lag | 10,729 | 4.4976 | 6.5451 | 68.18% |
 
-- LightGBM is 0.0049 µg/m³ **worse** on MAE, 0.1324 µg/m³ better on RMSE, and 1.69 percentage
-  points lower on band accuracy. There is no MAE win; the differences are small and not
-  statistically tested.
+- MAE is the primary metric: there is **no detectable difference**. The paired mean absolute-error
+  difference is +0.0050 µg/m³ (LightGBM worse) with a 95% day-block bootstrap CI of
+  [-0.095, +0.103] over 91 test days (independent review, KAN-64). RMSE is 0.1324 µg/m³ better and
+  band accuracy is 1.69 points lower; both are untested secondary metrics.
+- The model is effectively univariate: split importance is 100% `pm25_latest`, and
+  `pm25_same_hour_24h` is always missing at this lag. With no hour-of-day, seasonal or CAMS
+  inputs, a tie with persistence is the expected outcome. A real win needs new features (for
+  example hour of day, or CAMS once enough live vintages exist). That would be a separate ticket.
+- One chronological split and one test window: no variance across folds is reported.
 - Seasonal naive is not reported: the target-minus-24h reading is the origin-hour reading, which
   is never available under a 1 h lag. Pairs therefore require only an actual and persistence.
 - Training used 52,563 samples; the 0-hour run is unchanged (artifact `b3e0be31…e34b`).

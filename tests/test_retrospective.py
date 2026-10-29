@@ -102,7 +102,7 @@ def test_zero_lag_model_is_still_refused_by_the_serving_loader(tmp_path):
     artifact_path = tmp_path / "lag0.json"
     manifest_path = tmp_path / "lag0.manifest.json"
     report = evaluate(database, artifact_path, manifest_path)
-    assert report["seasonal_naive_not_applicable"] is None
+    assert "seasonal_naive_not_applicable" not in report
     manifest = json.loads(manifest_path.read_text())
     with pytest.raises(ModelLoadError, match="assumed_reporting_lag_hours=0"):
         load_serving_model(manifest["version"], artifact_path.read_bytes(), manifest)
