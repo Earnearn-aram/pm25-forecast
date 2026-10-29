@@ -22,7 +22,7 @@ from pm25_forecast.collector import ConfigError, open_db
 from pm25_forecast.features import FEATURE_NAMES, build_features
 from pm25_forecast.settings import get_settings
 from pm25_forecast.storage import db
-from pm25_forecast.storage.registry import publish_model, read_model
+from pm25_forecast.storage.registry import promote_model, publish_model, read_champion, read_model
 
 logger = logging.getLogger(__name__)
 HORIZONS_H = (6, 12, 24)
@@ -278,9 +278,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="write and read back the artifact in the hosted registry",
     )
+    parser.add_argument(
+        "--promote",
+        action="store_true",
+        help="point production at this registered version (requires --push)",
+    )
     parser.add_argument("--artifact", type=Path, default=Path("data/model.json"))
     try:
         args = parser.parse_args(argv)
+        if args.promote and not args.push:
+            parser.error("--promote requires --push")
         artifact, manifest = train(args.export, args.version)
         args.artifact.parent.mkdir(parents=True, exist_ok=True)
         args.artifact.write_bytes(artifact)
@@ -299,6 +306,15 @@ def main(argv: list[str] | None = None) -> int:
             load_model_bundle(stored_artifact)
             if stored_manifest != manifest:
                 raise ValueError("stored model manifest does not match the published manifest")
+            if args.promote:
+                with open_db(db.connect, database_url) as con:
+                    promote_model(con, args.version)
+                    champion_version, champion_artifact, champion_manifest = read_champion(con)
+                if champion_version != args.version or champion_artifact != artifact:
+                    raise ValueError("production champion readback does not match promoted model")
+                if champion_manifest != manifest:
+                    raise ValueError("production champion manifest does not match promoted model")
+                logger.info("model %s is now the production champion", args.version)
             logger.info("model %s stored and read back successfully", args.version)
         return 0
     except ConfigError as exc:

@@ -148,6 +148,7 @@ def test_schema_primary_keys_match_conflict_targets():
         "predictions": ("station_id", "issue_time", "valid_time", "model_version"),
         "scores": ("station_id", "issue_time", "valid_time", "model_version"),
         "models": ("model_version",),
+        "model_champion": ("slot",),
     }
     assert {t: _primary_key(b) for t, b in tables.items()} == expected
     for table, stmt in (
