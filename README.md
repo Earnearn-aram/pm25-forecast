@@ -81,6 +81,11 @@ promote a model in the same run, add `--promote` to the training command (`--pro
 for a consumer. Hourly prediction does not select this pointer yet; that integration remains in
 KAN-29.
 
+Promotions update the single production row. The chosen concurrent-write policy is last successful
+upsert wins if PostgreSQL serializes competing writes on that row; there is no compare-and-swap or
+model ranking guard. The registry test covers sequential replacement only; it does not verify
+concurrent PostgreSQL behavior.
+
 Training uses a strict as-of policy: an observation can be an input only when its exported
 `available_at` is no later than the simulated issue time, and a target must be present in the
 local snapshot. Hourly issue times are derived from target timestamps and do not require a reading
