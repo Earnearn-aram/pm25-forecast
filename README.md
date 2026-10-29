@@ -102,9 +102,32 @@ faithful historical feature/label snapshot. Collect immutable, timestamped captu
 before claiming historical training or validation coverage. A current export with less than 24
 hours of post-availability observations cannot supply +24h training targets under this policy.
 
-KAN-32 trains and verifies a registered model. `pm25_forecast.predict` continues to emit the
-KAN-28 persistence and CAMS baselines; selecting and loading a champion LightGBM model in hourly
-prediction remains a KAN-29 dependency.
+KAN-32 trains and verifies a registered model. `pm25_forecast.predict` emits the KAN-28
+persistence and CAMS baselines every hour.
+
+Shadow challenger (KAN-29): set `CHALLENGER_MODEL_VERSION` (a GitHub Actions variable, not a
+secret) to a registered model version and the hourly predict step also stores that model's
+predictions in `predictions` under its own `model_version`, next to the baselines, for KAN-20 to
+score. Nothing uses them for decisions. The model is read once per run from the registry
+(content-verified) and loaded by `models.serving`, which accepts both bundle shapes registered as
+`format: 1` (KAN-32 multi-horizon `horizons`, KAN-15 single-horizon `horizon_hours` + `booster`)
+and requires every booster's feature names to equal the manifest `feature_list` exactly and to be
+produced by the shared feature builder. A missing model, a bad bundle or a feature mismatch fails
+the run loudly (alert, exit 1) after the baselines are written. Unset = no challenger.
+
+Owner commands (`DATABASE_URL` from the environment or `.env`, never printed):
+
+```sh
+uv run python -m pm25_forecast.registry_cli register --artifact model.json --manifest manifest.json
+uv run python -m pm25_forecast.registry_cli check kan15-retrospective-24h
+uv run python -m pm25_forecast.registry_cli champion
+uv run python -m pm25_forecast.registry_cli promote kan15-retrospective-24h --confirm
+```
+
+`register` publishes and reads back without moving the champion. `check` loads a version exactly
+as the predict step would. `promote` is the manual champion flip; it needs `--confirm` and refuses
+a version the serving loader rejects. The hourly baselines do not read the champion pointer yet;
+automatic champion/challenger selection is KAN-23.
 
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).

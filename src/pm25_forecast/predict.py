@@ -11,6 +11,11 @@ Per run, for every station in STATION_LOCATIONS: read stored data, make baseline
   from the latest vintage issued at or before the run. There is no historical CAMS data (the
   collector started 2026-10-27), so early on some valid_times have no row: they are skipped.
 * Missing inputs are skipped and logged, never filled in. They are listed in the run summary.
+* Challenger (KAN-29, shadow mode): when ``CHALLENGER_MODEL_VERSION`` is set, that registered
+  model is read from the registry once per run (content-verified, KAN-16) and its predictions are
+  stored next to the baselines under its own model_version. Nothing reads them for decisions yet;
+  KAN-20 scores them. A missing model, a bad bundle or a feature-spec mismatch fails the run
+  loudly (alert, exit 1) after the baselines are still written.
 * DB down: no fallback to stale data. ``run_entrypoint`` skips the run, alerts, exits non-zero.
 * Reads only the database: no HTTP calls, so ingest outages cannot block or fake a forecast.
 
@@ -38,6 +43,7 @@ from pm25_forecast.models.baselines import (
     Forecast,
     valid_times,
 )
+from pm25_forecast.models.serving import ModelLoadError, ServingModel, load_registered_model
 from pm25_forecast.monitoring.alerts import make_alert, safe_alert
 from pm25_forecast.monitoring.logs import configure_logging, log_summary
 from pm25_forecast.settings import Settings, get_settings
@@ -109,6 +115,7 @@ def build_station_rows(
     now: datetime,
     run_id: str,
     result: PredictResult,
+    challenger: ServingModel | None = None,
 ) -> list[dict[str, Any]]:
     """Read inputs for one station and build its rows; gaps are skipped, logged and reported."""
     rows: list[dict[str, Any]] = []
@@ -173,6 +180,17 @@ def build_station_rows(
         msg = f"{station_id}: no CAMS row for +{h}h ({targets[h].isoformat()}), skipped"
         logger.warning(msg)
         result.skipped.append(msg)
+
+    if challenger is not None:
+        for h in challenger.horizons:
+            pred = challenger.predict(h, features[h])
+            if pred is None:
+                msg = f"{station_id}: no inputs for {challenger.model_version} +{h}h, skipped"
+                logger.warning(msg)
+                result.skipped.append(msg)
+                continue
+            forecast = Forecast(h, targets[h], pred)
+            rows.append(_row(station_id, issue_time, run_id, challenger.model_version, forecast))
     return rows
 
 
@@ -197,12 +215,36 @@ def run(
     run_id = default_run_id(now)
     result = PredictResult(run_id=run_id, issue_time=issue_time)
 
+    challenger_version = settings.challenger_model_version
+    if challenger_version in (PERSISTENCE_MODEL_VERSION, CAMS_PASSTHROUGH_MODEL_VERSION):
+        raise ConfigError("CHALLENGER_MODEL_VERSION must differ from the baseline model versions")
+
     with open_db(connect, settings.database_url.get_secret_value()) as con:
+        challenger: ServingModel | None = None
+        if challenger_version is not None:
+            try:
+                challenger = load_registered_model(con, challenger_version)
+            except ModelLoadError as exc:
+                msg = f"challenger {challenger_version} not served: {exc}"
+                logger.error(msg)
+                result.failures.append(msg)
         rows: list[dict[str, Any]] = []
         for station_id in station_ids:
-            rows += build_station_rows(con, station_id, issue_time, now, run_id, result)
+            try:
+                rows += build_station_rows(
+                    con, station_id, issue_time, now, run_id, result, challenger
+                )
+            except ModelLoadError as exc:  # feature spec drifted after load: stop the challenger
+                msg = f"challenger {challenger_version} disabled for this run: {exc}"
+                logger.error(msg)
+                result.failures.append(msg)
+                challenger = None
+                rows += build_station_rows(con, station_id, issue_time, now, run_id, result)
         result.rows_built = len(rows)
-        for model_version in (PERSISTENCE_MODEL_VERSION, CAMS_PASSTHROUGH_MODEL_VERSION):
+        served = [PERSISTENCE_MODEL_VERSION, CAMS_PASSTHROUGH_MODEL_VERSION]
+        if challenger is not None:
+            served.append(challenger.model_version)
+        for model_version in served:
             result.per_model[model_version] = sum(r["model_version"] == model_version for r in rows)
         result.rows_written = sql.write_rows(con, sql.INSERT_PREDICTION, rows)
         result.rows_ignored = len(rows) - result.rows_written
