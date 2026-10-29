@@ -28,6 +28,17 @@ class Settings(BaseSettings):
 
     # Optional PEM file with extra CA certificates for Air4Thai TLS (KAN-35); unset = defaults.
     air4thai_ca_bundle: Path | None = None
+    # Registered model version scored in shadow mode by the hourly predict step (KAN-29). Unset =
+    # no challenger. Not secret: a registry label such as `kan15-retrospective-24h`.
+    challenger_model_version: str | None = None
+
+    @field_validator("challenger_model_version", mode="before")
+    @classmethod
+    def _blank_challenger_is_unset(cls, v: object) -> object:
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
 
     @field_validator("air4thai_ca_bundle", mode="before")
     @classmethod

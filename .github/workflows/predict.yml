@@ -50,6 +50,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
+          CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }} # KAN-29 shadow model; unset = none
           AIR4THAI_CA_BUNDLE: certs/air4thai-ca.pem # not used by predict; kept identical to the collector
         run: uv run --no-dev python -m pm25_forecast.predict
       # Alert when any step above failed, or the job was cancelled (timeout-minutes hit).
