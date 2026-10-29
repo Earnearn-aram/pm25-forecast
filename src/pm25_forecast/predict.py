@@ -22,12 +22,13 @@ import logging
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
 from pm25_forecast.collector import ConfigError, default_run_id, open_db
+from pm25_forecast.features import build_features
 from pm25_forecast.ingest.open_meteo import CAMS_MODEL_VERSION
 from pm25_forecast.models.baselines import (
     CAMS_PASSTHROUGH_MODEL_VERSION,
@@ -35,8 +36,6 @@ from pm25_forecast.models.baselines import (
     MAX_OBSERVATION_AGE,
     PERSISTENCE_MODEL_VERSION,
     Forecast,
-    cams_passthrough,
-    persistence_forecast,
     valid_times,
 )
 from pm25_forecast.monitoring.alerts import make_alert, safe_alert
@@ -53,12 +52,14 @@ EXIT_FAILED, EXIT_CONFIG = 1, 2
 class ObservationRow(BaseModel):
     ts: AwareDatetime
     pm25: float
+    ingested_at: AwareDatetime
 
 
 class ForecastRow(BaseModel):
     issue_time: AwareDatetime
     valid_time: AwareDatetime
     pm25_pred: float
+    created_at: AwareDatetime
 
 
 @dataclass
@@ -116,16 +117,43 @@ def build_station_rows(
         sql.SELECT_OBSERVATIONS_BETWEEN,
         {
             "station_id": station_id,
-            "since": issue_time - MAX_OBSERVATION_AGE,
+            "since": issue_time - timedelta(hours=24),
             "until": issue_time,
+            "as_of": issue_time,
         },
     ).fetchall()
-    obs = _validated(ObservationRow, obs_raw, ("ts", "pm25"))
-    persistence = persistence_forecast([(o.ts, o.pm25) for o in obs], issue_time)
+    obs = _validated(ObservationRow, obs_raw, ("ts", "pm25", "ingested_at"))
+    targets = valid_times(issue_time)
+    cams_raw = con.execute(
+        sql.SELECT_FORECAST_ROWS,
+        {
+            "station_id": station_id,
+            "model_version": CAMS_MODEL_VERSION,
+            "as_of": issue_time,
+            "valid_from": min(targets.values()),
+            "valid_to": max(targets.values()),
+        },
+    ).fetchall()
+    cams_rows = _validated(
+        ForecastRow, cams_raw, ("issue_time", "valid_time", "pm25_pred", "created_at")
+    )
+    raw_observations = [(o.ts, o.pm25) for o in obs]
+    raw_vintages = [
+        (c.issue_time, c.valid_time, c.pm25_pred, CAMS_MODEL_VERSION) for c in cams_rows
+    ]
+    features = {
+        horizon: build_features(raw_observations, raw_vintages, issue_time, target)
+        for horizon, target in targets.items()
+    }
+    persistence = [
+        Forecast(h, target, float(features[h]["pm25_latest"]))
+        for h, target in targets.items()
+        if features[h]["pm25_latest"] is not None
+    ]
     if persistence:
-        rows += [
+        rows.extend(
             _row(station_id, issue_time, run_id, PERSISTENCE_MODEL_VERSION, f) for f in persistence
-        ]
+        )
     else:
         msg = (
             f"{station_id}: no observation within {MAX_OBSERVATION_AGE} of "
@@ -134,23 +162,14 @@ def build_station_rows(
         logger.warning(msg)
         result.skipped.append(msg)
 
-    targets = valid_times(issue_time)
-    cams_raw = con.execute(
-        sql.SELECT_FORECAST_ROWS,
-        {
-            "station_id": station_id,
-            "model_version": CAMS_MODEL_VERSION,
-            "as_of": now,
-            "valid_from": min(targets.values()),
-            "valid_to": max(targets.values()),
-        },
-    ).fetchall()
-    cams_rows = _validated(ForecastRow, cams_raw, ("issue_time", "valid_time", "pm25_pred"))
-    found, missing = cams_passthrough(
-        [(c.issue_time, c.valid_time, c.pm25_pred) for c in cams_rows], issue_time, now
-    )
-    rows += [_row(station_id, issue_time, run_id, CAMS_PASSTHROUGH_MODEL_VERSION, f) for f in found]
-    for h in missing:
+    for h, target in targets.items():
+        cams_pm25 = features[h]["cams_pm25"]
+        if cams_pm25 is not None:
+            forecast = Forecast(h, target, cams_pm25)
+            rows.append(
+                _row(station_id, issue_time, run_id, CAMS_PASSTHROUGH_MODEL_VERSION, forecast)
+            )
+            continue
         msg = f"{station_id}: no CAMS row for +{h}h ({targets[h].isoformat()}), skipped"
         logger.warning(msg)
         result.skipped.append(msg)

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import fmean
 
+from pm25_forecast.features import build_features
 from pm25_forecast.models.baselines import HORIZONS_H, persistence_forecast, require_utc
 
 HOUR = timedelta(hours=1)
@@ -64,6 +65,10 @@ class Snapshot:
     station_id: str
     observations: tuple[Observation, ...]
     vintages: tuple[Vintage, ...]
+
+    def features(self, valid_time: datetime) -> dict[str, float | None]:
+        """Build model inputs through the shared train/serve feature contract."""
+        return build_features(self.observations, self.vintages, self.prediction_time, valid_time)
 
     def __post_init__(self):
         for row in self.observations:
