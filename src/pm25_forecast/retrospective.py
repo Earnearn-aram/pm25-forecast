@@ -157,12 +157,17 @@ def evaluate(
     observations, snapshot_hash = _read_snapshot(path)
     rows, split = _make_rows(observations, lag_hours)
     train_rows = [row for row in rows if row["is_train"]]
-    # Exact same test intersection as the fixed baseline evaluator: valid actual, persistence,
-    # and target-minus-24h measurement all exist on the same station/origin/target pair.
+    # Lag 0: exact same test intersection as the fixed baseline evaluator (valid actual,
+    # persistence and target-minus-24h measurement on the same station/origin/target pair).
+    # Lag >= 1 (KAN-64): the target-minus-24h reading is the origin-hour reading, which is never
+    # available under the lag, so seasonal naive is not applicable and pairs need persistence only.
+    seasonal_applicable = lag_hours == 0
     test_rows = [
         row
         for row in rows
-        if row["is_test"] and row["persistence"] is not None and row["seasonal_naive"] is not None
+        if row["is_test"]
+        and row["persistence"] is not None
+        and (row["seasonal_naive"] is not None or not seasonal_applicable)
     ]
     if len(train_rows) < 20 or len(test_rows) < 1:
         raise ValueError("not enough leakage-safe training examples or common test pairs")
@@ -232,7 +237,7 @@ def evaluate(
             "test_pairs_are_common_to": [
                 "LightGBM",
                 "persistence_latest_3h",
-                "seasonal_target_minus_24h",
+                *(["seasonal_target_minus_24h"] if seasonal_applicable else []),
             ],
             "category_proxy": _category_metrics(y_test, predictions)["definition"],
         },
@@ -244,12 +249,6 @@ def evaluate(
             "persistence_latest_3h": {
                 **_metrics(y_test, [float(r["persistence"]) for r in test_rows]),
                 "category": _category_metrics(y_test, [float(r["persistence"]) for r in test_rows]),
-            },
-            "seasonal_target_minus_24h": {
-                **_metrics(y_test, [float(r["seasonal_naive"]) for r in test_rows]),
-                "category": _category_metrics(
-                    y_test, [float(r["seasonal_naive"]) for r in test_rows]
-                ),
             },
         },
         "coverage": {
@@ -267,8 +266,19 @@ def evaluate(
             },
         },
     }
+    if not seasonal_applicable:
+        report["seasonal_naive_not_applicable"] = (
+            f"the target-minus-24h reading is the origin-hour reading, never available under "
+            f"a {lag_hours}h reporting lag"
+        )
+    else:
+        report["test_metrics"]["seasonal_target_minus_24h"] = {
+            **_metrics(y_test, [float(r["seasonal_naive"]) for r in test_rows]),
+            "category": _category_metrics(y_test, [float(r["seasonal_naive"]) for r in test_rows]),
+        }
     manifest = {
-        "version": "kan15-retrospective-24h",
+        # Lag 0 keeps the original KAN-15 name; any other lag is its own immutable version.
+        "version": "kan15-retrospective-24h" + (f"-lag{lag_hours}h" if lag_hours else ""),
         "model_type": "lightgbm-retrospective-direct-24h",
         "metrics": {"24": report["test_metrics"]["lightgbm_direct_24h"]},
         "training_window": {"start": _iso(min(train_origins)), "end": _iso(max(train_origins))},

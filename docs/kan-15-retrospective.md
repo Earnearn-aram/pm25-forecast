@@ -50,3 +50,37 @@ artifact and manifest through the registry interface. No hosted or production re
 accessed.
 
 The aggregate machine-readable run report is `/private/tmp/pm25-kan15-output/report.json`.
+
+## KAN-64: 1-hour reporting lag (servable challenger)
+
+The hourly predict job builds features as of the floored issue hour, so the reading for that hour
+has never been ingested and live inputs are always at least 1 h old. The serving loader (KAN-29)
+therefore refuses the 0-hour model above. Retraining with `--lag-hours 1` on the same snapshot
+(`fdd9b90b…3a09`) gives version `kan15-retrospective-24h-lag1h`:
+
+| Model | Test pairs | MAE (µg/m³) | RMSE (µg/m³) | Hourly concentration-band accuracy |
+|---|---:|---:|---:|---:|
+| LightGBM direct +24h, 1 h lag | 10,729 | 4.5025 | 6.4127 | 66.49% |
+| Persistence, latest measurement within 3h, 1 h lag | 10,729 | 4.4976 | 6.5451 | 68.18% |
+
+- MAE is the primary metric: there is **no detectable difference**. The paired mean absolute-error
+  difference is +0.0050 µg/m³ (LightGBM worse) with a 95% day-block bootstrap CI of
+  [-0.095, +0.103] over 91 test days (independent review, KAN-64). RMSE is 0.1324 µg/m³ better and
+  band accuracy is 1.69 points lower; both are untested secondary metrics.
+- The model is effectively univariate: split importance is 100% `pm25_latest`, and
+  `pm25_same_hour_24h` is always missing at this lag. With no hour-of-day, seasonal or CAMS
+  inputs, a tie with persistence is the expected outcome. A real win needs new features (for
+  example hour of day, or CAMS once enough live vintages exist). That would be a separate ticket.
+- One chronological split and one test window: no variance across folds is reported.
+- Seasonal naive is not reported: the target-minus-24h reading is the origin-hour reading, which
+  is never available under a 1 h lag. Pairs therefore require only an actual and persistence.
+- Training used 52,563 samples; the 0-hour run is unchanged (artifact `b3e0be31…e34b`).
+- Artifact SHA-256: `cfc2dd4453d555b561f731049654b0a56f8598e0cf5a4d568b1b3e90df93ccb0`. It passes the serving loader (+24h, features
+  `pm25_latest`, `pm25_same_hour_24h`; the second is always missing at this lag, as it is live).
+
+Reproduce:
+
+```sh
+uv run python -m pm25_forecast.retrospective --database data/history.duckdb --lag-hours 1 \
+  --artifact out/model.json --manifest out/manifest.json --report out/report.json
+```
