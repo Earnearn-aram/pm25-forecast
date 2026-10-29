@@ -93,20 +93,22 @@ def load_inputs(fake: FakeDb, *, observations=True, cams=True) -> None:
     if observations:
         for o in data["observations"]:
             fake.con.execute(
-                "INSERT INTO observations (station_id, ts, pm25, source) VALUES (?, ?, ?, 'test')",
-                (o["station_id"], o["ts"], o["pm25"]),
+                "INSERT INTO observations (station_id, ts, pm25, source, ingested_at) "
+                "VALUES (?, ?, ?, 'test', ?)",
+                (o["station_id"], o["ts"], o["pm25"], o["ts"]),
             )
     if cams:
         for c in data["cams_vintages"]:
             fake.con.execute(
                 "INSERT INTO predictions (station_id, issue_time, valid_time, model_version,"
-                " run_id, pm25_pred) VALUES (?, ?, ?, ?, 'collector', ?)",
+                " run_id, pm25_pred, created_at) VALUES (?, ?, ?, ?, 'collector', ?, ?)",
                 (
                     c["station_id"],
                     c["issue_time"],
                     c["valid_time"],
                     CAMS_MODEL_VERSION,
                     c["pm25_pred"],
+                    (datetime.fromisoformat(c["issue_time"]) + timedelta(minutes=1)).isoformat(),
                 ),
             )
     fake.con.commit()
@@ -221,6 +223,30 @@ def test_run_writes_both_models_for_each_horizon(fake_db):
     assert all(r[1] == ISSUE.isoformat() and r[4] == result.run_id for r in rows)
     assert result.per_model == {PERSISTENCE_MODEL_VERSION: 3, CAMS_PASSTHROUGH_MODEL_VERSION: 2}
     assert result.rows_written == 5
+
+
+def test_predict_ignores_rows_ingested_after_the_issue_time(fake_db):
+    fake_db.con.execute(
+        "UPDATE observations SET ingested_at = ? WHERE station_id = '59t' AND ts = ?",
+        ((ISSUE + timedelta(minutes=1)).isoformat(), ISSUE.isoformat()),
+    )
+    fake_db.con.execute(
+        "UPDATE predictions SET created_at = ? WHERE station_id = '59t' "
+        "AND issue_time = ? AND valid_time = ? AND model_version = ?",
+        (
+            (ISSUE + timedelta(minutes=1)).isoformat(),
+            (ISSUE - 6 * H + timedelta(minutes=7)).isoformat(),
+            (ISSUE + 6 * H).isoformat(),
+            CAMS_MODEL_VERSION,
+        ),
+    )
+
+    do_run(fake_db)
+    rows = fake_db.predictions()
+    got = {(r[3], r[2]): r[5] for r in rows if r[0] == "59t"}
+
+    assert got[(PERSISTENCE_MODEL_VERSION, (ISSUE + 6 * H).isoformat())] == 38.0
+    assert got[(CAMS_PASSTHROUGH_MODEL_VERSION, (ISSUE + 6 * H).isoformat())] == 30.0
 
 
 def test_missing_cams_row_and_missing_observation_are_skipped_and_reported(fake_db):

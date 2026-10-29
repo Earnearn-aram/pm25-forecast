@@ -52,12 +52,14 @@ EXIT_FAILED, EXIT_CONFIG = 1, 2
 class ObservationRow(BaseModel):
     ts: AwareDatetime
     pm25: float
+    ingested_at: AwareDatetime
 
 
 class ForecastRow(BaseModel):
     issue_time: AwareDatetime
     valid_time: AwareDatetime
     pm25_pred: float
+    created_at: AwareDatetime
 
 
 @dataclass
@@ -117,9 +119,10 @@ def build_station_rows(
             "station_id": station_id,
             "since": issue_time - timedelta(hours=24),
             "until": issue_time,
+            "as_of": issue_time,
         },
     ).fetchall()
-    obs = _validated(ObservationRow, obs_raw, ("ts", "pm25"))
+    obs = _validated(ObservationRow, obs_raw, ("ts", "pm25", "ingested_at"))
     targets = valid_times(issue_time)
     cams_raw = con.execute(
         sql.SELECT_FORECAST_ROWS,
@@ -131,7 +134,9 @@ def build_station_rows(
             "valid_to": max(targets.values()),
         },
     ).fetchall()
-    cams_rows = _validated(ForecastRow, cams_raw, ("issue_time", "valid_time", "pm25_pred"))
+    cams_rows = _validated(
+        ForecastRow, cams_raw, ("issue_time", "valid_time", "pm25_pred", "created_at")
+    )
     raw_observations = [(o.ts, o.pm25) for o in obs]
     raw_vintages = [
         (c.issue_time, c.valid_time, c.pm25_pred, CAMS_MODEL_VERSION) for c in cams_rows

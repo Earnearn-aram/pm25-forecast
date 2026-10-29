@@ -77,19 +77,21 @@ WHERE station_id = %(station_id)s AND model_version = %(model_version)s
   )
 """
 
-# Predict step (KAN-28): usable observations for a station in [since, until], newest first.
+# Predict step (KAN-28): usable observations available by issue_time, newest first.
 SELECT_OBSERVATIONS_BETWEEN = """
-SELECT ts, pm25 FROM observations
-WHERE station_id = %(station_id)s AND ts >= %(since)s AND ts <= %(until)s AND pm25 IS NOT NULL
+SELECT ts, pm25, ingested_at FROM observations
+WHERE station_id = %(station_id)s AND ts >= %(since)s AND ts <= %(until)s
+  AND ingested_at <= %(as_of)s AND pm25 IS NOT NULL
 ORDER BY ts DESC
 """
 
 # Predict step (KAN-28): stored forecast rows (the collector's CAMS vintages) for the target
 # valid_times, from vintages issued at or before `as_of`.
 SELECT_FORECAST_ROWS = """
-SELECT issue_time, valid_time, pm25_pred FROM predictions
+SELECT issue_time, valid_time, pm25_pred, created_at FROM predictions
 WHERE station_id = %(station_id)s AND model_version = %(model_version)s
   AND issue_time <= %(as_of)s AND valid_time >= %(valid_from)s AND valid_time <= %(valid_to)s
+  AND created_at <= %(as_of)s
 """
 
 
