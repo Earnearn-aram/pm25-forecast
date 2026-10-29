@@ -53,3 +53,27 @@ CREATE TABLE IF NOT EXISTS model_champion (
     model_version  text        NOT NULL REFERENCES models(model_version),
     promoted_at    timestamptz NOT NULL DEFAULT now()
 );
+
+-- Data quality check history (KAN-21). One row per (hour, source, station, check); a re-run in the
+-- same hour overwrites. `source` is an observation source (air4thai, openaq) or a model_version
+-- (persistence-24h, a challenger, cams_global). station_id is NULL for a source-wide check.
+-- `check` is a reserved word, so the column is check_name. `threshold` is the limit that decided
+-- the status (the fail limit for fail, the warn limit otherwise).
+CREATE TABLE IF NOT EXISTS data_quality_checks (
+    checked_at   timestamptz      NOT NULL,
+    source       text             NOT NULL,
+    station_id   text,
+    check_name   text             NOT NULL,
+    status       text             NOT NULL CHECK (status IN ('ok', 'warn', 'fail')),
+    value        double precision,
+    threshold    double precision,
+    detail       text             NOT NULL DEFAULT '',
+    recorded_at  timestamptz      NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS data_quality_checks_key
+    ON data_quality_checks (checked_at, source, (COALESCE(station_id, '')), check_name);
+
+-- Dashboard history for one series: WHERE source = ? AND check_name = ? ORDER BY checked_at.
+CREATE INDEX IF NOT EXISTS data_quality_checks_series
+    ON data_quality_checks (source, check_name, checked_at);
