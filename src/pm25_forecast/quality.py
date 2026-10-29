@@ -85,7 +85,7 @@ class Newest(BaseModel):
 @dataclass(frozen=True)
 class Check:
     source: str
-    station_id: str | None
+    station_id: str  # '' = source-wide
     check: str
     status: str
     value: float | None
@@ -131,7 +131,7 @@ VALUES (
     %(checked_at)s, %(source)s, %(station_id)s, %(check_name)s, %(status)s, %(value)s,
     %(threshold)s, %(detail)s
 )
-ON CONFLICT (checked_at, source, (COALESCE(station_id, '')), check_name)
+ON CONFLICT (checked_at, source, station_id, check_name)
 DO UPDATE SET status = excluded.status, value = excluded.value,
               threshold = excluded.threshold, detail = excluded.detail
 """

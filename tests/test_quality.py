@@ -246,11 +246,11 @@ def test_rerun_in_the_same_hour_does_not_duplicate_and_updates_status(fake):
     assert stored(fake) == 32
 
 
-def test_source_wide_row_with_null_station_is_unique_per_hour(fake):
+def test_source_wide_row_with_empty_station_is_unique_per_hour(fake):
     params = {
         "checked_at": HOUR.isoformat(),
         "source": "air4thai",
-        "station_id": None,
+        "station_id": "",
         "check_name": "freshness",
         "status": "ok",
         "value": 1.0,

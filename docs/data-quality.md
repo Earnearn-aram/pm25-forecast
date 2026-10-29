@@ -43,15 +43,15 @@ Timestamps are UTC. "Last 24 h" means the 24 whole hours before the current hour
 |---|---|
 | `checked_at` | timestamptz, the run time floored to the hour |
 | `source` | `air4thai`, `openaq`, `cams_global`, `persistence-24h` or a challenger model version |
-| `station_id` | nullable (NULL = source-wide check) |
+| `station_id` | `''` = source-wide check (part of the primary key, so never NULL) |
 | `check_name` | `freshness`, `missing_hours`, `out_of_range`, `expected_station`, `null_rate` |
 | `status` | `ok`, `warn` or `fail` |
 | `value` | freshness: age in hours; `missing_hours`: hours; `out_of_range`: readings; `expected_station`: rows; `null_rate`: fraction. NULL when nothing was found |
 | `threshold` | the limit that decided the status (fail limit for fail, warn limit otherwise) |
 | `detail` | short human-readable text |
 
-Unique on (`checked_at`, `source`, `COALESCE(station_id, '')`, `check_name`); a re-run in the same
-hour updates the row. History for a dashboard:
+Primary key (`checked_at`, `source`, `station_id`, `check_name`); a re-run in the same hour
+updates the row. History for a dashboard:
 
 ```sql
 SELECT checked_at, station_id, status, value
