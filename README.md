@@ -112,7 +112,11 @@ score. Nothing uses them for decisions. The model is read once per run from the 
 (content-verified) and loaded by `models.serving`, which accepts both bundle shapes registered as
 `format: 1` (KAN-32 multi-horizon `horizons`, KAN-15 single-horizon `horizon_hours` + `booster`)
 and requires every booster's feature names to equal the manifest `feature_list` exactly and to be
-produced by the shared feature builder. A missing model, a bad bundle or a feature mismatch fails
+produced by the shared feature builder. The job builds features as of the floored issue hour, so
+live inputs are always at least 1 h old; a manifest declaring `assumed_reporting_lag_hours` below 1
+is refused as train/serve skew. This currently refuses the KAN-15 `kan15-retrospective-24h` model
+(trained at 0 h lag); it must be retrained at a 1 h lag before it can be the challenger. Challenger
+rows are all-or-nothing per run. A missing model, a bad bundle or a feature mismatch fails
 the run loudly (alert, exit 1) after the baselines are written. Unset = no challenger.
 
 Owner commands (`DATABASE_URL` from the environment or `.env`, never printed):

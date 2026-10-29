@@ -115,9 +115,13 @@ def build_station_rows(
     now: datetime,
     run_id: str,
     result: PredictResult,
-    challenger: ServingModel | None = None,
+    features_out: dict[str, dict[int, dict[str, float | None]]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Read inputs for one station and build its rows; gaps are skipped, logged and reported."""
+    """Read inputs for one station and build its baseline rows; gaps are skipped and reported.
+
+    The per-horizon feature mappings are stored in ``features_out[station_id]`` when given, so a
+    challenger reuses exactly the features the baselines saw (one feature build per station).
+    """
     rows: list[dict[str, Any]] = []
 
     obs_raw = con.execute(
@@ -152,6 +156,8 @@ def build_station_rows(
         horizon: build_features(raw_observations, raw_vintages, issue_time, target)
         for horizon, target in targets.items()
     }
+    if features_out is not None:
+        features_out[station_id] = features
     persistence = [
         Forecast(h, target, float(features[h]["pm25_latest"]))
         for h, target in targets.items()
@@ -180,17 +186,44 @@ def build_station_rows(
         msg = f"{station_id}: no CAMS row for +{h}h ({targets[h].isoformat()}), skipped"
         logger.warning(msg)
         result.skipped.append(msg)
+    return rows
 
-    if challenger is not None:
-        for h in challenger.horizons:
-            pred = challenger.predict(h, features[h])
-            if pred is None:
-                msg = f"{station_id}: no inputs for {challenger.model_version} +{h}h, skipped"
-                logger.warning(msg)
-                result.skipped.append(msg)
-                continue
-            forecast = Forecast(h, targets[h], pred)
-            rows.append(_row(station_id, issue_time, run_id, challenger.model_version, forecast))
+
+def build_challenger_rows(
+    challenger: ServingModel,
+    station_features: dict[str, dict[int, dict[str, float | None]]],
+    issue_time: datetime,
+    run_id: str,
+    result: PredictResult,
+) -> list[dict[str, Any]]:
+    """All-or-nothing shadow rows: any error drops every challenger row and fails the run loudly.
+
+    Baseline rows are built before this and are written whatever happens here.
+    """
+    targets = valid_times(issue_time)
+    rows: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    try:
+        for station_id, features in station_features.items():
+            for h in challenger.horizons:
+                pred = challenger.predict(h, features[h])
+                if pred is None:
+                    skipped.append(
+                        f"{station_id}: no inputs for {challenger.model_version} +{h}h, skipped"
+                    )
+                    continue
+                forecast = Forecast(h, targets[h], pred)
+                rows.append(
+                    _row(station_id, issue_time, run_id, challenger.model_version, forecast)
+                )
+    except Exception as exc:  # a challenger must never cost the baselines
+        msg = f"challenger {challenger.model_version} dropped for this run: {exc!r}"
+        logger.error(msg)
+        result.failures.append(msg)
+        return []
+    for msg in skipped:
+        logger.warning(msg)
+    result.skipped.extend(skipped)
     return rows
 
 
@@ -229,17 +262,13 @@ def run(
                 logger.error(msg)
                 result.failures.append(msg)
         rows: list[dict[str, Any]] = []
+        station_features: dict[str, dict[int, dict[str, float | None]]] = {}
         for station_id in station_ids:
-            try:
-                rows += build_station_rows(
-                    con, station_id, issue_time, now, run_id, result, challenger
-                )
-            except ModelLoadError as exc:  # feature spec drifted after load: stop the challenger
-                msg = f"challenger {challenger_version} disabled for this run: {exc}"
-                logger.error(msg)
-                result.failures.append(msg)
-                challenger = None
-                rows += build_station_rows(con, station_id, issue_time, now, run_id, result)
+            rows += build_station_rows(
+                con, station_id, issue_time, now, run_id, result, station_features
+            )
+        if challenger is not None:
+            rows += build_challenger_rows(challenger, station_features, issue_time, run_id, result)
         result.rows_built = len(rows)
         served = [PERSISTENCE_MODEL_VERSION, CAMS_PASSTHROUGH_MODEL_VERSION]
         if challenger is not None:

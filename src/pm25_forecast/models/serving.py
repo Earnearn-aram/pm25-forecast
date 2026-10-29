@@ -5,6 +5,12 @@ Two bundle shapes are registered under ``format: 1`` (the label does not tell th
 * multi-horizon (KAN-32 ``train_model``): ``{"format": 1, "horizons": {"6": str, ...}}``
 * single-horizon (KAN-15 ``retrospective``): ``{"format": 1, "horizon_hours": 24, "booster": str}``
 
+Reporting lag: the hourly job builds features as of the floored issue hour, so the reading for
+that hour has never been ingested yet and the freshest input is at least 1 h old. A manifest that
+declares ``assumed_reporting_lag_hours`` below ``MIN_SERVING_LAG_H`` was trained on inputs the live
+job never has (train/serve skew) and is rejected. Manifests without the field (KAN-32, trained
+with the strict as-of availability gate) are not affected.
+
 The shape is detected from the keys, and an artifact that matches neither, or both, is rejected.
 Every booster's feature names must equal the manifest ``feature_list`` exactly, in order, and every
 name must be produced by the shared feature builder. Any mismatch raises ``ModelLoadError`` so the
@@ -24,6 +30,8 @@ import lightgbm as lgb
 from pm25_forecast.features import FEATURE_NAMES
 from pm25_forecast.models.baselines import HORIZONS_H
 from pm25_forecast.storage import registry
+
+MIN_SERVING_LAG_H = 1
 
 
 class ModelLoadError(ValueError):
@@ -50,7 +58,10 @@ class ServingModel:
         if all(value is None for value in row):
             return None
         vector = [[math.nan if value is None else float(value) for value in row]]
-        return max(0.0, float(booster.predict(vector)[0]))
+        pred = float(booster.predict(vector)[0])
+        if not math.isfinite(pred):
+            raise ValueError(f"{self.model_version} +{horizon}h produced a non-finite prediction")
+        return max(0.0, pred)
 
 
 def _booster(model_text: Any, label: str) -> lgb.Booster:
@@ -73,6 +84,8 @@ def _parse_bundle(artifact: bytes) -> dict[int, lgb.Booster]:
     single = "horizon_hours" in payload or "booster" in payload
     if multi == single:
         raise ModelLoadError("ambiguous model bundle: expected either horizons or horizon_hours")
+    if single and not ("horizon_hours" in payload and "booster" in payload):
+        raise ModelLoadError("single-horizon bundle needs both horizon_hours and booster")
     if multi:
         horizons = payload["horizons"]
         if not isinstance(horizons, dict) or not horizons:
@@ -103,6 +116,13 @@ def load_serving_model(
     if unknown:
         raise ModelLoadError(
             f"manifest features not produced by the shared feature builder: {', '.join(unknown)}"
+        )
+    lag = manifest.get("assumed_reporting_lag_hours")
+    if lag is not None and (not isinstance(lag, int | float) or lag < MIN_SERVING_LAG_H):
+        raise ModelLoadError(
+            f"model was trained with assumed_reporting_lag_hours={lag!r}; the hourly job serves "
+            f"inputs at least {MIN_SERVING_LAG_H}h old (retrain with --lag-hours "
+            f"{MIN_SERVING_LAG_H})"
         )
     boosters = _parse_bundle(artifact)
     for horizon, booster in boosters.items():

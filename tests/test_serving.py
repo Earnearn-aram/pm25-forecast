@@ -202,7 +202,7 @@ def test_cli_register_check_and_manual_promote(tmp_path):
     assert cli(reg, "champion") == (0, "no production champion is set")
     code, text = cli(reg, "promote", "kan15")
     assert code == 1 and "--confirm" in text and reg.champion is None
-    assert cli(reg, "promote", "kan15", "--confirm") == (0, "production champion is now kan15")
+    assert cli(reg, "promote", "kan15", "--confirm") == (0, "production champion: none -> kan15")
     assert cli(reg, "champion") == (0, "production champion: kan15")
 
 
@@ -217,3 +217,40 @@ def test_cli_refuses_to_promote_an_unservable_model():
     )
     code, text = cli(reg, "promote", "bad", "--confirm")
     assert code == 1 and "shared feature builder" in text and reg.champion is None
+
+
+def test_model_trained_with_zero_reporting_lag_is_refused():
+    art = single_bundle()
+    man = {**manifest("kan15", art, KAN15_FEATURES), "assumed_reporting_lag_hours": 0}
+    with pytest.raises(ModelLoadError, match="assumed_reporting_lag_hours=0"):
+        load_serving_model("kan15", art, man)
+    man["assumed_reporting_lag_hours"] = 1
+    assert load_serving_model("kan15", art, man).horizons == (24,)
+
+
+def test_partial_single_horizon_bundle_is_rejected_up_front():
+    art = json.dumps({"format": 1, "horizon_hours": 24}).encode()
+    with pytest.raises(ModelLoadError, match="needs both horizon_hours and booster"):
+        load_serving_model("x", art, manifest("x", art, KAN15_FEATURES))
+
+
+def test_non_finite_prediction_is_an_error(kan15_model, monkeypatch):
+    booster = kan15_model.boosters[24]
+    monkeypatch.setattr(booster, "predict", lambda _x: np.asarray([np.nan]))
+    with pytest.raises(ValueError, match="non-finite"):
+        kan15_model.predict(24, {"pm25_latest": 1.0, "pm25_same_hour_24h": 1.0})
+
+
+def test_challenger_crash_drops_all_challenger_rows_and_keeps_baselines(
+    inputs_db, monkeypatch, kan15_model
+):
+    def boom(_x):
+        raise lgb.basic.LightGBMError("boom")
+
+    monkeypatch.setattr(kan15_model.boosters[24], "predict", boom)
+    monkeypatch.setattr(predict, "load_registered_model", lambda con, v: kan15_model)
+    result = do_run(inputs_db, challenger_model_version="kan15-test")
+    assert any("dropped for this run" in m for m in result.failures)
+    rows = inputs_db.predictions()
+    assert rows and all(r[3] != "kan15-test" for r in rows)
+    assert result.per_model.get("kan15-test", 0) == 0
