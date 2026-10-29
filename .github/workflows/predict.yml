@@ -18,9 +18,19 @@
 # when any step fails or the job is cancelled (e.g. timeout), as in the collector template.
 name: Predict
 
+# KAN-50: GitHub skipped most scheduled runs (about 4 of 22 predict and 4 of 66 collector starts in
+# 22 h on 28-29 Oct). Predict now also runs whenever a Collector run completes (workflow_run is an
+# event, not cron, so it is not dropped the way schedules are). The Collector itself is started by
+# an external timer through workflow_dispatch (owner setup, KAN-50). Up to 3 runs per hour are
+# harmless: issue_time is floored to the hour and predictions are DO NOTHING, so only the first run
+# of each hour writes forecasts; later runs only rescore. It runs whether the Collector succeeded
+# or failed (predict reads only the DB). The cron below stays as a backup.
 on:
   schedule:
-    - cron: "12 * * * *" # hourly, 5 minutes after the collector's :07 ingest
+    - cron: "12 * * * *" # hourly, 5 minutes after the collector's :07 ingest (backup)
+  workflow_run:
+    workflows: [Collector]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
