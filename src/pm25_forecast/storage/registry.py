@@ -10,14 +10,10 @@ from typing import Any
 from pm25_forecast.collector import open_db
 from pm25_forecast.storage import db
 
-UPSERT_MODEL = """
+INSERT_MODEL = """
 INSERT INTO models (model_version, sha256, artifact, manifest)
 VALUES (%(model_version)s, %(sha256)s, %(artifact)s, %(manifest)s::jsonb)
-ON CONFLICT (model_version) DO UPDATE SET
-    sha256 = EXCLUDED.sha256,
-    artifact = EXCLUDED.artifact,
-    manifest = EXCLUDED.manifest,
-    created_at = now()
+ON CONFLICT (model_version) DO NOTHING
 """
 SELECT_MODEL = """
 SELECT sha256, artifact, manifest
@@ -45,13 +41,13 @@ def validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def write_model(con: Any, model_version: str, artifact: bytes, manifest: Mapping[str, Any]) -> str:
-    """Write one version, then read it back and verify the stored artifact and metadata."""
+    """Insert one immutable version; an identical retry succeeds, a collision fails."""
     if not model_version.strip() or not artifact:
         raise ValueError("model_version and artifact are required")
     validated = validate_manifest(manifest)
     digest = artifact_sha256(artifact)
     con.execute(
-        UPSERT_MODEL,
+        INSERT_MODEL,
         {
             "model_version": model_version,
             "sha256": digest,
@@ -59,11 +55,16 @@ def write_model(con: Any, model_version: str, artifact: bytes, manifest: Mapping
             "manifest": json.dumps(validated, separators=(",", ":"), sort_keys=True),
         },
     )
+    stored_artifact, stored_manifest = read_model(con, model_version)
+    if artifact_sha256(stored_artifact) != digest:
+        raise ValueError("model_version already exists with a different artifact")
+    if stored_artifact != artifact or stored_manifest != validated:
+        raise ValueError("model_version already exists with different artifact or manifest")
     return digest
 
 
 def read_model(con: Any, model_version: str) -> tuple[bytes, dict[str, Any]]:
-    """Fetch and verify one model as an hourly inference job would."""
+    """Fetch and verify one model bundle and its stored checksum."""
     row = con.execute(SELECT_MODEL, {"model_version": model_version}).fetchone()
     if row is None:
         raise LookupError(f"model version not found: {model_version}")
@@ -84,10 +85,14 @@ def publish_model(
     *,
     connect=db.connect,
 ) -> str:
-    # The first context commits on exit; the second connection proves the hourly reader can
-    # retrieve the committed row rather than merely seeing its own uncommitted write.
+    validated = validate_manifest(manifest)
+    # The first context commits on exit; the second connection verifies the committed row.
     with open_db(connect, database_url) as con:
         digest = write_model(con, model_version, artifact, manifest)
     with open_db(connect, database_url) as con:
-        read_model(con, model_version)
+        stored_artifact, stored_manifest = read_model(con, model_version)
+    if artifact_sha256(stored_artifact) != digest or stored_artifact != artifact:
+        raise ValueError("committed model artifact does not match submitted artifact")
+    if stored_manifest != validated:
+        raise ValueError("committed model manifest does not match submitted manifest")
     return digest

@@ -64,10 +64,16 @@ uv run python -m pm25_forecast.train_model --export data/history.duckdb --push
 
 The export reads observations and stored CAMS forecast vintages in a PostgreSQL read-only
 transaction. Training reads only the local DuckDB file. The `--push` step writes the model binary
-and manifest to the `models` table, reconnects, reads them back, checks SHA-256, and deserializes
-the LightGBM bundle with the shared ordered feature list. The export and generated artifacts are
-local, git-ignored files. `DATABASE_URL` comes from the environment or `.env` and is never included
-in logs. The manifest records the UTC training window, held-out metrics, and export hash.
+and manifest to the `models` table, reconnects, reads them back, checks that the artifact digest
+and manifest match the submitted values, and deserializes the LightGBM bundle against the shared
+ordered feature list. Model versions are immutable: retrying a version with identical content is
+idempotent, while different content is rejected. The export and generated artifacts are local,
+git-ignored files. `DATABASE_URL` comes from the environment or `.env` and is never included in
+logs. The manifest records the UTC training window, held-out metrics, and export hash.
+
+KAN-32 trains and verifies a registered model but does not connect it to the hourly predict step.
+`pm25_forecast.predict` continues to emit the KAN-28 persistence and CAMS baselines; selecting and
+loading a champion LightGBM model in hourly prediction remains a KAN-29 dependency.
 
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).

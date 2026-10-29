@@ -123,7 +123,7 @@ def _metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
 
 
 def load_model_bundle(artifact: bytes) -> dict[int, lgb.Booster]:
-    """Deserialize the model format consumed by the hourly inference code."""
+    """Deserialize the locally trained bundle and validate its shared feature contract."""
     payload = json.loads(artifact)
     if payload.get("format") != 1 or set(payload.get("horizons", {})) != {
         str(horizon) for horizon in HORIZONS_H
