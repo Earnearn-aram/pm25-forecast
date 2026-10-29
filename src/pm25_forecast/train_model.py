@@ -49,12 +49,15 @@ def make_training_rows(
     return _make_training_rows_with_availability(export_path)[0]
 
 
-def _make_training_rows_with_availability(
-    export_path: Path,
-) -> tuple[
-    dict[int, tuple[np.ndarray, np.ndarray, list[datetime]]],
-    dict[int, list[datetime]],
-]:
+Sample = tuple[list[float], float, datetime, datetime, str]  # x, y, issue, label_avail, station
+
+
+def build_samples(export_path: Path) -> tuple[dict[int, list[Sample]], dict[tuple, Any], dict]:
+    """Shared as-of sample builder: per horizon (x, y, issue, label_available, station).
+
+    Also returns the labels and per-station vintages so the caller can report availability counts.
+    Retrain (KAN-23) reuses this for its held-out evaluation so features are never duplicated.
+    """
     with duckdb.connect(str(export_path), read_only=True) as con:
         con.execute("SET TimeZone = 'UTC'")
         observations = _rows(
@@ -94,9 +97,7 @@ def _make_training_rows_with_availability(
         for station in {station for station, _ in labels}
     }
 
-    samples: dict[int, list[tuple[list[float], float, datetime, datetime]]] = {
-        h: [] for h in HORIZONS_H
-    }
+    samples: dict[int, list[Sample]] = {h: [] for h in HORIZONS_H}
     training_as_of = datetime.now(UTC)
     for horizon in HORIZONS_H:
         for (station, target_time), (target, target_available) in labels.items():
@@ -134,8 +135,17 @@ def _make_training_rows_with_availability(
             ]
             if all(math.isnan(x) for x in vector):
                 continue
-            samples[horizon].append((vector, target, issue, target_available))
+            samples[horizon].append((vector, target, issue, target_available, station))
+    return samples, labels, by_station_vintages
 
+
+def _make_training_rows_with_availability(
+    export_path: Path,
+) -> tuple[
+    dict[int, tuple[np.ndarray, np.ndarray, list[datetime]]],
+    dict[int, list[datetime]],
+]:
+    samples, labels, by_station_vintages = build_samples(export_path)
     result = {}
     label_availabilities = {}
     counts = {horizon: len(rows) for horizon, rows in samples.items()}

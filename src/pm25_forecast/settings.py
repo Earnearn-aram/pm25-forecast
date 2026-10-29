@@ -32,6 +32,18 @@ class Settings(BaseSettings):
     # no challenger. Not secret: a registry label such as `kan15-retrospective-24h`.
     challenger_model_version: str | None = None
 
+    # KAN-23: weekly retrain may move the production champion only when this is true. Default off;
+    # a blank value (unset repo variable) is off; an unparseable value is a config error.
+    auto_promote: bool = False
+
+    @field_validator("auto_promote", mode="before")
+    @classmethod
+    def _blank_auto_promote_is_off(cls, v: object) -> object:
+        if isinstance(v, str):
+            v = v.strip()
+            return v or False
+        return v
+
     @field_validator("challenger_model_version", mode="before")
     @classmethod
     def _blank_challenger_is_unset(cls, v: object) -> object:
