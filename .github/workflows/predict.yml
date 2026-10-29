@@ -53,6 +53,19 @@ jobs:
           CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }} # KAN-29 shadow model; unset = none
           AIR4THAI_CA_BUNDLE: certs/air4thai-ca.pem # not used by predict; kept identical to the collector
         run: uv run --no-dev python -m pm25_forecast.predict
+      # KAN-20: score matured forecasts (persistence + challenger) against arrived actuals.
+      # Runs even when Predict failed: it only reads predictions/observations and writes `scores`,
+      # so it cannot cost a forecast. Same DB-down policy (skip, alert, exit 1); when the DB is
+      # down both steps alert (accepted: two lines naming the failing step). Own timeout so a slow
+      # scoring run cannot eat the whole job budget.
+      - name: Score
+        if: success() || failure()
+        timeout-minutes: 4
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }}
+        run: uv run --no-dev python -m pm25_forecast.score
       # Alert when any step above failed, or the job was cancelled (timeout-minutes hit).
       # Independent of the predict module: no DB, no settings. If uv or the venv is unusable a curl
       # fallback posts a fixed message. The webhook URL is a secret: it comes in through env,

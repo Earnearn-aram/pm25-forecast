@@ -95,6 +95,34 @@ WHERE station_id = %(station_id)s AND model_version = %(model_version)s
 """
 
 
+# Scoring (KAN-20): one model's forecasts whose valid_time is in [since, now], with the actual
+# for that station and hour (NULL = not arrived yet) and the stored score (NULL = not scored).
+# The stored pm25_obs lets the caller write only new or changed scores.
+SELECT_MATURED_FORECASTS = """
+SELECT p.station_id, p.issue_time, p.valid_time, p.pm25_pred, o.pm25, s.pm25_obs
+FROM predictions p
+LEFT JOIN observations o
+  ON o.station_id = p.station_id AND o.ts = p.valid_time AND o.pm25 IS NOT NULL
+LEFT JOIN scores s
+  ON s.station_id = p.station_id AND s.issue_time = p.issue_time
+ AND s.valid_time = p.valid_time AND s.model_version = p.model_version
+WHERE p.model_version = %(model_version)s
+  AND p.valid_time >= %(since)s AND p.valid_time <= %(now)s
+"""
+
+# Scoring (KAN-20): one model's scores in a rolling window of valid_time, for metrics. Only
+# scores whose actual is still usable count: an observation later corrected to NULL or negative
+# drops its score from the metrics (the row is kept, never deleted).
+SELECT_SCORES_BETWEEN = """
+SELECT s.station_id, s.issue_time, s.valid_time, s.abs_error FROM scores s
+JOIN observations o
+  ON o.station_id = s.station_id AND o.ts = s.valid_time
+ AND o.pm25 IS NOT NULL AND o.pm25 >= 0
+WHERE s.model_version = %(model_version)s
+  AND s.valid_time >= %(since)s AND s.valid_time <= %(now)s
+"""
+
+
 def write_rows(
     con: Any,
     statement: str,
