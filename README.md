@@ -52,6 +52,23 @@ read-only rolling-origin evaluation with identical scoring pairs, availability g
 28-day paired CAMS comparison rule. See [input contract and data limitations](docs/backtest.md).
 No historical CAMS results are invented when stored vintages are missing.
 
+First local model (KAN-32): on a fresh database, apply `src/pm25_forecast/storage/schema.sql`. On
+an existing database, run `src/pm25_forecast/storage/migrations/001_model_manifest.sql` once. Then
+run this sequence from a fresh clone:
+
+```sh
+uv sync --locked
+uv run python -m pm25_forecast.export_history --output data/history.duckdb
+uv run python -m pm25_forecast.train_model --export data/history.duckdb --push
+```
+
+The export reads observations and stored CAMS forecast vintages in a PostgreSQL read-only
+transaction. Training reads only the local DuckDB file. The `--push` step writes the model binary
+and manifest to the `models` table, reconnects, reads them back, checks SHA-256, and deserializes
+the LightGBM bundle with the shared ordered feature list. The export and generated artifacts are
+local, git-ignored files. `DATABASE_URL` comes from the environment or `.env` and is never included
+in logs. The manifest records the UTC training window, held-out metrics, and export hash.
+
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).
 

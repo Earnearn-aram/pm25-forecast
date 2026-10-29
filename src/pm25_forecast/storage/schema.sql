@@ -43,5 +43,6 @@ CREATE TABLE IF NOT EXISTS models (
     model_version  text        PRIMARY KEY,
     sha256         text        NOT NULL,
     artifact       bytea       NOT NULL,
+    manifest       jsonb       NOT NULL,
     created_at     timestamptz NOT NULL DEFAULT now()
 );
