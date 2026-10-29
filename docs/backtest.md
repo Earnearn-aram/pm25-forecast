@@ -89,3 +89,18 @@ historical inputs), and disclose that retrospective original revisions cannot be
 No production database was queried as part of this implementation; these are inspected code/schema
 constraints, not a claim about measured live coverage. Expanding ingest/archive coverage is separate
 work; missing archives remain visible as an insufficient-data decision here.
+
+The KAN-32 local trainer applies the same fail-closed rule to its current DuckDB export: its
+hourly issue times are formed from target timestamps, so an observation at the exact issue hour is
+not required. Every feature observation and forecast vintage still must have both a source time
+no later than issue time and `available_at <= issue time`. Targets must lie on the UTC hour grid.
+All three horizons must have at least 20 usable examples before validation, and at least 20
+training examples must remain after the chronological split and horizon-length embargo. The
+export's `available_at` is copied from the current
+`ingested_at`; because upserts refresh that field, it is not a historical availability archive.
+When the rule yields too few examples, the trainer reports aggregate counts and stops. Do not
+substitute `ts` for `available_at` or claim the backfilled values were available at earlier issues.
+New immutable arrival-time captures and enough post-capture observations to mature the +24h labels
+are required before a model can be trained under this policy. Aggregate coverage counts from a
+current export describe only that snapshot and do not establish historical availability or
+historical model performance.

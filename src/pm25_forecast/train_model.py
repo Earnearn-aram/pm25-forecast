@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import math
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 HORIZONS_H = (6, 12, 24)
 
 
+class InsufficientTrainingDataError(ValueError):
+    """The export does not contain enough causally eligible rows to fit every horizon."""
+
+
 def _iso(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("export timestamps must be timezone-aware")
@@ -40,7 +45,16 @@ def _rows(con: Any, query: str) -> list[tuple]:
 def make_training_rows(
     export_path: Path,
 ) -> dict[int, tuple[np.ndarray, np.ndarray, list[datetime]]]:
-    """Build leakage-safe samples; all feature/label availability is bounded by issue time."""
+    """Build as-of features and pair them with labels mature in the local export."""
+    return _make_training_rows_with_availability(export_path)[0]
+
+
+def _make_training_rows_with_availability(
+    export_path: Path,
+) -> tuple[
+    dict[int, tuple[np.ndarray, np.ndarray, list[datetime]]],
+    dict[int, list[datetime]],
+]:
     with duckdb.connect(str(export_path), read_only=True) as con:
         con.execute("SET TimeZone = 'UTC'")
         observations = _rows(
@@ -68,26 +82,47 @@ def make_training_rows(
             by_station_vintages[station].append(
                 (issue, valid, float(value), available, model_version)
             )
+    observation_times = {
+        station: [row[0] for row in rows] for station, rows in by_station_obs.items()
+    }
+    first_available_by_station = {
+        station: min(
+            [row[2] for row in by_station_obs.get(station, [])]
+            + [row[3] for row in by_station_vintages.get(station, [])],
+            default=None,
+        )
+        for station in {station for station, _ in labels}
+    }
 
-    samples: dict[int, list[tuple[list[float], float, datetime]]] = {h: [] for h in HORIZONS_H}
-    for (station, issue), (_current, issue_available) in labels.items():
-        # The origin itself must have been present by prediction time.
-        if issue_available > issue:
-            continue
-        history = by_station_obs[station]
-        feature_observations = [
-            (ts, value) for ts, value, available in history if ts <= issue and available <= issue
-        ]
-        feature_vintages = [
-            (v_issue, valid, value, model)
-            for v_issue, valid, value, available, model in by_station_vintages[station]
-            if v_issue <= issue and available <= issue
-        ]
-        for horizon in HORIZONS_H:
-            target_time = issue + timedelta(hours=horizon)
-            label = labels.get((station, target_time))
-            if label is None or label[1] > datetime.now(UTC):
+    samples: dict[int, list[tuple[list[float], float, datetime, datetime]]] = {
+        h: [] for h in HORIZONS_H
+    }
+    training_as_of = datetime.now(UTC)
+    for horizon in HORIZONS_H:
+        for (station, target_time), (target, target_available) in labels.items():
+            if target_time.minute or target_time.second or target_time.microsecond:
                 continue
+            if target_time > training_as_of or target_available > training_as_of:
+                continue
+            issue = target_time - timedelta(hours=horizon)
+            first_available = first_available_by_station[station]
+            if first_available is None or first_available > issue:
+                continue
+            history = by_station_obs[station]
+            history_times = observation_times[station]
+            history_start = bisect_left(history_times, issue - timedelta(hours=24))
+            history_end = bisect_right(history_times, issue)
+            feature_observations = [
+                (ts, value)
+                for ts, value, available in history[history_start:history_end]
+                if available <= issue
+            ]
+            feature_vintages = [
+                (v_issue, valid, value, model)
+                for v_issue, valid, value, available, model in by_station_vintages[station]
+                if v_issue <= issue and available <= issue
+            ]
+            target_time = issue + timedelta(hours=horizon)
             feature_values = build_features(
                 feature_observations, feature_vintages, issue, target_time
             )
@@ -99,19 +134,44 @@ def make_training_rows(
             ]
             if all(math.isnan(x) for x in vector):
                 continue
-            samples[horizon].append((vector, label[0], issue))
+            samples[horizon].append((vector, target, issue, target_available))
 
     result = {}
+    label_availabilities = {}
+    counts = {horizon: len(rows) for horizon, rows in samples.items()}
+    insufficient = {horizon: count for horizon, count in counts.items() if count < 20}
+    if insufficient:
+        availability_origin_count = sum(
+            available <= issue for (_, issue), (_, available) in labels.items()
+        )
+        availability_vintage_count = sum(
+            available <= issue
+            for rows in by_station_vintages.values()
+            for issue, _, _, available, _ in rows
+        )
+        per_horizon = ", ".join(f"+{horizon}h={counts[horizon]}" for horizon in HORIZONS_H)
+        raise InsufficientTrainingDataError(
+            "Insufficient leakage-safe training data: "
+            f"usable examples by horizon ({per_horizon}); need 20 per horizon. "
+            f"{availability_origin_count}/{len(labels)} usable observations have "
+            f"available_at <= their observation time; {availability_vintage_count}/"
+            f"{sum(map(len, by_station_vintages.values()))} usable forecast vintages have "
+            "available_at <= their issue time. These are export-level counts; the strict "
+            "feature policy requires available_at <= simulated issue time. "
+            "Do not treat a historical timestamp or a later ingested_at as proof of past "
+            "availability; preserve immutable timestamped captures and collect enough mature "
+            "+24h outcomes before training."
+        )
+
     for horizon, rows in samples.items():
         rows.sort(key=lambda row: row[2])
-        if len(rows) < 20:
-            raise ValueError(f"horizon +{horizon}h has only {len(rows)} usable examples; need 20")
         result[horizon] = (
             np.asarray([row[0] for row in rows], dtype=float),
             np.asarray([row[1] for row in rows], dtype=float),
             [row[2] for row in rows],
         )
-    return result
+        label_availabilities[horizon] = [row[3] for row in rows]
+    return result, label_availabilities
 
 
 def _metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
@@ -120,6 +180,25 @@ def _metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
         "mae": fmean(abs(float(error)) for error in errors),
         "rmse": math.sqrt(fmean(float(error * error) for error in errors)),
     }
+
+
+def _validation_indices(
+    origins: list[datetime],
+    label_availabilities: list[datetime],
+    horizon: int,
+) -> tuple[list[int], list[int]]:
+    """Split chronologically; embargo target times and label arrivals at the fold boundary."""
+    if len(origins) != len(label_availabilities):
+        raise ValueError("training origins and label availability must have the same length")
+    split = max(1, min(len(origins) - 1, int(len(origins) * 0.8)))
+    validation_start = origins[split]
+    train_indices = [
+        index
+        for index, origin in enumerate(origins[:split])
+        if origin + timedelta(hours=horizon) < validation_start
+        and label_availabilities[index] < validation_start
+    ]
+    return train_indices, list(range(split, len(origins)))
 
 
 def load_model_bundle(artifact: bytes) -> dict[int, lgb.Booster]:
@@ -139,20 +218,15 @@ def load_model_bundle(artifact: bytes) -> dict[int, lgb.Booster]:
 
 
 def train(export_path: Path, model_version: str) -> tuple[bytes, dict[str, Any]]:
-    data = make_training_rows(export_path)
+    data, label_availabilities = _make_training_rows_with_availability(export_path)
     boosters: dict[str, str] = {}
     metrics: dict[str, Any] = {}
     first_train: datetime | None = None
     last_train: datetime | None = None
     for horizon, (features, target, origins) in data.items():
-        split = max(1, min(len(origins) - 1, int(len(origins) * 0.8)))
-        validation_start = origins[split]
-        train_indices = [
-            index
-            for index, origin in enumerate(origins[:split])
-            if origin + timedelta(hours=horizon) < validation_start
-        ]
-        valid_indices = list(range(split, len(origins)))
+        train_indices, valid_indices = _validation_indices(
+            origins, label_availabilities[horizon], horizon
+        )
         if len(train_indices) < 20:
             raise ValueError(
                 f"horizon +{horizon}h has fewer than 20 training examples after the "
@@ -230,6 +304,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         logger.error("configuration error: %s", exc)
         return 2
+    except InsufficientTrainingDataError as exc:
+        logger.error("training data rejected: %s", exc)
+        return 1
     except Exception as exc:
         # DB errors can echo DATABASE_URL; only the exception type is safe to log.
         logger.error("model training or registry operation failed (%s)", type(exc).__name__)

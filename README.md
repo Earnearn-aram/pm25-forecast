@@ -71,6 +71,22 @@ idempotent, while different content is rejected. The export and generated artifa
 git-ignored files. `DATABASE_URL` comes from the environment or `.env` and is never included in
 logs. The manifest records the UTC training window, held-out metrics, and export hash.
 
+Training uses a strict as-of policy: an observation can be an input only when its exported
+`available_at` is no later than the simulated issue time, and a target must be present in the
+local snapshot. Hourly issue times are derived from target timestamps and do not require a reading
+at the exact issue hour; only earlier readings that passed the availability gate become features.
+If any horizon has fewer than 20 eligible examples, training stops with counts for all horizons
+and counts of observations and forecast vintages available by their own timestamps. Do not relax
+this gate by replacing `available_at` with `ts` or by assuming a historical download was available
+when its timestamp occurred. The chronological validation split also requires 20 training rows
+per horizon after its horizon-length embargo, so the required sample count can be higher. The live
+observations table is upserted and refreshes `ingested_at`; it does not preserve original arrival
+times or prior values. The export therefore
+supports conservative eligibility checks for the current row, but it cannot reconstruct a fully
+faithful historical feature/label snapshot. Collect immutable, timestamped captures over time
+before claiming historical training or validation coverage. A current export with less than 24
+hours of post-availability observations cannot supply +24h training targets under this policy.
+
 KAN-32 trains and verifies a registered model but does not connect it to the hourly predict step.
 `pm25_forecast.predict` continues to emit the KAN-28 persistence and CAMS baselines; selecting and
 loading a champion LightGBM model in hourly prediction remains a KAN-29 dependency.
