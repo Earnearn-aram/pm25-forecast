@@ -395,7 +395,11 @@ class Air4ThaiClient:
         return response.content
 
     def fetch(self, station_ids: Iterable[str] = ()) -> list[Observation]:
-        """Fetch the latest readings, archive the raw body, and return validated observations."""
+        """Fetch the latest readings, archive the raw body, and return validated observations.
+
+        Warning (KAN-74): the ``PM25.value`` of this feed is PCD's 24 h rolling average, not an
+        hourly value. Do not store it as ``observations.pm25``; use ``fetch_history`` for that.
+        """
         body = self._fetch()
         fetched_at = datetime.now(UTC)
         if self._archive is not None:

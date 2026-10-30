@@ -29,6 +29,59 @@ Backfill (KAN-12 part 1, KAN-34): `uv run python -m pm25_forecast.backfill [--lo
 about 3 months) into `observations`. Same settings as the collector; idempotent, so it runs daily
 as gap recovery. Workflow: `.github/workflows/backfill.yml`.
 
+Collector stores hourly PM2.5, not the 24 h average (KAN-74). Until KAN-74 the collector stored
+`AQILast.PM25.value` from `getNewAQI_JSON` as `pm25`. On 2026-10-30 15:00 Bangkok that value equalled
+the mean of the last 24 hourly history values for stations 02t, 59t and 61t (while the latest hours
+were 15.5, 4.3 and 12.1), and PCD documents the headline as a 24 h average. The live `AQILast` block
+has no separate 1 h field (only `color_id`, `aqi` and `value` per pollutant), so the collector now
+reads the history endpoint (`getHistoryData`, `type=hr`) through the existing client (TLS bundle,
+retries): the last 6 hours per station each run, one request per station, 2 s apart. Hours with no
+value stay missing (no imputation); missing hours after the newest stored hour are logged and
+alerted as gaps. A history failure for any station is a run failure (exit 1, alert) with only the
+exception type in the message (no URL or secrets); CAMS is still collected. The 24 h headline is
+not stored anywhere (it would need a new column or table, which this change does not add).
+
+Why it matters: `UPSERT_OBSERVATION` lets the later same-source write win, so rows written by the
+old collector are 24 h averages until the hourly backfill overwrites them, and every
+`scores.pm25_obs` computed from them is skewed.
+
+One-off repair (owner; needs `DATABASE_URL`, `STATION_LOCATIONS`, `AIR4THAI_CA_BUNDLE`), after the
+KAN-74 PR is merged so the collector stops writing 24 h values. Run the existing backfill over the
+whole retention window; it upserts the hourly history over the bad rows:
+
+- GitHub: Actions, "Backfill", "Run workflow", input `lookback_days` = `120`
+  (workflow draft: `docs/backfill-workflow.yml.txt`; that is also its default).
+- Or locally: `AIR4THAI_CA_BUNDLE=certs/air4thai-ca.pem uv run python -m pm25_forecast.backfill --lookback-days 120`
+
+Run the identification queries below BEFORE the repair: an upsert sets `ingested_at` to now, so
+afterwards repaired rows can no longer be told apart. Then check the per-station log lines (rows upserted, empty or failed chunks). Rows outside what Air4Thai
+still holds cannot be repaired (the window is about 3 months, so everything since 2026-10-27 is
+inside it). Hours Air4Thai has no value for keep their old 24 h value because the backfill skips
+rows without a value; the first query below, saved before the repair, lists them.
+
+Queries for the owner (read-only, run by hand). Suspect observations are those written by the
+old collector, i.e. whose `ingested_at` is within a few minutes after `ts` (the backfill writes
+them long after):
+
+```sql
+-- observations written at collection time since 2026-10-27 (likely 24 h averages)
+SELECT station_id, count(*) AS rows, min(ts) AS first_ts, max(ts) AS last_ts
+FROM observations
+WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
+  AND ingested_at - ts < interval '2 hours'
+GROUP BY station_id ORDER BY station_id;
+
+-- scores computed from observations in that period (re-score after the repair)
+SELECT model_version, count(*) AS scores, min(valid_time) AS first_valid, max(valid_time) AS last_valid
+FROM scores
+WHERE valid_time >= '2026-10-27T00:00:00+07:00'
+GROUP BY model_version ORDER BY model_version;
+```
+
+After the repair, re-run `uv run python -m pm25_forecast.score`: `UPSERT_SCORE` overwrites
+`pm25_obs` and `abs_error` for existing keys, so scores since 2026-10-27 are corrected for every
+matured forecast the scorer still reads (confirm its lookback covers 2026-10-27 first).
+
 Predict (KAN-28): `uv run python -m pm25_forecast.predict` reads stored observations and CAMS rows
 and appends `persistence-24h` forecasts (plus a `cams` pass-through of stored CAMS rows, not scored) for +6, +12 and +24 h per station to
 `predictions` (idempotent per issue hour). Same settings as the collector; DB down means skip,

@@ -4,7 +4,6 @@ No live calls and no real database. The one "DB down" test connects psycopg to a
 port, which fails immediately without any server.
 """
 
-import copy
 import gzip
 import json
 import logging
@@ -36,8 +35,11 @@ STEP = timedelta(hours=1)
 FIXTURES = Path(__file__).parent / "fixtures"
 SCHEMA = (Path(sql.__file__).parent / "schema.sql").read_text()
 NOW = datetime(2026, 10, 26, 7, 30, tzinfo=UTC)
-# TST01 in the Air4Thai fixture reads 08:00 Bangkok = 01:00 UTC with pm25 17.5.
-TST01_TS = datetime(2026, 10, 26, 1, 0, tzinfo=UTC)
+# KAN-74: hourly values come from the history endpoint. NOW is 14:30 Bangkok; TST01's history has
+# 12:00, 13:00 and 14:00 Bangkok = 05:00, 06:00, 07:00 UTC with 11, 12 and 13. The latest-reading
+# feed (a 24 h average, 17.5 here) must never be stored.
+TST01_TS = datetime(2026, 10, 26, 7, 0, tzinfo=UTC)
+HEADLINE_24H = 17.5
 DB_PASSWORD = "-".join(["dummy", "pw", "xyz"])  # assembled so no credential literal is in source
 DB_URL = f"postgresql://user:{DB_PASSWORD}@127.0.0.1:1/db"
 
@@ -101,6 +103,7 @@ class _Cursor:
 def fast_retries(monkeypatch):
     """No real sleeping in any retry path (DB connect, Open-Meteo client)."""
     monkeypatch.setattr(db, "RETRY_WAIT", wait_none())
+    monkeypatch.setattr(collector, "AIR4THAI_PAUSE_S", 0.0)
     real = collector.OpenMeteoClient
     monkeypatch.setattr(
         collector,
@@ -118,9 +121,34 @@ def load(path):
     return json.loads((FIXTURES / path).read_text())
 
 
-def make_http(air=None, cams=None, status=None):
+def history_payload(rows_by_station):
+    """getHistoryData body: {station: [(local 'YYYY-MM-DD HH:MM:SS', value), ...]}."""
+    return {
+        "result": "OK",
+        "stations": [
+            {
+                "stationID": sid,
+                "data": [{"DATETIMEDATA": t, "PM25": v} for t, v in rows],
+            }
+            for sid, rows in rows_by_station.items()
+        ],
+    }
+
+
+DEFAULT_HISTORY = {
+    "TST01": [
+        ("2026-10-26 12:00:00", 11.0),
+        ("2026-10-26 13:00:00", 12.0),
+        ("2026-10-26 14:00:00", 13.0),
+    ],
+    "TST02": [("2026-10-26 14:00:00", 22.0)],
+}
+
+
+def make_http(air=None, cams=None, status=None, history=None):
     """Route by host. `status` maps a host to an error status code."""
     air = air if air is not None else load("air4thai_getNewAQI_synthetic.json")
+    history = history if history is not None else history_payload(DEFAULT_HISTORY)
     cams = cams if cams is not None else load("open_meteo/cams_air_quality.json")
     weather = load("open_meteo/weather_forecast.json")
     calls: list[str] = []
@@ -131,7 +159,9 @@ def make_http(air=None, cams=None, status=None):
         if status and host in status:
             return httpx.Response(status[host], json={"error": True, "reason": "x"})
         if host == "air4thai.pcd.go.th":
-            return httpx.Response(200, json=air)
+            return httpx.Response(200, json=air)  # 24 h headline feed: must stay unused
+        if host == "air4thai.com":
+            return httpx.Response(200, json=history)
         if host == "air-quality-api.open-meteo.com":
             return httpx.Response(200, json=cams)
         if host == "api.open-meteo.com":
@@ -168,9 +198,18 @@ def do_run(tmp_path, fake_db, *, now=NOW, http=None, alert=None, **kw):
 def test_run_writes_observation_and_cams_vintage(tmp_path, fake_db):
     result = do_run(tmp_path, fake_db)
     assert result.failures == []
-    assert result.observations_upserted == 1
-    assert [r[:2] for r in fake_db.rows("observations")] == [("TST01", TST01_TS.isoformat())]
-    assert fake_db.rows("observations")[0][2:4] == (17.5, "air4thai")
+    assert result.observations_upserted == 3
+    rows = fake_db.rows("observations")
+    assert [r[:2] for r in rows] == [
+        ("TST01", (TST01_TS - timedelta(hours=2)).isoformat()),
+        ("TST01", (TST01_TS - timedelta(hours=1)).isoformat()),
+        ("TST01", TST01_TS.isoformat()),
+    ]
+    assert [(r[2], r[3]) for r in rows] == [
+        (11.0, "air4thai"),
+        (12.0, "air4thai"),
+        (13.0, "air4thai"),
+    ]
     preds = fake_db.rows("predictions")
     assert len(preds) == 3  # the fixture's 09:00 hour is null and is skipped
     assert {p[1] for p in preds} == {NOW.isoformat()}  # issue_time = retrieval time
@@ -178,13 +217,47 @@ def test_run_writes_observation_and_cams_vintage(tmp_path, fake_db):
     assert fake_db.urls == [DB_URL, DB_URL]  # one connection per transaction
 
 
+def test_hourly_history_is_stored_not_the_24h_headline(tmp_path, fake_db):
+    http = make_http()
+    do_run(tmp_path, fake_db, http=http)
+    stored = [r[2] for r in fake_db.rows("observations")]
+    assert HEADLINE_24H not in stored
+    assert stored == [11.0, 12.0, 13.0]
+    assert "air4thai.pcd.go.th" not in http.calls  # the headline feed is not even requested
+
+
 def test_second_run_is_idempotent_and_cams_repeat_is_skipped(tmp_path, fake_db):
     do_run(tmp_path, fake_db)
     later = do_run(tmp_path, fake_db, now=NOW + timedelta(hours=1))
     assert later.cams_duplicates_skipped == ["TST01"]
     assert later.predictions_written == 0
-    assert len(fake_db.rows("observations")) == 1
+    assert later.observations_upserted == 3  # same keys, same values: overwritten, not added
+    assert len(fake_db.rows("observations")) == 3
+    assert [r[2] for r in fake_db.rows("observations")] == [11.0, 12.0, 13.0]
     assert len(fake_db.rows("predictions")) == 3
+
+
+def test_missing_hour_stays_missing_and_is_not_imputed(tmp_path, fake_db):
+    rows = [
+        ("2026-10-26 12:00:00", 11.0),
+        ("2026-10-26 14:00:00", 13.0),  # 13:00 absent from the endpoint
+    ]
+    http = make_http(history=history_payload({"TST01": rows}))
+    alerts: list[str] = []
+    do_run(tmp_path, fake_db, http=http, alert=alerts.append)
+    stored = [r[:3] for r in fake_db.rows("observations")]
+    assert stored == [
+        ("TST01", (TST01_TS - timedelta(hours=2)).isoformat(), 11.0),
+        ("TST01", TST01_TS.isoformat(), 13.0),
+    ]
+    assert alerts == []  # first run: nothing stored before, so no gap to report
+
+
+def test_null_hour_in_history_stays_missing(tmp_path, fake_db):
+    rows = [("2026-10-26 13:00:00", None), ("2026-10-26 14:00:00", 13.0)]
+    result = do_run(tmp_path, fake_db, http=make_http(history=history_payload({"TST01": rows})))
+    assert result.observations_dropped == 1
+    assert [r[2] for r in fake_db.rows("observations")] == [13.0]
 
 
 def test_changed_cams_content_is_stored_as_new_vintage(tmp_path, fake_db):
@@ -201,9 +274,8 @@ def test_changed_cams_content_is_stored_as_new_vintage(tmp_path, fake_db):
 
 def test_raw_responses_are_archived_gzip(tmp_path, fake_db):
     do_run(tmp_path, fake_db)
-    air = list((tmp_path / "raw" / "air4thai").glob("*.json.gz"))
+    assert not (tmp_path / "raw" / "air4thai").exists()  # history bodies are not archived
     meteo = list((tmp_path / "raw" / "open_meteo").glob("*.json.gz"))
-    assert len(air) == 1
     assert len(meteo) == 1  # cams only: weather is off by default
     assert json.loads(gzip.decompress(meteo[0].read_bytes()))["source"] in {
         "weather_forecast",
@@ -231,7 +303,7 @@ def test_find_gaps_counts_missing_hours_only():
 
 
 def test_run_flags_gap_alerts_and_does_not_invent_rows(tmp_path, fake_db):
-    before = TST01_TS - timedelta(hours=3)
+    before = TST01_TS - timedelta(hours=5)  # 02:00; history starts at 05:00
     fake_db.execute(
         sql.UPSERT_OBSERVATION,
         {"station_id": "TST01", "ts": before, "pm25": 9.0, "source": "air4thai"},
@@ -241,13 +313,13 @@ def test_run_flags_gap_alerts_and_does_not_invent_rows(tmp_path, fake_db):
     assert [g.missing_hours for g in result.gaps] == [2]
     assert len(alerts) == 1
     assert "TST01" in alerts[0]
-    assert len(fake_db.rows("observations")) == 2  # the stored one and the new one only
+    assert len(fake_db.rows("observations")) == 4  # the stored one and the three new hours only
 
 
 def test_no_gap_when_consecutive(tmp_path, fake_db):
     fake_db.execute(
         sql.UPSERT_OBSERVATION,
-        {"station_id": "TST01", "ts": TST01_TS - STEP, "pm25": 9.0, "source": "air4thai"},
+        {"station_id": "TST01", "ts": TST01_TS - 3 * STEP, "pm25": 9.0, "source": "air4thai"},
     )
     assert do_run(tmp_path, fake_db).gaps == []
 
@@ -317,35 +389,37 @@ def test_dedupe_rules():
 # --- failures, validation, config ---------------------------------------------------------------
 
 
-def test_air4thai_failure_is_reported_but_cams_still_stored(tmp_path, fake_db):
-    http = make_http(status={"air4thai.pcd.go.th": 404})
-    result = do_run(tmp_path, fake_db, http=http)
-    assert result.failures == ["air4thai fetch failed: HTTPStatusError"]
+def test_air4thai_failure_is_reported_but_cams_still_stored(tmp_path, fake_db, caplog):
+    http = make_http(status={"air4thai.com": 404})
+    alerts: list[str] = []
+    with caplog.at_level(logging.INFO):
+        result = do_run(tmp_path, fake_db, http=http, alert=alerts.append)
+    assert len(result.failures) == 1
+    assert result.failures[0].startswith("air4thai history failed for TST01: ")
+    assert result.failures[0].endswith("HTTPStatusError")
     assert result.observations_upserted == 0
     assert result.predictions_written == 3
+    # httpx's own INFO line carries the URL (configure_logging quietens it in production);
+    # everything the collector and client write must be free of it.
+    ours = [r.getMessage() for r in caplog.records if r.name != "httpx"]
+    leaked = " ".join(ours + result.failures + alerts)
+    assert "air4thai.com" not in leaked and "stationID" not in leaked
+    assert DB_PASSWORD not in leaked
 
 
 def test_open_meteo_failure_is_reported_but_observations_still_stored(tmp_path, fake_db):
     http = make_http(status={"air-quality-api.open-meteo.com": 400})
     result = do_run(tmp_path, fake_db, http=http)
     assert result.failures == ["open-meteo cams failed for TST01"]
-    assert result.observations_upserted == 1
+    assert result.observations_upserted == 3
     assert fake_db.rows("predictions") == []
 
 
-def test_null_pm25_and_future_readings_are_dropped_not_stored(tmp_path, fake_db):
-    air = copy.deepcopy(load("air4thai_getNewAQI_synthetic.json"))
-    air["stations"][0]["AQILast"]["PM25"]["value"] = ""
-    result = do_run(tmp_path, fake_db, http=make_http(air=air))
+def test_null_pm25_is_dropped_not_stored(tmp_path, fake_db):
+    hist = history_payload({"TST01": [("2026-10-26 14:00:00", None)]})
+    result = do_run(tmp_path, fake_db, http=make_http(history=hist))
     assert (result.observations_upserted, result.observations_dropped) == (0, 1)
     assert "air4thai returned no usable observations" in result.failures
-
-    air = copy.deepcopy(load("air4thai_getNewAQI_synthetic.json"))
-    air["stations"][0]["AQILast"]["date"] = "2026-10-28"
-    fake_db2 = FakeDb()
-    result = do_run(tmp_path, fake_db2, http=make_http(air=air))
-    assert (result.observations_upserted, result.observations_dropped) == (0, 1)
-    assert fake_db2.rows("observations") == []
 
 
 def test_config_errors(tmp_path, fake_db):
@@ -452,24 +526,22 @@ def test_observations_are_committed_even_if_cams_write_crashes(tmp_path, fake_db
     monkeypatch.setattr(collector, "write_cams", boom)
     with pytest.raises(RuntimeError):
         do_run(tmp_path, fake_db)
-    assert len(fake_db.rows("observations")) == 1
+    assert len(fake_db.rows("observations")) == 3
     assert fake_db.commits == 1
     assert fake_db.rollbacks == 1
 
 
 def test_multi_station_run(tmp_path, fake_db):
-    air = copy.deepcopy(load("air4thai_getNewAQI_synthetic.json"))
-    air["stations"][1]["AQILast"]["PM25"]["value"] = "22"  # TST02 gets a value too
-    http = make_http(air=air)
+    http = make_http()
     result = do_run(
         tmp_path, fake_db, http=http, station_locations="TST01=13.75,100.5;TST02=14,101"
     )
     assert result.failures == []
-    assert result.observations_upserted == 2
+    assert result.observations_upserted == 4
     assert {r[0] for r in fake_db.rows("observations")} == {"TST01", "TST02"}
     assert {r[0] for r in fake_db.rows("predictions")} == {"TST01", "TST02"}
     assert len(fake_db.rows("predictions")) == 6
-    assert http.calls.count("air4thai.pcd.go.th") == 1  # one Air4Thai request for all stations
+    assert http.calls.count("air4thai.com") == 2  # one history request per station
 
 
 def test_circuit_breaker_skips_remaining_stations_for_a_dead_host(tmp_path, fake_db):
@@ -480,11 +552,12 @@ def test_circuit_breaker_skips_remaining_stations_for_a_dead_host(tmp_path, fake
     assert http.calls.count("air-quality-api.open-meteo.com") == 4  # one station's retries only
     cams_failures = [f for f in result.failures if f.startswith("open-meteo cams")]
     assert len(cams_failures) == 1
-    assert result.observations_upserted == 1  # Air4Thai half unaffected
+    assert result.observations_upserted == 4  # Air4Thai half unaffected
 
 
 def test_deadline_stops_fetching_and_records_one_failure(tmp_path, fake_db):
-    ticks = iter([0.0, 0.0, 10_000.0])  # deadline set, station 1 ok, station 2 too late
+    # deadline set; 2 Air4Thai station checks; CAMS station 1 ok, CAMS station 2 too late
+    ticks = iter([0.0, 0.0, 0.0, 0.0, 10_000.0])
     http = make_http()
     result = run(
         settings(tmp_path, station_locations="TST01=13.75,100.5;TST02=14,101"),
