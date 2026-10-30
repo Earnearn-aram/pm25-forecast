@@ -686,7 +686,8 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
                 )
             for x, y, forecast in coords:
                 description = (
-                    f"{key.replace('future_', '')}: {forecast['value']:g} µg/m³, "
+                    f"{key.replace('future_', '').capitalize()} forecast: "
+                    f"{forecast['value']:g} µg/m³, "
                     f"valid {forecast['valid_time']}; issued {forecast['issue_time']}"
                 )
                 series += (
@@ -700,8 +701,8 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
         start, end = datetime.fromisoformat(chart["start"]), datetime.fromisoformat(chart["end"])
         future_html = []
         for key, name in (
-            ("future_persistence", "Persistence"),
-            ("future_challenger", "Challenger"),
+            ("future_persistence", "Persistence forecast"),
+            ("future_challenger", "Challenger forecast"),
         ):
             for forecast in st.get(key, []):
                 if forecast["value"] is None:
@@ -799,9 +800,14 @@ def _section_map(data: dict[str, Any]) -> str:
         '<section class="card map-card"><div class="cardhead"><div>'
         '<h2>Explore the map</h2><p class="muted small">Select a station · latest PM2.5 (µg/m³)</p>'
         '</div></div><div class="map-frame"><div id="station-map" class="station-map">'
-        f'<div class="map-tiles" aria-hidden="true"></div>{"".join(pins)}</div>'
-        '<span class="map-credit">© <a href="https://www.openstreetmap.org/copyright">'
-        "OpenStreetMap contributors</a></span></div>"
+        f'<div class="map-tiles" aria-hidden="true"></div>{"".join(pins)}'
+        '<p class="map-fallback" role="status" hidden '
+        'data-en="Map tiles could not load. Use the station list instead." '
+        'data-th="โหลดแผนที่ไม่สำเร็จ ใช้รายชื่อสถานีแทนได้">'
+        "Map tiles could not load. Use the station list instead.</p>"
+        '<span class="map-credit">© <a href="https://www.openstreetmap.org/copyright" '
+        'rel="noopener" referrerpolicy="strict-origin-when-cross-origin">'
+        "OpenStreetMap contributors</a></span></div></div>"
         '<p id="selected-map-reading" class="muted small" aria-live="polite"></p>'
         '<p class="muted small">Numbers are PM2.5 concentrations, not AQI. '
         "Use the station list if the map is unavailable.</p></section>"
@@ -1184,7 +1190,11 @@ def render_html(data: dict[str, Any]) -> str:
 
 def write_site(data: dict[str, Any], out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    (out / "data.json").write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
+    payload = json.dumps(data, indent=2, allow_nan=False)
+    # Still valid JSON (parses back identically) but never carries a literal <, > or & that could
+    # be mistaken for markup if the file is ever served or embedded as HTML.
+    payload = payload.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    (out / "data.json").write_text(payload + "\n")
     (out / "index.html").write_text(render_html(data), encoding="utf-8")
     for asset in ("dashboard.css", "dashboard.js"):
         shutil.copyfile(ASSETS / asset, out / asset)

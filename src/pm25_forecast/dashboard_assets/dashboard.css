@@ -628,6 +628,8 @@ html[lang="th"] .status {
 .map-tiles img { position: absolute; width: 256px; height: 256px; max-width: none; }
 .map-pin { position: absolute; transform: translate(-50%, -50%); z-index: 2; border: 2px solid #b9f5e1; border-radius: 50%; width: 42px; height: 42px; background: #2dd4bf; color: #10221d; font: 600 12px system-ui, sans-serif; cursor: pointer; box-shadow: 0 0 0 4px #2dd4bf33; }
 .map-pin[aria-pressed="true"] { outline: 2px solid white; outline-offset: 3px; }
+.station-map.tiles-failed { background: #1b272a; }
+.map-fallback { position: absolute; left: 8px; top: 8px; z-index: 3; margin: 0; padding: 4px 8px; border-radius: 6px; background: #0e1116dd; font-size: 12px; }
 .map-credit { position: absolute; right: 2px; bottom: 1px; z-index: 3; padding: 0 4px; background: #0e1116dd; font-size: 10px; }
 .map-credit a { min-height: auto; line-height: 16px; color: #b5dfd3; }
 .pills .pill { font-family: "Archivo", system-ui, sans-serif; }

@@ -39,6 +39,8 @@
     "Upcoming forecasts": "ค่าพยากรณ์ล่วงหน้า",
     "Waiting for future forecasts.": "กำลังรอค่าพยากรณ์ล่วงหน้า",
     "Persistence": "วิธีค่าคงเดิม",
+    "Persistence forecast": "พยากรณ์วิธีค่าคงเดิม",
+    "Challenger forecast": "พยากรณ์โมเดลท้าชิง",
     "Quality checks · last 24 hours": "ผลตรวจคุณภาพ · 24 ชั่วโมงล่าสุด",
     "checks OK": "ผลตรวจปกติ",
     "no check recorded (half height)": "ไม่พบผลตรวจ (ช่องครึ่งความสูง)",
@@ -139,6 +141,8 @@
   };
   Object.keys(stationThai).forEach(function (name) { thai[name] = stationThai[name]; });
   var patterns = [
+    [/^(Persistence|Challenger) forecast: (.+) µg\/m³, valid (.+); issued (.+)$/, function (m) { return (m[1] === "Persistence" ? "พยากรณ์วิธีค่าคงเดิม" : "พยากรณ์โมเดลท้าชิง") + ": " + m[2] + " µg/m³ ใช้ได้ " + m[3] + " ออกเมื่อ " + m[4]; }],
+    [/^\+(\d+) h · (.+) µg\/m³$/, function (m) { return "+" + m[1] + " ชม. · " + m[2] + " µg/m³"; }],
     [/^Now: (.+) UTC$/, function (m) { return "ตอนนี้: " + m[1] + " UTC"; }],
     [/^\+24 h: (.+) UTC$/, function (m) { return "+24 ชม.: " + m[1] + " UTC"; }],
     [/^worst: (.+) · warning above 0.2$/, function (m) { return "สูงสุด: " + m[1] + " · เตือนเมื่อเกิน 0.2"; }],
@@ -218,10 +222,27 @@
     }
     var center = mercator(centerLat, centerLon, zoom);
     var tiles = map.querySelector(".map-tiles"); tiles.replaceChildren();
+    var note = map.querySelector(".map-fallback");
+    map.classList.remove("tiles-failed"); if (note) note.hidden = true;
     var left = center.x - w / 2, top = center.y - h / 2;
-    for (var x = Math.floor(left / 256); x <= Math.floor((left + w) / 256); x++) {
-      for (var y = Math.floor(top / 256); y <= Math.floor((top + h) / 256); y++) {
+    // OSM tile policy: one zoom level, a handful of tiles (at most 4 x 3), no API key.
+    var x0 = Math.floor(left / 256), x1 = Math.floor((left + w) / 256);
+    var y0 = Math.floor(top / 256), y1 = Math.floor((top + h) / 256);
+    if (x1 - x0 > 3) { x0 += Math.floor((x1 - x0 - 3) / 2); x1 = x0 + 3; }
+    if (y1 - y0 > 2) { y0 += Math.floor((y1 - y0 - 2) / 2); y1 = y0 + 2; }
+    var total = (x1 - x0 + 1) * (y1 - y0 + 1), failed = 0;
+    function tileFailed(event) {
+      // A failed tile never leaves a blank map: drop it; with every tile gone, show the plain
+      // background and a note. Pins and the station list keep working either way.
+      if (event.target.parentNode) event.target.remove();
+      failed++;
+      if (failed >= total) { map.classList.add("tiles-failed"); if (note) note.hidden = false; }
+    }
+    for (var x = x0; x <= x1; x++) {
+      for (var y = y0; y <= y1; y++) {
         var img = document.createElement("img"); img.alt = ""; img.loading = "lazy";
+        img.referrerPolicy = "strict-origin-when-cross-origin";
+        img.onerror = tileFailed;
         img.src = "https://tile.openstreetmap.org/" + zoom + "/" + x + "/" + y + ".png";
         img.style.left = (x * 256 - left) + "px"; img.style.top = (y * 256 - top) + "px";
         tiles.appendChild(img);

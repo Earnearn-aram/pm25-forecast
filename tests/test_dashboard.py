@@ -1,6 +1,7 @@
 """KAN-25: static dashboard build. Offline: SQLite built from schema.sql (FakeDb)."""
 
 import json
+import re
 import socket
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -402,3 +403,132 @@ def test_map_uses_newest_observation_and_marks_old_reading(tmp_path):
     page = (tmp_path / "index.html").read_text()
     assert 'class="map-pin stale"' in page
     assert 'data-age="190"' in page
+
+
+SECTION_MARKERS = (
+    "Explore the map",
+    'id="station-map"',
+    'class="map-credit"',
+    "Forecast vs actual",
+    "Skill by horizon",
+    "Quality checks",
+    "Data quality by station",
+    "Drift",
+    "Models",
+    "How it works",
+    "Behind the forecast",
+    'id="language-switch"',
+)
+
+
+def assert_full_page(tmp_path: Path) -> str:
+    page = (tmp_path / "index.html").read_text()
+    for marker in SECTION_MARKERS:
+        assert marker in page, marker
+    assert "Traceback" not in page
+    return page
+
+
+def test_page_renders_every_section_without_predictions(tmp_path):
+    fake = Fake()
+    seed(fake)
+    fake.con.execute("DELETE FROM predictions")
+    fake.con.execute("DELETE FROM scores")
+    fake.con.commit()
+    assert build(fake, tmp_path) == 0
+    assert all(v == "ok" for v in load(tmp_path)["sections"].values())
+    page = assert_full_page(tmp_path)
+    assert "Waiting for future forecasts." in page
+
+
+def test_page_renders_every_section_without_challenger(tmp_path):
+    fake = Fake()
+    seed(fake, challenger_scores=False)
+    assert build(fake, tmp_path, challenger_model_version=None) == 0
+    assert all(v == "ok" for v in load(tmp_path)["sections"].values())
+    page = assert_full_page(tmp_path)
+    assert "No challenger model is configured" in page
+
+
+def test_page_renders_every_section_without_scores(tmp_path):
+    fake = Fake()
+    seed(fake)
+    fake.con.execute("DELETE FROM scores")
+    fake.con.commit()
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+    assert all(v == "ok" for v in data["sections"].values())
+    assert data["headline"]["state"] == "waiting"
+    assert "Not scored yet" in assert_full_page(tmp_path)
+
+
+def test_page_renders_every_section_with_stale_stations(tmp_path):
+    fake = Fake()
+    seed(fake)
+    # Push every observation 10 hours into the past: both stations are stale.
+    fake.con.execute("DELETE FROM observations WHERE ts > ?", ((NOW - 10 * H).isoformat(),))
+    fake.con.commit()
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+    assert all(v == "ok" for v in data["sections"].values())
+    assert data["kpi"]["stations_total"] == 2
+    page = assert_full_page(tmp_path)
+    assert page.count('class="map-pin stale"') == 2
+    assert 'data-stale="true"' in page and 'data-stale="false"' not in page
+
+
+def test_station_label_with_script_is_escaped_in_html_and_json(tmp_path, monkeypatch):
+    evil = "<script>alert(1)</script>"
+    monkeypatch.setitem(dashboard.STATION_NAMES, "59t", evil)
+    fake = Fake()
+    seed(fake)
+    assert build(fake, tmp_path) == 0
+    page = (tmp_path / "index.html").read_text()
+    assert evil not in page and "<script>alert" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert page.count("<script") == 1  # only the bundled dashboard.js tag
+    raw = (tmp_path / "data.json").read_text()
+    assert "<script" not in raw and "\\u003cscript\\u003e" in raw
+    labels = {s["id"]: s["label"] for s in json.loads(raw)["chart"]["stations"]}
+    assert labels["59t"] == evil  # round-trips to the original text
+
+
+def test_map_has_visible_attribution_and_safe_tile_script(tmp_path):
+    fake = Fake()
+    seed(fake)
+    build(fake, tmp_path)
+    page = (tmp_path / "index.html").read_text()
+    start = page.index('id="station-map"')
+    container = page[start : page.index("</section>", start)]
+    assert '© <a href="https://www.openstreetmap.org/copyright"' in container
+    assert "OpenStreetMap contributors</a>" in container
+    assert 'class="map-fallback"' in container and "hidden" in container
+    js = (tmp_path / "dashboard.js").read_text()
+    assert "img.onerror" in js and "tiles-failed" in js
+    assert 'referrerPolicy = "strict-origin-when-cross-origin"' in js
+    assert js.count("tile.openstreetmap.org") == 1 and "apikey" not in js.lower()
+    assert "x1 - x0 > 3" in js and "y1 - y0 > 2" in js  # at most 4 x 3 tiles, one zoom level
+    assert "tiles-failed" in (tmp_path / "dashboard.css").read_text()
+
+
+def test_every_future_forecast_label_says_forecast(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0)
+    for model in (P, CHALLENGER):
+        fake.con.execute(
+            "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id,"
+            " pm25_pred) VALUES ('59t', ?, ?, ?, 'f', 30.0)",
+            (issue.isoformat(), (issue + 6 * H).isoformat(), model),
+        )
+    fake.con.commit()
+    build(fake, tmp_path)
+    page = (tmp_path / "index.html").read_text()
+    chips = re.findall(r'<span class="forecast-point"><b>([^<]*)</b>', page)
+    assert sorted(chips) == ["Challenger forecast", "Persistence forecast"]
+    titles = re.findall(r"<circle class=\"forecast-dot[^>]*><title>([^<]*)</title>", page)
+    assert titles and all(" forecast: " in title for title in titles)
+    js = (tmp_path / "dashboard.js").read_text()
+    for chip in chips:  # the Thai chip text also names the forecast (พยากรณ์)
+        match = re.search(rf'"{chip}": "([^"]+)"', js)
+        assert match and "พยากรณ์" in match[1]
