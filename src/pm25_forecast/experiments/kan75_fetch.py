@@ -61,7 +61,11 @@ def main() -> None:
             r.raise_for_status()
             out.write_bytes(r.content)
             log.append(
-                {"station": st, "url": str(r.request.url), "fetched_utc": datetime.now(UTC).isoformat()}
+                {
+                    "station": st,
+                    "url": str(r.request.url),
+                    "fetched_utc": datetime.now(UTC).isoformat(),
+                }
             )
             print(st, r.status_code, len(r.content))
     if log:
