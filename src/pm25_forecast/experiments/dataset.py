@@ -8,6 +8,7 @@ NaN; no sample is imputed. Rows need a target and a persistence value (latest re
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -23,7 +24,7 @@ _A = ["pm25_latest"]
 _B = [
     "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos", "station_id",
 ]
-_C = ["pm25_t48", "pm25_t72", "pm25_t168"]
+_C = ["pm25_t24", "pm25_t48", "pm25_t72", "pm25_t168"]
 _D = [
     "mean3", "max3", "std3", "mean6", "max6", "std6", "mean24", "max24", "std24",
     "trend3", "trend6",
@@ -94,7 +95,7 @@ def _window(a: np.ndarray, o: np.ndarray, w: int):
     return mean, mx, std
 
 
-def build_table(grid: Grid) -> Table:
+def build_table(grid: Grid, horizon: int = HORIZON) -> Table:
     first = grid.t0
     last_origin = grid.t_last - timedelta(hours=HORIZON)
     origin_count = int((last_origin - first) / timedelta(hours=1)) + 1
@@ -108,7 +109,7 @@ def build_table(grid: Grid) -> Table:
     st_l, o_l, t_l, y_l, l_l, src_l = [], [], [], [], [], []
     for si, s in enumerate(STATIONS):
         a = grid.values[s]
-        tgt = origins + HORIZON
+        tgt = origins + horizon
         y = _at(a, tgt)
         keep = ~np.isnan(y) & ~np.isnan(lat[s])
         if s in GAP_STATIONS:  # assert the known gap never reaches a sample
@@ -126,14 +127,17 @@ def build_table(grid: Grid) -> Table:
         f["dow_sin"], f["dow_cos"] = np.sin(2 * np.pi * dow / 7), np.cos(2 * np.pi * dow / 7)
         f["month_sin"], f["month_cos"] = np.sin(2 * np.pi * mon / 12), np.cos(2 * np.pi * mon / 12)
         f["station_id"] = np.full(len(o), float(si))
-        f["pm25_t48"], f["pm25_t72"], f["pm25_t168"] = (_at(a, t - h) for h in (48, 72, 168))
+        for name, back in (("pm25_t24", 24), ("pm25_t48", 48), ("pm25_t72", 72), ("pm25_t168", 168)):
+            idx = t - back
+            f[name] = _at(a, np.where(idx <= o - 1, idx, -1))  # as-of: reading must be <= r
         for w in (3, 6, 24):
             mean, mx, std = _window(a, o, w)
             f[f"mean{w}"], f[f"max{w}"], f[f"std{w}"] = mean, mx, std
         f["trend3"] = f["pm25_latest"] - _at(a, o - 1 - 3)
         f["trend6"] = f["pm25_latest"] - _at(a, o - 1 - 6)
         others = [x for x in STATIONS if x != s]
-        with np.errstate(all="ignore"):
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
             nl = np.column_stack([lat[x][keep] for x in others])
             nm = np.column_stack([m24[x][keep] for x in others])
             f["nbr_latest_mean"] = np.where(
@@ -153,8 +157,6 @@ def build_table(grid: Grid) -> Table:
     order = np.lexsort((cat(st_l), o_all))  # chronological by origin, then station
     take = lambda arr: arr[order]  # noqa: E731
     o_all, t_all = take(o_all), take(t_all)
-    day = (t_all // 24) + (grid.t0.toordinal() - 719163) + (grid.t0.hour + t_all % 24) // 24 * 0
-    # target UTC date: derive exactly from timestamps
     base_day = int(grid.t0.replace(hour=0).timestamp() // 86400)
     day = base_day + (t_all + grid.t0.hour) // 24
     return Table(

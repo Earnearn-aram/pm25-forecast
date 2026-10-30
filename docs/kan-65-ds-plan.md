@@ -219,3 +219,60 @@ not a candidate and is not counted; (iii) a table of each feature's as-of rule.
 data/history.duckdb --out out/kan65` reruns EDA, audit, all runs; prints SHA-256, library versions
 and total runtime. Priority if budget runs short: folds and per-horizon comparison, then the global
 model, then breakdowns; any skipped item is stated in the report.
+
+---
+
+# Amendment 3: regime break found in EDA (written before any model was fitted)
+
+EDA (script `experiments/eda.py`, output `out/kan65/eda.json`) shows a structural break at
+2026-07-31 17:00 UTC, when the `source` column switches from `openaq` to `air4thai` at all five
+stations (this is also why the export has a ~28-day hole 2026-07-02..07-29 at every station):
+
+- openaq era (regime A, 2024-10..2026-07-02): very smooth (mean |1 h change| 0.27-0.41 ug/m3,
+  10-15% identical consecutive values, hour-of-day profile flat at 24-25 ug/m3, lag-1 ACF 0.9965).
+  Looks like a moving-average product, not raw hourly readings (hypothesis, not verified).
+- air4thai era (regime B, 2026-07-29 onward): rough (mean |1 h change| 1.3 ug/m3 at 3 stations,
+  3.2-4.3 at the bkp stations, no identical consecutive values), real diurnal profile, mean level
+  13 vs 24 ug/m3, and only ~0.1% of hours above 37.5 (regime A: 6-26% by station).
+- Consequence: the KAN-15 split trains on regime A (52,563 rows) and tests on regime B (all but
+  the first ~2 test days). The KAN-15 headline is therefore a cross-source transfer test; hour-of-day
+  and smoothing features cannot be learned from regime A (flat profile) but may matter in regime B.
+  High-pollution hours (> 37.5) essentially do not exist in the test span, so the high-pollution
+  safeguard can only be assessed on regime A folds.
+
+Changes to the plan (everything else stands):
+
+1. Runs: F1, F2, F3 (regime A to A), F4 (train regime A, test 2026-08-01..09-11, regime B), HOLDOUT
+   (KAN-15, cross-regime), plus three regime-B-native expanding folds R1, R2, R3: train targets
+   before 2026-09-01 / 2026-09-22 / 2026-10-13 00:00 UTC (a one-horizon gap is left), test origins
+   2026-09-01..09-21, 09-22..10-12, 10-13..10-27. F5 is dropped (superseded by R1-R3). R runs
+   choose the training-data variant on the validation slice: {regime-B rows only, regime A+B with a
+   `src_air4thai` 0/1 flag (flag = 1 at test, as live)}; validation slice for R runs = last 10 days of
+   the training origins (B data is only ~30-75 days); for A/F runs validation = last 45 days as before.
+2. Extra target formulations: direct y, residual y - latest, log-ratio log1p(y) - log1p(latest)
+   (prediction = expm1(log1p(latest) + output)). Selection over targets on validation MAE.
+3. Feature sets reduced to A, B, D, E (C is contained in D). Grid per (set, target): objective
+   {l2, l1} x num_leaves {7, 31}, lr 0.05, early stopping on validation, cap 400 rounds. Ridge:
+   alpha {0.1, 1, 10, 100}.
+4. Extra simple/robust candidates: S = latest-persistence replaced by a smoother, chosen on
+   validation among {latest, mean3, mean6, mean24, latest + beta*(mean24 - latest) with beta in
+   {0.1,...,0.9}} (15 variants); ENS = mean of the val-selected LightGBM-residual and ridge
+   predictions; SHR = persistence + w*(LightGBM-resid - persistence), w in {0.25, 0.5, 0.75} chosen
+   on validation. Per-station models, per-hour-bucket models, ExtraTrees/CatBoost/XGBoost: not
+   run (no library installed except lightgbm/numpy/scipy for the first; data too small per
+   station/bucket in regime B: ~2k pairs per station; stated as dead ends by design, not tried).
+5. Candidates for claims (vs persistence): seasonal naive, current LGBM, S, ridge, LGBM direct,
+   LGBM residual (incl. log-ratio), ENS, SHR, G, G+id = 10, over 3 horizons, in 3 reporting groups:
+   HOLDOUT, pooled regime-B folds (F4, R1, R2, R3), pooled regime-A folds (F1, F2, F3) = 90 claims.
+   Bonferroni at 0.05/90 (50,000 bootstrap draws) and Holm p-values. Per-run comparisons
+   (10 x 3 x 7 = 210) are descriptive. Total comparisons vs persistence: 300.
+6. Final promotion rule at +24 h: (a) HOLDOUT corrected CI entirely below zero; (b) pooled
+   regime-B folds corrected CI entirely below zero; (c) point MAE below persistence in at least 3
+   of the 4 regime-B folds; (d) no deterioration (point difference <= 0) in the high-pollution
+   subset (target > 37.5), measured in the pooled regime-A folds (the only place with enough
+   high hours), and, where n >= 30, in the regime-B pools. All four needed. This replaces the earlier
+   rule (b-d of Amendment 2).
+7. Number of fits is counted by the script and printed; the report quotes that number.
+8. Data proposals (not fetched): weather (wind, boundary-layer height, rain), fire hotspots (FIRMS),
+   traffic, and the raw hourly Air4Thai history before 2026-07 to remove the regime break; see the
+   report.
