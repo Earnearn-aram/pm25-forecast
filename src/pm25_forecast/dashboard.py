@@ -3,7 +3,7 @@
 Reads the database (read-only SELECTs, one read-only connection for the whole build) and writes
 a static site:
 ``index.html`` (server-rendered, inline SVG charts), ``data.json`` (the same numbers), plus
-``dashboard.css`` and ``dashboard.js`` (station pills and the animation pause only).
+``dashboard.css`` and ``dashboard.js`` (pills, pause, Thai / English switch).
 
 * Every section is independent. A query that fails (missing table, bad rows, DB hiccup) turns that
   section into ``"unavailable"`` in ``data.json`` and on the page; it never stops the build.
@@ -31,6 +31,7 @@ from typing import Any, Literal
 from pydantic import AwareDatetime, BaseModel, TypeAdapter, ValidationError
 
 from pm25_forecast.collector import ConfigError, open_db
+from pm25_forecast.dashboard_i18n import Markup, attr, attr_of, date_hm, pair, t, tr
 from pm25_forecast.drift import PSI_ALERT
 from pm25_forecast.models.baselines import HORIZONS_H, PERSISTENCE_MODEL_VERSION
 from pm25_forecast.monitoring.logs import configure_logging
@@ -515,19 +516,20 @@ def _collect(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any
 e = html.escape
 
 
-def _fmt_time(iso: str) -> str:
-    dt = datetime.fromisoformat(iso)
-    return f"{dt.astimezone(UTC):%H:%M} UTC \u00b7 {dt.astimezone(BANGKOK):%H:%M} Bangkok"
-
-
-def _val(text: str | None, good: bool = False) -> str:
+def _val(text: Markup | None, good: bool = False) -> str:
     if text is None:
-        return '<p class="val waiting">waiting</p>'
-    return f'<p class="val{" good" if good else ""}">{e(text)}</p>'
+        return f'<p class="val waiting">{t("waiting")}</p>'
+    return f'<p class="val{" good" if good else ""}">{text}</p>'
+
+
+def _plain(text: str) -> Markup:
+    """A value that is the same in both languages (numbers, ids), escaped."""
+    return Markup(e(text))
 
 
 def _unavailable(what: str) -> str:
-    return f'<p class="muted small">{e(what)} unavailable right now.</p>'
+    text = pair(lambda L: tr(L, "{what} unavailable right now.", what=tr(L, what)))
+    return f'<p class="muted small">{text}</p>'
 
 
 def _nice_max(vmax: float) -> float:
@@ -560,7 +562,7 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
     keys = ["actual", "persistence"] + (["challenger"] if chart["has_challenger"] else [])
     values = [p[k] for p in points for k in keys if p[k] is not None]
     if not values:
-        body = '<p class="muted small">No hourly data for this station yet.</p>'
+        body = f'<p class="muted small">{t("No hourly data for this station yet.")}</p>'
     else:
         ymax = _nice_max(max(values))
         grid = "".join(
@@ -576,17 +578,20 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
         if chart["has_challenger"]:
             series += _lines(points, "challenger", ymax, "ln-chal")
         series += _lines(points, "actual", ymax, "ln-actual")
-        aria = (
-            f"Station {st['label']}, last 7 days in UTC: actual PM2.5 in \u00b5g/m\u00b3 against "
-            "persistence and challenger forecasts made 24 h earlier"
+        aria = attr(
+            "aria-label",
+            "Station {label}, last 7 days in UTC: actual PM2.5 in µg/m³ against "
+            "persistence and challenger forecasts made 24 h earlier",
+            label=st["label"],
         )
         start, end = datetime.fromisoformat(chart["start"]), datetime.fromisoformat(chart["end"])
         body = (
-            '<div class="plotwrap"><div class="ytitle">\u00b5g/m\u00b3</div><div class="plot">'
+            '<div class="plotwrap"><div class="ytitle">µg/m³</div><div class="plot">'
             f'{labels}<svg viewBox="0 0 800 220" preserveAspectRatio="none" role="img" '
-            f'aria-label="{e(aria)}">{grid}{series}</svg></div>'
-            f'<div class="xlabs"><span>{start:%d %b %H:%M}</span><span>UTC, hourly</span>'
-            f"<span>{end:%d %b %H:%M}</span></div></div>"
+            f"{aria}>{grid}{series}</svg></div>"
+            f'<div class="xlabs"><span>{pair(lambda L: date_hm(start, L))}</span>'
+            f"<span>{t('UTC, hourly')}</span>"
+            f"<span>{pair(lambda L: date_hm(end, L))}</span></div></div>"
         )
     hidden = "" if first else " hidden"
     return f'<div class="chart" data-station="{e(st["id"])}"{hidden}>{body}</div>'
@@ -594,23 +599,26 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
 
 def _section_chart(data: dict[str, Any]) -> str:
     chart = data["chart"]
-    chal = "Challenger" if (chart or {}).get("has_challenger") else "Challenger (not scored yet)"
+    chal = (
+        t("Challenger") if (chart or {}).get("has_challenger") else t("Challenger (not scored yet)")
+    )
     legend = (
-        '<div class="legend"><span><i class="sw actual"></i>Actual</span>'
+        f'<div class="legend"><span><i class="sw actual"></i>{t("Actual")}</span>'
         f'<span><i class="sw chal"></i>{chal}</span>'
-        '<span><i class="sw pers"></i>Persistence (tomorrow = today)</span></div>'
+        f'<span><i class="sw pers"></i>{t("Persistence (tomorrow = today)")}</span></div>'
     )
     if chart is None:
         inner = _unavailable("The chart")
         pills = ""
-        title = "Forecast vs actual \u00b7 +24 h"
+        title = t("Forecast vs actual · +24 h")
     elif not chart["stations"]:
-        inner = '<p class="muted small">Waiting for the first observations.</p>'
+        inner = f'<p class="muted small">{t("Waiting for the first observations.")}</p>'
         pills = ""
-        title = "Forecast vs actual \u00b7 +24 h"
+        title = t("Forecast vs actual · +24 h")
     else:
         sts = chart["stations"]
-        title = f"Forecast vs actual \u00b7 +24 h \u00b7 {sts[0]['label']}"
+        station = Markup(f'<span class="chart-station">{e(sts[0]["label"])}</span>')
+        title = t("Forecast vs actual · +24 h · {station}", station=station)
         pills = "".join(
             f'<button type="button" class="pill" data-station="{e(s["id"])}" '
             f'data-label="{e(s["label"])}" aria-label="{e(s["label"])}" '
@@ -618,13 +626,12 @@ def _section_chart(data: dict[str, Any]) -> str:
             for i, s in enumerate(sts)
         )
         inner = "".join(_chart_block(s, chart, i == 0) for i, s in enumerate(sts))
+    cap = t("Each point: the forecast made 24 h before that hour. Last 7 days, hourly, UTC.")
     return (
         '<figure class="card wide" style="margin:0"><div class="cardhead">'
-        f'<h2 id="chart-title">{e(title)}</h2>'
-        f'<div class="pills" role="group" aria-label="Station">{pills}</div></div>'
-        f"{legend}{inner}"
-        '<figcaption class="muted small">Each point: the forecast made 24 h before that hour. '
-        "Last 7 days, hourly, UTC.</figcaption></figure>"
+        f'<h2 id="chart-title">{title}</h2>'
+        f'<div class="pills" role="group" {attr("aria-label", "Station")}>{pills}</div></div>'
+        f'{legend}{inner}<figcaption class="muted small">{cap}</figcaption></figure>'
     )
 
 
@@ -638,22 +645,24 @@ def _section_horizons(data: dict[str, Any]) -> str:
             m = scores["challenger"].get(str(h))
             skill = None if m is None else m["skill"]
             if skill is None:
-                value, bar = "waiting", ""
+                value, bar = t("waiting"), ""
             else:
                 width = min(abs(skill) / SKILL_BAR_MAX, 1) * 100
                 value = f"{skill * 100:+.1f}%".replace("-", "\u2212")
                 cls = "fill" if skill > 0 else "fill neg"
                 bar = f'<div class="{cls}" style="width:{width:.0f}%"></div>'
             rows.append(
-                f'<div class="hrow"><div class="top"><span>+{h} h</span>'
+                f'<div class="hrow"><div class="top"><span>{t("+{h} h", h=h)}</span>'
                 f'<span class="mono">{value}</span></div><div class="track">{bar}</div></div>'
             )
         body = "".join(rows)
+    note = t(
+        "1 \u2212 MAE challenger ÷ MAE persistence, on the same station-hours. "
+        "Above 0 means the model beats “tomorrow = today”."
+    )
     return (
-        '<div class="card side"><h2>Skill by horizon</h2>'
-        f"{body}"
-        '<p class="muted small">1 \u2212 MAE challenger \u00f7 MAE persistence, on the same '
-        "station-hours. Above 0 means the model beats \u201ctomorrow = today\u201d.</p></div>"
+        f'<div class="card side"><h2>{t("Skill by horizon")}</h2>{body}'
+        f'<p class="muted small">{note}</p></div>'
     )
 
 
@@ -662,36 +671,44 @@ def _section_pipeline(data: dict[str, Any]) -> str:
     if q is None:
         body = _unavailable("Pipeline history")
     elif not q["has_checks"]:
-        body = '<p class="muted small">Waiting for the first hourly quality run.</p>'
+        body = f'<p class="muted small">{t("Waiting for the first hourly quality run.")}</p>'
     else:
         rows = []
         for line in q["pipeline"]:
             counts = {c: line["cells"].count(c) for c in ("ok", "warn", "fail", "missed")}
-            aria = (
-                f"{line['name']}: {counts['ok']} of {PIPELINE_HOURS} hours ok, "
-                f"{counts['warn']} warning, {counts['fail']} failed, {counts['missed']} missed"
+            aria = attr_of(
+                "aria-label",
+                lambda L, line=line, counts=counts: tr(
+                    L,
+                    "{name}: {ok} of {total} hours ok, {warn} warning, {fail} failed, "
+                    "{missed} missed",
+                    name=tr(L, line["name"]),
+                    total=PIPELINE_HOURS,
+                    **counts,
+                ),
             )
             cells = "".join(
                 f'<span class="cell {"miss" if c == "missed" else c}"></span>'
                 for c in line["cells"]
             )
             rows.append(
-                f"<span>{e(line['name'])}</span>"
-                f'<div class="cells" role="img" aria-label="{e(aria)}">{cells}</div>'
-                f'<span class="mono muted">{line["ok"]}/{PIPELINE_HOURS} ok</span>'
+                f"<span>{t(line['name'])}</span>"
+                f'<div class="cells" role="img" {aria}>{cells}</div>'
+                f'<span class="mono muted">'
+                f"{t('{ok}/{total} ok', ok=line['ok'], total=PIPELINE_HOURS)}</span>"
             )
         body = f'<div class="pipe">{"".join(rows)}</div>'
     legend = (
-        '<p class="legend"><span><i class="sq" style="background:#2dd4bf"></i>ran ok</span>'
-        '<span><i class="sq" style="background:#f5a524"></i>warning</span>'
-        '<span><i class="sq" style="background:#f87171"></i>failed</span>'
-        '<span><i class="sq" style="background:#6b7480;height:5px"></i>no run recorded '
-        "(half height)</span></p>"
+        f'<p class="legend"><span><i class="sq" style="background:#2dd4bf"></i>{t("ran ok")}</span>'
+        f'<span><i class="sq" style="background:#f5a524"></i>{t("warning")}</span>'
+        f'<span><i class="sq" style="background:#f87171"></i>{t("failed")}</span>'
+        '<span><i class="sq" style="background:#6b7480;height:5px"></i>'
+        f"{t('no run recorded (half height)')}</span></p>"
     )
     return (
-        '<section class="card"><div class="cardhead"><h2>Pipeline \u00b7 last 24 hours</h2>'
-        '<span class="muted small">one cell per UTC hour \u00b7 newest on the right</span></div>'
-        f"{body}{legend}</section>"
+        f'<section class="card"><div class="cardhead"><h2>{t("Pipeline · last 24 hours")}</h2>'
+        f'<span class="muted small">{t("one cell per UTC hour · newest on the right")}</span>'
+        f"</div>{body}{legend}</section>"
     )
 
 
@@ -703,34 +720,37 @@ def _section_quality(data: dict[str, Any]) -> str:
         newest = (fresh or {}).get("newest", {})
         ids = sorted(set(newest) | set((q or {}).get("stations", {})))
         if not ids:
-            body = '<p class="muted small">Waiting for the first station readings.</p>'
+            body = f'<p class="muted small">{t("Waiting for the first station readings.")}</p>'
         else:
             now = datetime.fromisoformat(data["generated_at"])
             rows = []
             for sid in ids:
                 info = (q or {}).get("stations", {}).get(sid)
-                age = (
-                    f"{(now - datetime.fromisoformat(newest[sid])) / timedelta(minutes=1):.0f} min"
+                minutes = (
+                    (now - datetime.fromisoformat(newest[sid])) / timedelta(minutes=1)
                     if sid in newest
-                    else "\u2013"
+                    else None
                 )
+                age = "\u2013" if minutes is None else t("{n} min", n=f"{minutes:.0f}")
                 gap = info["missing_h"] if info else None
-                missing = "\u2013" if gap is None else f"{gap:.0f} h"
+                missing = "\u2013" if gap is None else t("{n} h", n=f"{gap:.0f}")
                 status = info["status"] if info else "none"
-                word = {"ok": "OK", "warn": "Warn", "fail": "Fail"}.get(status, "Waiting")
+                word = t({"ok": "OK", "warn": "Warn", "fail": "Fail"}.get(status, "Waiting"))
                 rows.append(
                     f"<tr><td>{e(_station_label(sid))}</td><td>{age}</td><td>{missing}</td>"
                     f'<td><span class="badge {status}">{word}</span></td></tr>'
                 )
+            heads = "".join(
+                f'<th scope="col">{t(k)}</th>'
+                for k in ("Station", "Newest reading", "Missing, 24 h", "Status")
+            )
             body = (
                 '<div class="tablewrap" tabindex="0" role="region" '
-                'aria-label="Data quality by station, scrollable"><table>'
-                "<caption>Latest hourly check per station</caption><thead><tr>"
-                '<th scope="col">Station</th><th scope="col">Newest reading</th>'
-                '<th scope="col">Missing, 24 h</th><th scope="col">Status</th></tr></thead>'
-                f"<tbody>{''.join(rows)}</tbody></table></div>"
+                f"{attr('aria-label', 'Data quality by station, scrollable')}><table>"
+                f"<caption>{t('Latest hourly check per station')}</caption>"
+                f"<thead><tr>{heads}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
             )
-    return f'<div class="card grow"><h2>Data quality by station</h2>{body}</div>'
+    return f'<div class="card grow"><h2>{t("Data quality by station")}</h2>{body}</div>'
 
 
 def _section_drift(data: dict[str, Any]) -> str:
@@ -738,30 +758,35 @@ def _section_drift(data: dict[str, Any]) -> str:
     if d is None:
         body = _unavailable("Drift")
     elif not d["features"]:
-        body = '<p class="muted small">Waiting for the first daily drift check.</p>'
+        body = f'<p class="muted small">{t("Waiting for the first daily drift check.")}</p>'
     else:
         rows = []
         for f in d["features"]:
             psi = f["psi"]
             if psi is None:
-                bar, text = "", "n/a"
+                bar, text = "", t("n/a")
             else:
                 width = min(psi / PSI_BAR_MAX, 1) * 100
                 cls = "fill alert" if f["alert"] else "fill plain"
                 bar = f'<div class="{cls}" style="width:{width:.0f}%"></div>'
-                text = f"{psi:.2f}" + (" Alert" if f["alert"] else "")
+                text = (
+                    pair(lambda L, psi=psi: f"{psi:.2f} {tr(L, 'Alert')}")
+                    if f["alert"]
+                    else _plain(f"{psi:.2f}")
+                )
             tick = '<div class="tick"></div>'
             rows.append(
                 f'<div class="drow"><span class="name">{e(f["name"])}</span>'
-                f'<div class="track">{bar}{tick}</div><span class="psi">{e(text)}</span></div>'
+                f'<div class="track">{bar}{tick}</div><span class="psi">{text}</span></div>'
             )
         body = "".join(rows)
+    note = t(
+        "PSI measures how far recent inputs have moved from what the model was trained on. "
+        "Tick = 0.2 alert line; bars above it turn amber and say Alert."
+    )
     return (
-        '<div class="card grow"><h2>Drift \u00b7 last 7 days vs training data</h2>'
-        f"{body}"
-        '<p class="muted small">PSI measures how far recent inputs have moved from what the '
-        "model was trained on. Tick = 0.2 alert line; bars above it turn amber and say Alert."
-        "</p></div>"
+        f'<div class="card grow"><h2>{t("Drift · last 7 days vs training data")}</h2>'
+        f'{body}<p class="muted small">{note}</p></div>'
     )
 
 
@@ -771,24 +796,26 @@ def _section_models(data: dict[str, Any]) -> str:
         body = _unavailable("Model registry")
     else:
         retrain = m["last_retrain"]
-        last = "none yet"
-        if retrain is not None:
-            last = f"{retrain['version']} \u00b7 {retrain['at'][:10]}"
-        chal = m["challenger"] or "none configured"
+        last = (
+            t("none yet")
+            if retrain is None
+            else _plain(f"{retrain['version']} · {retrain['at'][:10]}")
+        )
+        chal = _plain(m["challenger"]) if m["challenger"] else t("none configured")
 
-        def item(label: str, value: str, mono: bool = True) -> str:
+        def item(label: str, value: Markup, mono: bool = True) -> str:
             cls = ' class="mono"' if mono else ""
-            return f'<div><span class="muted">{label}</span><span{cls}>{e(value)}</span></div>'
+            return f'<div><span class="muted">{t(label)}</span><span{cls}>{value}</span></div>'
 
         body = (
             '<div class="models">'
-            + item("Champion (serves)", m["champion"])
+            + item("Champion (serves)", _plain(m["champion"]))
             + item("Challenger (shadow)", chal)
             + item("Last retrain", last)
-            + item("Promotion", m["promotion"], mono=False)
+            + item("Promotion", t(m["promotion"]), mono=False)
             + "</div>"
         )
-    return f'<section class="card"><h2>Models</h2>{body}</section>'
+    return f'<section class="card"><h2>{t("Models")}</h2>{body}</section>'
 
 
 STEPS = (
@@ -804,104 +831,190 @@ STEPS = (
 def _section_how() -> str:
     items = "".join(
         f'<li style="--i:{i}"><div class="arch-node" style="--i:{i}"><span class="arch-dot"></span>'
-        f'<span class="step">{i + 1:02d}</span><span class="t">{e(t)}</span>'
-        f'<span class="b">{e(b)}</span></div></li>'
-        for i, (t, b) in enumerate(STEPS)
+        f'<span class="step">{i + 1:02d}</span><span class="t">{t(title)}</span>'
+        f'<span class="b">{t(body)}</span></div></li>'
+        for i, (title, body) in enumerate(STEPS)
     )
     return (
         '<section class="card" aria-labelledby="how"><div class="archhead">'
-        '<h2 id="how">How it works</h2>'
-        '<span class="muted small">every 20 minutes, unattended \u00b7 $0/month</span>'
-        '<button type="button" id="pause" aria-pressed="false">Pause animation</button></div>'
-        f'<ol class="arch" id="arch" style="list-style:none">{items}</ol>'
-        '<div class="row muted small"><span>Storage: Neon Postgres (observations, predictions, '
-        "scores, models)</span><span>Alerts: Discord \u00b7 daily heartbeat</span>"
-        "<span>Weekly retrain feeds a new challenger back into Predict</span></div></section>"
+        f'<h2 id="how">{t("How it works")}</h2>'
+        f'<span class="muted small">{t("every 20 minutes, unattended · $0/month")}</span>'
+        f'<button type="button" id="pause" aria-pressed="false">{t("Pause animation")}</button>'
+        f'</div><ol class="arch" id="arch" style="list-style:none">{items}</ol>'
+        '<div class="row muted small">'
+        f"<span>{t('Storage: Neon Postgres (observations, predictions, scores, models)')}</span>"
+        f"<span>{t('Alerts: Discord · daily heartbeat')}</span>"
+        f"<span>{t('Weekly retrain feeds a new challenger back into Predict')}</span>"
+        "</div></section>"
     )
+
+
+STATUS_LABELS = {
+    "healthy": "Healthy",
+    "degraded": "Degraded",
+    "failed": "Failing",
+    "waiting": "Waiting for data",
+}
+
+
+def _headline_text(head: dict[str, Any]) -> Markup:
+    """The headline answer in both languages, from the state and rounded percent in data.json."""
+    state, pct = head["state"], head["skill_pct"]
+    if state == "waiting" or pct is None:
+        return t("Not scored yet")
+    if state == "yes":
+        return t("Yes, by {pct}%", pct=f"{pct:.1f}")
+    sign = "\u2212" if pct < 0 else ""
+    return t("Not yet ({sign}{pct}%)", sign=sign, pct=f"{abs(pct):.1f}")
+
+
+def _note(data: dict[str, Any]) -> str:
+    chal, head = data["challenger_version"], data["headline"]
+    note = ""
+    if chal and head["state"] == "waiting":
+        first = (data["scores"] or {}).get("first_scores_from")
+
+        def when(lang: str) -> Markup:
+            if not first:
+                return tr(lang, "once the first forecasts have matured")
+            dt = date_hm(datetime.fromisoformat(first), lang, comma=True)
+            return tr(lang, "from {dt}", dt=Markup(f"<strong>{dt} UTC</strong>"))
+
+        text = pair(
+            lambda L: tr(
+                L,
+                "The challenger\u2019s first +24 h forecasts are scored {when}. "
+                "Until then, its numbers below read “waiting”.",
+                when=when(L),
+            )
+        )
+        note = f'<p class="note">{text}</p>'
+    elif not chal:
+        note = (
+            f'<p class="note">'
+            f"{t('No challenger model is configured, so only the baseline runs.')}</p>"
+        )
+    unav = sorted(n for n, v in data["sections"].items() if v == "unavailable")
+    if unav:
+        text = pair(
+            lambda L: tr(
+                L,
+                "Some data is unavailable right now: {names}.",
+                names=", ".join(tr(L, n) for n in unav),
+            )
+        )
+        note += f'<p class="note">{text}</p>'
+    return note
+
+
+def _cards(k: dict[str, Any]) -> str:
+    skill = k["skill_24h"]
+    skill_txt = None if skill is None else _plain(f"{skill * 100:+.1f}%".replace("-", "\u2212"))
+    mae_c, mae_p = k["mae_challenger_24h"], k["mae_persistence_24h"]
+    if mae_c is not None:
+        mae_txt = _plain(f"{mae_c:.1f}")
+        mae_sub = (
+            t("challenger")
+            if mae_p is None
+            else t("challenger · persistence {mae}", mae=f"{mae_p:.1f}")
+        )
+    else:
+        mae_txt = None if mae_p is None else _plain(f"{mae_p:.1f}")
+        mae_sub = t("persistence only · challenger not scored yet")
+    fresh = k["freshness_min"]
+    fresh_sub = (
+        t("no readings yet")
+        if k["stations_total"] in (None, 0)
+        else t(
+            "newest reading · {up} of {total} stations reporting",
+            up=k["stations_reporting"],
+            total=k["stations_total"],
+        )
+    )
+    psi = k["worst_psi"]
+    psi_sub = (
+        t("alert above 0.2")
+        if psi is None
+        else t("worst: {feature} · alert above 0.2", feature=k["worst_psi_feature"])
+    )
+
+    def card(title: Markup, value: str, sub: Markup) -> str:
+        return (
+            f'<div class="card"><p class="muted small">{title}</p>{value}'
+            f'<p class="muted small">{sub}</p></div>'
+        )
+
+    return "".join(
+        [
+            card(
+                t("Beats the baseline by"),
+                _val(skill_txt, good=skill is not None and skill > 0),
+                t("challenger vs persistence · +24 h · 7 days"),
+            ),
+            card(t("Typical error (MAE, µg/m³)"), _val(mae_txt), mae_sub),
+            card(
+                t("Data freshness"),
+                _val(None if fresh is None else t("{n} min", n=f"{fresh:.0f}")),
+                fresh_sub,
+            ),
+            card(
+                t("Input drift (PSI)"),
+                _val(None if psi is None else _plain(f"{psi:.2f}")),
+                psi_sub,
+            ),
+        ]
+    )
+
+
+def _lang_toggle() -> str:
+    return (
+        f'<div class="lang" role="group" {attr("aria-label", "Language")}>'
+        '<button type="button" class="langbtn" data-lang="th" lang="th" aria-pressed="false" '
+        'aria-label="TH \u2013 ภาษาไทย">TH</button>'
+        '<button type="button" class="langbtn" data-lang="en" lang="en" aria-pressed="true" '
+        'aria-label="EN \u2013 English">EN</button></div>'
+    )
+
+
+# Runs before first paint (no flash of English): saved choice, else the browser language if Thai.
+LANG_INIT = (
+    "(function(){var l='en';try{var s=localStorage.getItem('pm25-lang');"
+    "if(s==='th'||s==='en'){l=s}else if(/^th/i.test(navigator.language||'')){l='th'}}"
+    "catch(x){if(/^th/i.test(navigator.language||'')){l='th'}}"
+    "document.documentElement.lang=l})();"
+)
 
 
 def render_html(data: dict[str, Any]) -> str:
     k, head = data["kpi"], data["headline"]
-    chal = data["challenger_version"]
     status = data["status"]
-    label = {
-        "healthy": "Healthy",
-        "degraded": "Degraded",
-        "failed": "Failing",
-        "waiting": "Waiting for data",
-    }[status]
-    unav = [n for n, v in data["sections"].items() if v == "unavailable"]
-    note = ""
-    if chal and head["state"] == "waiting":
-        first = (data["scores"] or {}).get("first_scores_from")
-        when = (
-            f"from <strong>{datetime.fromisoformat(first):%d %b, %H:%M} UTC</strong>"
-            if first
-            else "once the first forecasts have matured"
-        )
-        note = (
-            '<p class="note">The challenger\u2019s first +24 h forecasts are scored '
-            f"{when}. Until then, its numbers below read \u201cwaiting\u201d.</p>"
-        )
-    elif not chal:
-        note = '<p class="note">No challenger model is configured, so only the baseline runs.</p>'
-    if unav:
-        note += (
-            f'<p class="note">Some data is unavailable right now: {e(", ".join(sorted(unav)))}.</p>'
-        )
-
-    skill = k["skill_24h"]
-    skill_txt = None if skill is None else f"{skill * 100:+.1f}%".replace("-", "\u2212")
-    mae_c, mae_p = k["mae_challenger_24h"], k["mae_persistence_24h"]
-    if mae_c is not None:
-        mae_txt = f"{mae_c:.1f}"
-        mae_sub = "challenger" if mae_p is None else f"challenger \u00b7 persistence {mae_p:.1f}"
-    else:
-        mae_txt = None if mae_p is None else f"{mae_p:.1f}"
-        mae_sub = "persistence only \u00b7 challenger not scored yet"
-    fresh = k["freshness_min"]
-    fresh_sub = (
-        "no readings yet"
-        if k["stations_total"] in (None, 0)
-        else f"newest reading \u00b7 {k['stations_reporting']} of {k['stations_total']} "
-        "stations reporting"
-    )
-    psi = k["worst_psi"]
-    psi_sub = (
-        "alert above 0.2"
-        if psi is None
-        else f"worst: {k['worst_psi_feature']} \u00b7 alert above 0.2"
-    )
-
-    def card(title: str, value: str, sub: str) -> str:
-        return (
-            f'<div class="card"><p class="muted small">{e(title)}</p>{value}'
-            f'<p class="muted small">{e(sub)}</p></div>'
-        )
-
-    cards = "".join(
-        [
-            card(
-                "Beats the baseline by",
-                _val(skill_txt, good=skill is not None and skill > 0),
-                "challenger vs persistence \u00b7 +24 h \u00b7 7 days",
+    label = pair(
+        lambda L: tr(
+            L,
+            "{label} · updated {when}",
+            label=tr(L, STATUS_LABELS[status]),
+            when=tr(
+                L,
+                "{utc} UTC · {bkk} Bangkok",
+                utc=f"{datetime.fromisoformat(data['generated_at']).astimezone(UTC):%H:%M}",
+                bkk=f"{datetime.fromisoformat(data['generated_at']).astimezone(BANGKOK):%H:%M}",
             ),
-            card("Typical error (MAE, \u00b5g/m\u00b3)", _val(mae_txt), mae_sub),
-            card(
-                "Data freshness",
-                _val(None if fresh is None else f"{fresh:.0f} min"),
-                fresh_sub,
-            ),
-            card("Input drift (PSI)", _val(None if psi is None else f"{psi:.2f}"), psi_sub),
-        ]
+        )
     )
     answer_cls = {"yes": "yes", "not_yet": "notyet", "waiting": "waiting"}[head["state"]]
+    title_key = "Bangkok PM2.5 forecast · live MLOps dashboard"
+    title_en, title_th = tr("en", title_key), tr("th", title_key)
+    footer = t(
+        "GitHub Actions · Neon Postgres · cron-job.org · $0/month. Data: Air4Thai "
+        "(Pollution Control Department, Thailand), OpenAQ, CAMS via Open-Meteo."
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
+<title data-en="{e(title_en)}" data-th="{e(title_th)}">{e(title_en)}</title>
+<script>{LANG_INIT}</script>
 <link rel="stylesheet" href="dashboard.css">
 <script src="dashboard.js" defer></script>
 </head>
@@ -909,23 +1022,24 @@ def render_html(data: dict[str, Any]) -> str:
 <main>
 <header>
 <div class="title">
-<h1>Bangkok PM2.5 \u00b7 24 h forecast</h1>
-<p class="muted">A live MLOps loop on free tiers: collect \u2192 predict \u2192 score \u2192 monitor \u2192 retrain</p>
-<p class="headline">Is it beating the naive guess \u201ctomorrow = today\u201d? <span class="answer {answer_cls}">{e(head["text"])}</span></p>
+<h1>{t("Bangkok PM2.5 · 24 h forecast")}</h1>
+<p class="muted">{t("A live MLOps loop on free tiers: collect → predict → score → monitor → retrain")}</p>
+<p class="headline">{t("Is it beating the naive guess “tomorrow = today”?")} <span class="answer {answer_cls}">{_headline_text(head)}</span></p>
 </div>
 <div class="row" style="align-items:center">
-<p class="status"><span class="dot {status}" aria-hidden="true"></span>{label} \u00b7 updated {_fmt_time(data["generated_at"])}</p>
-<a href="{REPO_URL}">Source on GitHub</a>
+{_lang_toggle()}
+<p class="status"><span class="dot {status}" aria-hidden="true"></span>{label}</p>
+<a href="{REPO_URL}">{t("Source on GitHub")}</a>
 </div>
 </header>
-{note}
-<section aria-label="Key numbers" class="kpis">{cards}</section>
+{_note(data)}
+<section {attr("aria-label", "Key numbers")} class="kpis">{_cards(k)}</section>
 <section class="row">{_section_chart(data)}{_section_horizons(data)}</section>
 {_section_pipeline(data)}
 <section class="row">{_section_quality(data)}{_section_drift(data)}</section>
 {_section_models(data)}
 {_section_how()}
-<footer>GitHub Actions \u00b7 Neon Postgres \u00b7 cron-job.org \u00b7 $0/month. Data: Air4Thai (Pollution Control Department, Thailand), OpenAQ, CAMS via Open-Meteo.</footer>
+<footer>{footer}</footer>
 </main>
 </body>
 </html>

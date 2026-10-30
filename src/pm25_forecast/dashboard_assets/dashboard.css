@@ -27,7 +27,7 @@ body {
   margin: 0;
   background: #0e1116;
   color: #e6e8eb;
-  font-family: "Archivo", system-ui, sans-serif;
+  font-family: "Archivo", system-ui, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", sans-serif;
   font-size: 14px;
   line-height: 1.4;
 }
@@ -42,6 +42,47 @@ a {
 a:hover {
   color: #5eead4;
 }
+.i[lang="th"],
+.i[lang="en"] {
+  display: inline;
+}
+html[lang="en"] .i[lang="th"],
+html[lang="th"] .i[lang="en"] {
+  display: none;
+}
+/* Thai vowel and tone marks stack above and below the line: more room than Latin text. */
+html[lang="th"] body {
+  line-height: 1.7;
+}
+html[lang="th"] h1,
+html[lang="th"] h2 {
+  line-height: 1.5;
+}
+.lang {
+  display: inline-flex;
+}
+.langbtn {
+  min-height: 32px;
+  min-width: 40px;
+  padding: 4px 12px;
+  background: transparent;
+  color: #e6e8eb;
+  border: 1px solid #6b7480;
+  font: 500 13px "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
+  cursor: pointer;
+}
+.langbtn:first-child {
+  border-radius: 6px 0 0 6px;
+}
+.langbtn:last-child {
+  border-radius: 0 6px 6px 0;
+  border-left-width: 0;
+}
+.langbtn[aria-pressed="true"] {
+  background: #2dd4bf;
+  color: #0e1116;
+  border-color: #2dd4bf;
+}
 button:focus-visible,
 a:focus-visible,
 .tablewrap:focus-visible {
@@ -49,7 +90,7 @@ a:focus-visible,
   outline-offset: 2px;
 }
 .mono {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
 }
 .muted {
   color: #9aa3ad;
@@ -137,7 +178,7 @@ header {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
   font-size: 13px;
   color: #9aa3ad;
 }
@@ -171,7 +212,7 @@ header {
   gap: 8px;
 }
 .val {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
   font-size: 32px;
   overflow-wrap: anywhere;
 }
@@ -199,7 +240,7 @@ header {
   min-width: 32px;
   padding: 4px 12px;
   border-radius: 999px;
-  font: 500 13px "JetBrains Mono", ui-monospace, monospace;
+  font: 500 13px "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
   cursor: pointer;
   background: transparent;
   color: #e6e8eb;
@@ -245,7 +286,7 @@ header {
   width: 42px;
   text-align: right;
   transform: translateY(-50%);
-  font: 13px "JetBrains Mono", ui-monospace, monospace;
+  font: 13px "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
   color: #9aa3ad;
 }
 .xlabs {
@@ -378,12 +419,12 @@ th {
 td {
   padding: 8px;
   border-top: 1px solid #1c222a;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
 }
 .badge {
   padding: 2px 8px;
   border-radius: 4px;
-  font-family: "Archivo", system-ui, sans-serif;
+  font-family: "Archivo", system-ui, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", sans-serif;
   background: #12332f;
   color: #5eead4;
 }
@@ -407,11 +448,11 @@ td {
   font-size: 13px;
 }
 .drow .name {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
   overflow-wrap: anywhere;
 }
 .drow .psi {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
   text-align: right;
 }
 .tick {
@@ -451,7 +492,7 @@ td {
   background: transparent;
   color: #e6e8eb;
   border: 1px solid #6b7480;
-  font: 500 13px "Archivo", system-ui, sans-serif;
+  font: 500 13px "Archivo", system-ui, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", sans-serif;
   cursor: pointer;
 }
 #pause[aria-pressed="true"] {
@@ -480,7 +521,7 @@ td {
   animation-delay: calc(var(--i) * 1.3s);
 }
 .arch-node .step {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: "JetBrains Mono", ui-monospace, "Noto Sans Thai", "Sukhumvit Set", "Thonburi", "Leelawadee UI", "Tahoma", monospace;
   font-size: 13px;
   color: #9aa3ad;
 }

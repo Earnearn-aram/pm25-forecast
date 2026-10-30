@@ -1,8 +1,40 @@
-// KAN-25 dashboard: station pills and the animation pause. No dependencies, no network.
+// KAN-25 dashboard: station pills and the animation pause. KAN-73: Thai / English switch.
+// No dependencies, no network. The page is static: both languages are in the HTML and CSS shows
+// the one matching <html lang>; the tiny inline script in <head> sets the first language.
 (function () {
+  var KEY = "pm25-lang";
+  var root = document.documentElement;
+  var langButtons = document.querySelectorAll(".langbtn[data-lang]");
+
+  function applyLang(lang) {
+    root.lang = lang;
+    langButtons.forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-lang") === lang ? "true" : "false");
+    });
+    document.querySelectorAll("[data-" + lang + "-aria-label]").forEach(function (el) {
+      el.setAttribute("aria-label", el.getAttribute("data-" + lang + "-aria-label"));
+    });
+    var title = document.querySelector("title[data-" + lang + "]");
+    if (title) {
+      document.title = title.getAttribute("data-" + lang);
+    }
+  }
+  langButtons.forEach(function (b) {
+    b.addEventListener("click", function () {
+      var lang = b.getAttribute("data-lang");
+      applyLang(lang);
+      try {
+        localStorage.setItem(KEY, lang);
+      } catch (err) {
+        // storage blocked: the choice just is not remembered
+      }
+    });
+  });
+  applyLang(root.lang === "th" ? "th" : "en");
+
   var pills = document.querySelectorAll(".pill[data-station]");
   var charts = document.querySelectorAll(".chart[data-station]");
-  var title = document.getElementById("chart-title");
+  var names = document.querySelectorAll("#chart-title .chart-station");
   pills.forEach(function (pill) {
     pill.addEventListener("click", function () {
       var id = pill.getAttribute("data-station");
@@ -12,9 +44,9 @@
       charts.forEach(function (c) {
         c.hidden = c.getAttribute("data-station") !== id;
       });
-      if (title) {
-        title.textContent = "Forecast vs actual · +24 h · " + pill.getAttribute("data-label");
-      }
+      names.forEach(function (n) {
+        n.textContent = pill.getAttribute("data-label");
+      });
     });
   });
   var pause = document.getElementById("pause");
