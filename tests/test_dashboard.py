@@ -161,7 +161,7 @@ def test_scored_build_json_shape_and_page(tmp_path):
     assert "missed" in pipeline["Collect"]["cells"]
     page = (tmp_path / "index.html").read_text()
     for needle in (
-        "Is it beating the naive guess",
+        "Is it beating the baseline of keeping the latest reading?",
         "Yes, by 50.0%",
         "Beats the baseline by",
         "Typical error (MAE, µg/m³)",
@@ -354,3 +354,51 @@ def test_malformed_url_is_config_error_not_unavailable(tmp_path):
 
     with pytest.raises(dashboard.ConfigError):
         dashboard.run(settings(), tmp_path, connect=bad, clock=lambda: NOW)
+
+
+def test_future_chart_uses_latest_issue_and_only_stored_horizons(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0)
+    for offset, value in ((-1, 99.0), (0, 21.0)):
+        t = issue + offset * H
+        for horizon in (6, 12, 24):
+            fake.con.execute(
+                "INSERT INTO predictions (station_id, issue_time, valid_time, model_version,"
+                " run_id, pm25_pred) VALUES (?, ?, ?, ?, 'future', ?)",
+                ("59t", t.isoformat(), (t + horizon * H).isoformat(), P, value),
+            )
+    assert build(fake, tmp_path) == 0
+    station = next(s for s in load(tmp_path)["chart"]["stations"] if s["id"] == "59t")
+    forecasts = station["future_persistence"]
+    assert len(forecasts) == 3
+    assert {f["value"] for f in forecasts} == {21.0}
+    assert {f["issue_time"] for f in forecasts} == {issue.isoformat()}
+    assert (tmp_path / "index.html").read_text().count('class="forecast-dot ln-pers"') == 3
+
+
+def test_future_chart_has_no_prediction_when_none_is_stored(tmp_path):
+    fake = Fake()
+    seed(fake)
+    assert build(fake, tmp_path) == 0
+    stations = load(tmp_path)["chart"]["stations"]
+    assert all(not s["future_persistence"] and not s["future_challenger"] for s in stations)
+    assert "Waiting for future forecasts." in (tmp_path / "index.html").read_text()
+
+
+def test_map_uses_newest_observation_and_marks_old_reading(tmp_path):
+    fake = Fake()
+    station = "59t"
+    for minutes, value in ((190, 42.0), (200, 10.0)):
+        ts = NOW - timedelta(minutes=minutes)
+        fake.con.execute(
+            "INSERT INTO observations (station_id, ts, pm25, source) VALUES (?, ?, ?, 'air4thai')",
+            (station, ts.isoformat(), value),
+        )
+    assert build(fake, tmp_path) == 0
+    result = load(tmp_path)["chart"]["stations"][0]
+    assert result["latest_value"] == 42.0
+    assert result["latest_at"] == (NOW - timedelta(minutes=190)).isoformat()
+    page = (tmp_path / "index.html").read_text()
+    assert 'class="map-pin stale"' in page
+    assert 'data-age="190"' in page
