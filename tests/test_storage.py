@@ -112,6 +112,26 @@ def test_observation_upsert_keeps_pm25_when_new_value_is_null(db):
     assert ingested != "2000-01-01 00:00:00"
 
 
+def test_observation_upsert_keeps_ingested_at_when_value_is_unchanged(db):
+    row = {"station_id": "s1", "ts": T0.isoformat(), "pm25": 10.0, "source": "x"}
+    db.execute(sql.UPSERT_OBSERVATION, row)
+    db.execute("UPDATE observations SET ingested_at = '2000-01-01 00:00:00'")
+    db.execute(sql.UPSERT_OBSERVATION, row)  # re-fetch, same value
+    db.execute(sql.UPSERT_OBSERVATION, {**row, "pm25": None})  # null never changes the value
+    assert db.execute("SELECT ingested_at FROM observations").fetchone() == ("2000-01-01 00:00:00",)
+
+
+def test_observation_upsert_refreshes_ingested_at_when_value_changes(db):
+    row = {"station_id": "s1", "ts": T0.isoformat(), "pm25": 10.0, "source": "x"}
+    assert db.execute(sql.UPSERT_OBSERVATION, row)
+    assert db.execute("SELECT ingested_at FROM observations").fetchone()[0] is not None
+    db.execute("UPDATE observations SET ingested_at = '2000-01-01 00:00:00'")
+    db.execute(sql.UPSERT_OBSERVATION, {**row, "pm25": 12.0})  # correction is new information
+    assert db.execute("SELECT pm25, ingested_at FROM observations").fetchone()[1] != (
+        "2000-01-01 00:00:00"
+    )
+
+
 def test_predictions_are_append_only_vintages(db):
     db.execute(sql.INSERT_PREDICTION, _pred(T0, 20.0))
     db.execute(sql.INSERT_PREDICTION, _pred(T0, 99.0, "r2"))  # re-run: ignored

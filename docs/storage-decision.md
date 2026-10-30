@@ -26,7 +26,7 @@ Stored as a `BYTEA` row in the `models` table (keyed by `model_version`, with a 
 ## Keys and rules
 
 - All timestamps are `timestamptz` and written as timezone-aware UTC. Naive values are rejected by `sql.write_rows`, which calls `require_utc` before executing (KAN-18+ writers must go through it).
-- `observations`: natural key `(station_id, ts)`. Re-ingest and backfill overlaps upsert (last write wins), except that a NULL `pm25` never overwrites an existing value; `ingested_at` is refreshed on update.
+- `observations`: natural key `(station_id, ts)`. Re-ingest and backfill overlaps upsert (last write wins), except that a NULL `pm25` never overwrites an existing value; `ingested_at` is refreshed only when the value or source changes.
 - `features`: key `(station_id, ts, feature_version)`.
 - `predictions`: key `(station_id, issue_time, valid_time, model_version)`. Append-only forecast vintage: a new `issue_time` is a new row, never an overwrite of an older forecast. Re-running the same issue is idempotent (`DO NOTHING`, so the first-written vintage is kept; `write_rows` logs inserted vs ignored counts). Rows carry `run_id`.
 - `scores`: key `(station_id, issue_time, valid_time, model_version)`; upserted, since scoring is recomputed when late observations arrive.

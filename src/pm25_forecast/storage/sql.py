@@ -18,14 +18,22 @@ def require_utc(value: datetime) -> datetime:
 # Overlap precedence (KAN-49): usable Air4Thai > OpenAQ, regardless of arrival order.
 # OpenAQ fills gaps, never displaces another source. A null Air4Thai value cannot steal
 # OpenAQ provenance; a later usable Air4Thai reading replaces it. Same-source updates
-# remain supported. The WHERE is evaluated atomically by the database on conflict.
+# remain supported. ingested_at (KAN-74) is refreshed only when the stored value or source
+# changes: the collector re-fetches the last 6 h every run, and refreshing on an unchanged
+# value would push every recent row past Predict's `ingested_at <= issue_time` cutoff.
+# The WHERE is evaluated atomically by the database on conflict.
 UPSERT_OBSERVATION = """
 INSERT INTO observations (station_id, ts, pm25, source)
 VALUES (%(station_id)s, %(ts)s, %(pm25)s, %(source)s)
 ON CONFLICT (station_id, ts) DO UPDATE SET
     pm25 = COALESCE(excluded.pm25, observations.pm25),
     source = excluded.source,
-    ingested_at = CURRENT_TIMESTAMP
+    ingested_at = CASE
+        WHEN observations.pm25 IS DISTINCT FROM COALESCE(excluded.pm25, observations.pm25)
+          OR observations.source IS DISTINCT FROM excluded.source
+        THEN CURRENT_TIMESTAMP
+        ELSE observations.ingested_at
+    END
 WHERE observations.source = excluded.source
    OR (excluded.source = 'air4thai' AND excluded.pm25 IS NOT NULL)
    OR (excluded.source = 'openaq' AND observations.pm25 IS NULL

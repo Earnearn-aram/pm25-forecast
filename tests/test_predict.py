@@ -376,3 +376,24 @@ def test_main_exit_codes(patched_main):
 
     patched_main(crash)
     assert predict.main() == 1
+
+
+def test_refetching_unchanged_hours_keeps_them_visible_to_predict(fake_db):
+    """KAN-74 regression: the collector re-upserts the last 6 h every run, just before Predict."""
+    rows = fake_db.con.execute(
+        "SELECT station_id, ts, pm25, source FROM observations WHERE ts > ?",
+        ((ISSUE - 6 * H).isoformat(),),
+    ).fetchall()
+    assert rows
+    before = fake_db.con.execute("SELECT station_id, ts, ingested_at FROM observations").fetchall()
+    for station_id, ts, pm25, source in rows:
+        fake_db.execute(
+            sql.UPSERT_OBSERVATION,
+            {"station_id": station_id, "ts": ts, "pm25": pm25, "source": source},
+        )
+    after = fake_db.con.execute("SELECT station_id, ts, ingested_at FROM observations").fetchall()
+    assert sorted(after) == sorted(before)  # unchanged value: ingested_at kept
+
+    result = do_run(fake_db)  # issue_time floors to ISSUE; the re-upsert happened "now"
+    assert result.failures == []
+    assert {r[0] for r in fake_db.predictions()} == {"59t"}

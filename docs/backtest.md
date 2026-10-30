@@ -81,7 +81,7 @@ previous-runs CAMS archive; a newly downloaded current forecast is not a substit
 full 28-day window of real vintages and wait for the +24h labels to mature before claiming a win.
 The harness intentionally publishes no production scores or fabricated historical CAMS results.
 
-The live `observations` table upserts values and resets `ingested_at`. It does not preserve original
+The live `observations` table upserts values and resets `ingested_at` when a value changes. It does not preserve original
 observation revisions or their availability. Exporting the current table alone therefore cannot
 prove a historical training snapshot was available at the time. Use immutable, timestamped input
 captures for rigorous replay; treat current-table `ingested_at` conservatively (which may exclude
