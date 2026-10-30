@@ -119,8 +119,8 @@ CREATE TABLE IF NOT EXISTS drift_reference (
 -- change is written in the same transaction as the model_champion pointer change. `recommend` and
 -- `keep` are retrain decisions that leave production alone. `metrics` is a JSON object (text).
 -- `id` gives the order of events (`at` is the database clock, now()). No foreign key: pruning a
--- model must not erase history. (ref_start/ref_end above: see migrations/005_model_events.sql,
--- which adds them with ALTER TABLE on existing databases.)
+-- model must not erase history. (ref_start/ref_end/season_key above: see
+-- migrations/005_model_events.sql, which adds them with ALTER TABLE on existing databases.)
 CREATE TABLE IF NOT EXISTS model_events (
     id bigserial PRIMARY KEY,
     at                timestamptz NOT NULL DEFAULT now(),

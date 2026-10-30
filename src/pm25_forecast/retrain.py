@@ -44,7 +44,7 @@ import duckdb
 from pydantic import ValidationError
 
 from pm25_forecast.collector import ConfigError, default_run_id, open_db
-from pm25_forecast.drift import latest_drift_alert, latest_drift_run
+from pm25_forecast.drift import latest_drift_alert
 from pm25_forecast.export_history import export_history
 from pm25_forecast.features import FEATURE_NAMES
 from pm25_forecast.models.baselines import (
@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 EXIT_FAILED, EXIT_CONFIG = 1, 2
 HOLDOUT_DAYS = 7
 MIN_PAIRS = 100
+RETRAIN_MIN_GAP = timedelta(days=7)  # --if-drift: at most one retrain decision per this period
 MIN_REL_GAIN = 0.02
 _LATEST_INDEX = FEATURE_NAMES.index("pm25_latest")  # persistence = the latest observation
 
@@ -338,8 +339,10 @@ def drift_gate(con: Any, settings: Settings, now: datetime) -> tuple[list[str], 
     """Decide an ``--if-drift`` run: ``(alerted models, skip reason or None)``.
 
     Runs only if the latest drift run has an alert for the challenger OR the champion, and no
-    retrain decision was logged since that drift run was computed (cooldown: one drift alert
-    triggers at most one retrain, even if the workflow is re-run).
+    retrain decision was logged within ``RETRAIN_MIN_GAP`` (7 days; cooldown). Persistent drift,
+    a "keep" result, a same-day re-run or AUTO_PROMOTE off therefore cannot retrain every day.
+    The last decision's ``at`` is the database clock and ``now`` the (UTC) job clock; both are
+    timezone-aware UTC, so they differ only by clock skew, which is negligible against 7 days.
     """
     targets = drift_targets(con, settings)
     if not targets:
@@ -347,12 +350,11 @@ def drift_gate(con: Any, settings: Settings, now: datetime) -> tuple[list[str], 
     alerted = [t for t in targets if latest_drift_alert(con, t, now=now)]
     if not alerted:
         return [], "no drift alert"
-    computed = [c for c in (latest_drift_run(con, t) for t in alerted) if c is not None]
     last_retrain = last_retrain_event_at(con)
-    if computed and last_retrain is not None and last_retrain > max(computed):
+    if last_retrain is not None and now - last_retrain < RETRAIN_MIN_GAP:
         return alerted, (
-            f"cooldown: a retrain was logged at {last_retrain.isoformat()}, after the drift run "
-            f"at {max(computed).isoformat()}"
+            f"cooldown: a retrain was logged at {last_retrain.isoformat()}, less than "
+            f"{RETRAIN_MIN_GAP.days} days ago"
         )
     return alerted, None
 

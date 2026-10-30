@@ -86,8 +86,8 @@ older one. Also unset `AUTO_PROMOTE` if auto-promotion caused the problem.
 the production champion (both are checked). With neither it does nothing.
 
 Cooldown: it also skips if a retrain decision (any `model_events` row by actor `retrain` or `auto`)
-was logged after that drift run was computed, so one drift alert causes one retrain even if the job
-is re-run. The next daily drift run that still alerts counts as a new alert. When it does run it is
+was logged within the last 7 days (`RETRAIN_MIN_GAP`), so persistent drift, a "keep" result or a
+same-day re-run cannot retrain every day. When it does run it is
 the normal retrain: the candidate is registered and, unless
 `AUTO_PROMOTE=true`, only recommended. The `drift-retrain` job in `drift-workflow.yml.txt` runs it
 after the daily drift check and shares the weekly retrain's concurrency group.

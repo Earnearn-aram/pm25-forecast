@@ -348,7 +348,6 @@ def patch_drift(monkeypatch, alerting, computed=RETRAIN_NOW - timedelta(hours=1)
         return model_version in alerting
 
     monkeypatch.setattr(retrain, "latest_drift_alert", alert)
-    monkeypatch.setattr(retrain, "latest_drift_run", lambda _con, model_version: computed)
     return seen
 
 
@@ -419,9 +418,34 @@ def test_cooldown_skips_when_a_retrain_was_logged_after_the_drift_run(monkeypatc
 def test_a_retrain_before_the_drift_run_does_not_block_it(monkeypatch):
     patch_drift(monkeypatch, alerting=("chal",), computed=RETRAIN_NOW - timedelta(hours=1))
     reg = Registry()
-    reg.last_retrain_at = RETRAIN_NOW - timedelta(days=3)  # last week's retrain
+    reg.last_retrain_at = RETRAIN_NOW - timedelta(days=8)  # older than the minimum gap
     gate = retrain.drift_gate(reg, settings(challenger_model_version="chal"), RETRAIN_NOW)
     assert gate == (["chal"], None)
+
+
+def test_persistent_drift_retrains_at_most_once_per_minimum_gap(monkeypatch):
+    # Drift stays above the threshold; a new drift run is computed every day.
+    reg = Registry()
+    chal = settings(challenger_model_version="chal")
+    reg.last_retrain_at = RETRAIN_NOW - timedelta(days=1)  # retrained yesterday
+    patch_drift(monkeypatch, alerting=("chal",), computed=RETRAIN_NOW - timedelta(hours=1))
+    alerted, reason = retrain.drift_gate(reg, chal, RETRAIN_NOW)  # day 2: fresh drift run
+    assert alerted == ["chal"] and reason.startswith("cooldown")
+    reg.last_retrain_at = RETRAIN_NOW - timedelta(days=7, hours=-1)  # day 7: still inside
+    assert retrain.drift_gate(reg, chal, RETRAIN_NOW)[1].startswith("cooldown")
+    reg.last_retrain_at = RETRAIN_NOW - timedelta(days=8)  # day 8
+    assert retrain.drift_gate(reg, chal, RETRAIN_NOW) == (["chal"], None)
+
+
+def test_same_day_rerun_after_a_drift_triggered_retrain_is_skipped(monkeypatch):
+    patch_drift(monkeypatch, alerting=("chal",))
+    reg = Registry()
+    chal = settings(challenger_model_version="chal")
+    assert do_run(reg, [], if_drift=True, settings=chal).status == "ok"
+    # The drift workflow runs again the same day and recomputes the drift rows (newer computed_at).
+    patch_drift(monkeypatch, alerting=("chal",), computed=RETRAIN_NOW + timedelta(minutes=1))
+    again = do_run(reg, [], export=boom_export, if_drift=True, settings=chal)
+    assert again.status == "skipped"
 
 
 def test_one_drift_alert_triggers_one_retrain_even_if_the_job_is_rerun(monkeypatch):

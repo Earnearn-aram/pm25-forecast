@@ -1,4 +1,5 @@
 -- Run once on existing databases (KAN-24).
+SET lock_timeout = '5s';
 -- Promotion/rollback log: one row per champion change or retrain decision. A champion change
 -- (promote, rollback) is written in the same transaction as the model_champion pointer change.
 -- `recommend` and `keep` are retrain decisions that leave production alone. `metrics` is a JSON

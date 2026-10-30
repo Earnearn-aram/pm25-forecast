@@ -429,12 +429,25 @@ def test_reference_with_recent_end_on_jan_10_picks_december_and_january_rows(fak
     assert max(target.edges) < 100  # no off-season row in the reference
 
 
-def test_too_few_same_season_points_is_insufficient_without_full_window_fallback(fake):
+def test_season_anchor_is_the_monday_of_the_iso_week():
+    anchor = drift.season_anchor(datetime(2026, 10, 30, 12, 20, tzinfo=UTC))  # a Friday
+    assert anchor == datetime(2026, 10, 26, tzinfo=UTC)
+    assert drift.season_key(anchor) == drift.season_key(datetime(2026, 11, 1, 23, tzinfo=UTC))
+    assert drift.season_anchor(datetime(2027, 1, 3, 5, tzinfo=UTC)) == datetime(
+        2026, 12, 28, tzinfo=UTC
+    )
+
+
+def test_too_few_same_season_points_is_insufficient_without_full_window_fallback(fake, caplog):
     # The training window is plentiful but entirely out of season for the recent end (30 Oct).
     start, end = datetime(2026, 3, 1, tzinfo=UTC), datetime(2026, 4, 1, tzinfo=UTC)
     add_model(fake, CHALLENGER, start=start, end=end)
     add_series(fake, start=start - 2 * H)
-    result = do_run(fake)
+    with caplog.at_level("WARNING", logger="pm25_forecast.drift"):
+        result = do_run(fake)
+    assert any(
+        "pm25_latest" in r.getMessage() and "2026-03-01" in r.getMessage() for r in caplog.records
+    )
     assert {c.status for c in result.checks} == {INSUFFICIENT}
     assert all(c.psi is None for c in result.checks)
     assert all(c.n_ref < drift.MIN_REFERENCE for c in result.checks)

@@ -229,6 +229,14 @@ def in_season(moment: datetime, anchor: datetime, days: int = SEASON_DAYS) -> bo
     return min(gap, 365 - gap) <= days
 
 
+def season_anchor(moment: datetime) -> datetime:
+    """Monday 00:00 UTC of the ISO week of ``moment``: the date the seasonal window is centred on,
+    so the reference matches its ``season_key`` whichever hour of the week it was built."""
+    return (moment - timedelta(days=moment.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+
 def season_key(anchor: datetime, days: int = SEASON_DAYS) -> str:
     """Cache key of the seasonal reference: the half width and the ISO week of ``anchor``."""
     iso = anchor.isocalendar()
@@ -517,6 +525,17 @@ def build_reference(
     reference = {name: make_reference(name, features[name], n_origins) for name in FEATURE_NAMES}
     target = inputs.target_values(window.start, window.end, keep)
     reference[TARGET_FEATURE] = make_reference(TARGET_FEATURE, target, len(target))
+    for name, ref in reference.items():
+        if ref.n_ref < MIN_REFERENCE:
+            logger.warning(
+                "%s: same-season reference has %d points (< %d) from training window %s to %s; "
+                "status will be insufficient (the window may not cover this season)",
+                name,
+                ref.n_ref,
+                MIN_REFERENCE,
+                window.start.isoformat(),
+                window.end.isoformat(),
+            )
     return reference
 
 
@@ -547,10 +566,11 @@ def model_checks(
     recent = Window(start=recent_end - RECENT_WINDOW, end=recent_end)
     lag = timedelta(hours=manifest.assumed_reporting_lag_hours or 0)
 
-    season = season_key(recent_end)
+    anchor = season_anchor(recent_end)
+    season = season_key(anchor)
     reference = load_reference(con, model_version, ref, season)
     if reference is None:  # not cached, or built from another window or season
-        reference = build_reference(con, manifest, stations, recent_end)
+        reference = build_reference(con, manifest, stations, anchor)
         save_reference(con, model_version, reference, now, ref, season)
 
     recent_inputs = Inputs(con, recent.start, recent.end, stations, manifest.horizons)
