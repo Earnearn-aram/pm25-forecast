@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from pm25_forecast import quality
 from pm25_forecast.storage import sql
 from pm25_forecast.storage.guard import (
     DatabaseUnavailableError,
@@ -149,6 +150,7 @@ def test_schema_primary_keys_match_conflict_targets():
         "scores": ("station_id", "issue_time", "valid_time", "model_version"),
         "models": ("model_version",),
         "model_champion": ("slot",),
+        "data_quality_checks": ("checked_at", "source", "station_id", "check_name"),
         "drift_checks": ("checked_at", "model_version", "feature"),
         "drift_reference": ("model_version", "feature"),
     }
@@ -157,6 +159,7 @@ def test_schema_primary_keys_match_conflict_targets():
         ("observations", sql.UPSERT_OBSERVATION),
         ("predictions", sql.INSERT_PREDICTION),
         ("scores", sql.UPSERT_SCORE),
+        ("data_quality_checks", quality.UPSERT_CHECK),
     ):
         target = re.search(r"ON CONFLICT \(([^)]*)\)", stmt)
         assert target
