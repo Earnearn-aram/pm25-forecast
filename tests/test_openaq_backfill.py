@@ -384,3 +384,60 @@ def test_retry_after_http_date_and_bad_header():
     )
     assert b.retry_wait(response, 0) == b.MAX_WAIT
     assert b.retry_wait(httpx.Response(429), 2) == 4
+
+
+def subwindow_responder(bad_days):
+    """Sensor 900 returns HTTP 500 for any window over one day and for bad_days."""
+
+    def responder(request):
+        if request.url.path.endswith("/locations"):
+            return handler(request)
+        lo = datetime.fromisoformat(request.url.params["datetime_from"])
+        hi = datetime.fromisoformat(request.url.params["datetime_to"])
+        if hi - lo > timedelta(days=1) or lo in bad_days:
+            return httpx.Response(500)
+        return httpx.Response(200, json={"results": [hour(int(lo.day), lo)]})
+
+    return responder
+
+
+SUB_START = datetime(2026, 5, 9, tzinfo=UTC)
+SUB_END = SUB_START + timedelta(days=4)
+
+
+def test_chunk_500_splits_into_subwindows_stores_good_and_reports_bad(caplog):
+    fake = FakeDb()
+    bad = {SUB_START + timedelta(days=1), SUB_START + timedelta(days=3)}
+    sid = TARGET_STATION_IDS[0]
+    reports = run(
+        fake,
+        subwindow_responder(bad),
+        start=SUB_START,
+        end=SUB_END,
+        station_ids=[sid],
+    )
+    stored = {r[1] for r in fake.rows("observations")}
+    assert stored == {SUB_START.isoformat(), (SUB_START + timedelta(days=2)).isoformat()}
+    failures = reports[0].failures
+    assert len(failures) == 2
+    for day in bad:
+        assert any(f.startswith(f"{day.isoformat()}..") and "sensor 900" in f for f in failures)
+        assert any("HTTP 500" in f for f in failures)
+    assert reports[0].chunks == 1 and reports[0].rows_usable == 2
+    assert "synthetic-test-value" not in caplog.text
+    assert "synthetic-test-value" not in " ".join(failures)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(b, "run", lambda *a, **kw: reports)
+        assert b.main([]) == 1
+
+
+def test_chunk_500_all_subwindows_succeed_has_no_failures():
+    fake = FakeDb()
+    sid = TARGET_STATION_IDS[0]
+    reports = run(fake, subwindow_responder(set()), start=SUB_START, end=SUB_END, station_ids=[sid])
+    assert reports[0].failures == []
+    assert {r[1] for r in fake.rows("observations")} == {
+        (SUB_START + timedelta(days=n)).isoformat() for n in range(4)
+    }
+    assert reports[0].chunks == 1
