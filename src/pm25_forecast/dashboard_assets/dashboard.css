@@ -582,3 +582,39 @@ footer {
     display: none;
   }
 }
+
+/* Hide inactive controls without JavaScript; keep language names in their own language. */
+.language-switch[hidden] {
+  display: none;
+}
+.language-switch {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid #3a4250;
+  border-radius: 8px;
+}
+.language-switch button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #9aa3ad;
+  font: inherit;
+  cursor: pointer;
+}
+.language-switch button[aria-pressed="true"] {
+  background: #2dd4bf;
+  color: #0e1116;
+}
+html[lang="th"] body {
+  font-family: "Archivo", "Noto Sans Thai", Tahoma, system-ui, sans-serif;
+  line-height: 1.65;
+}
+html[lang="th"] .title {
+  max-width: 100%;
+}
+html[lang="th"] .status {
+  flex-wrap: wrap;
+}

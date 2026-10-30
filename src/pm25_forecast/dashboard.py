@@ -3,7 +3,7 @@
 Reads the database (read-only SELECTs, one read-only connection for the whole build) and writes
 a static site:
 ``index.html`` (server-rendered, inline SVG charts), ``data.json`` (the same numbers), plus
-``dashboard.css`` and ``dashboard.js`` (station pills and the animation pause only).
+``dashboard.css`` and ``dashboard.js`` (language, station and animation controls).
 
 * Every section is independent. A query that fails (missing table, bad rows, DB hiccup) turns that
   section into ``"unavailable"`` in ``data.json`` and on the page; it never stops the build.
@@ -916,6 +916,10 @@ def render_html(data: dict[str, Any]) -> str:
 <div class="row" style="align-items:center">
 <p class="status"><span class="dot {status}" aria-hidden="true"></span>{label} \u00b7 updated {_fmt_time(data["generated_at"])}</p>
 <a href="{REPO_URL}">Source on GitHub</a>
+<div id="language-switch" class="language-switch" role="group" aria-label="Dashboard language" hidden>
+<button type="button" data-language="en" lang="en" aria-pressed="true">English</button>
+<button type="button" data-language="th" lang="th" aria-pressed="false">ไทย</button>
+</div>
 </div>
 </header>
 {note}
