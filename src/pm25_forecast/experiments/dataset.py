@@ -30,6 +30,7 @@ _D = [
     "trend3", "trend6",
 ]
 _E = ["nbr_latest_mean", "nbr_mean24"]
+EXTRA = ["src_air4thai", "leak_nbr_target"]
 SET_FEATURES["A"] = _A
 SET_FEATURES["B"] = _A + _B
 SET_FEATURES["C"] = _A + _B + _C
@@ -105,7 +106,11 @@ def build_table(grid: Grid, horizon: int = HORIZON) -> Table:
     lat = {s: _latest(grid.values[s], origins) for s in STATIONS}
     m24 = {s: _window(grid.values[s], origins, 24)[0] for s in STATIONS}
 
-    cols: dict[str, list[np.ndarray]] = {k: [] for k in ALL_FEATURES}
+    src_f = {
+        s: np.where(grid.source[s] == 0, np.nan, grid.source[s].astype(float)) for s in STATIONS
+    }
+    srclat = {s: _latest(src_f[s], origins) for s in STATIONS}
+    cols: dict[str, list[np.ndarray]] = {k: [] for k in ALL_FEATURES + EXTRA}
     st_l, o_l, t_l, y_l, l_l, src_l = [], [], [], [], [], []
     for si, s in enumerate(STATIONS):
         a = grid.values[s]
@@ -144,7 +149,14 @@ def build_table(grid: Grid, horizon: int = HORIZON) -> Table:
                 np.isnan(nl).all(1), np.nan, np.nanmean(np.where(np.isnan(nl), np.nan, nl), 1)
             )
             f["nbr_mean24"] = np.where(np.isnan(nm).all(1), np.nan, np.nanmean(nm, 1))
-        for k in ALL_FEATURES:
+        # flag: the latest reading comes from the air4thai feed (live feed = 1)
+        f["src_air4thai"] = (srclat[s][keep] == 2).astype(float)
+        # DELIBERATELY LEAKY control (never a candidate): neighbours' mean reading at the target hour
+        nt = np.column_stack([_at(grid.values[x], t) for x in others])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            f["leak_nbr_target"] = np.nanmean(nt, 1)
+        for k in ALL_FEATURES + EXTRA:
             cols[k].append(f[k])
         st_l.append(np.full(len(o), s))
         o_l.append(o)
