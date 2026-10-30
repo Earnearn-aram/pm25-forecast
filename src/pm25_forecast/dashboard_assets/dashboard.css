@@ -58,9 +58,9 @@ a:focus-visible,
   font-size: 13px;
 }
 main {
-  max-width: 1280px;
+  width: 100%;
   margin: 0 auto;
-  padding: 32px 24px 48px;
+  padding: 32px clamp(16px, 2.5vw, 48px) 48px;
   display: flex;
   flex-direction: column;
   gap: 24px;
