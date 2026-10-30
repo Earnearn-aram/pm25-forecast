@@ -11,8 +11,14 @@ feature in ``FEATURE_NAMES``, plus the shift of the observed PM2.5 itself (``tar
   default 24 h), observations from the 24 h before the origin up to the model's
   ``assumed_reporting_lag_hours`` before it (as in training). Origins without any feature value
   are skipped, as in training.
-* The reference side (bin edges and shares) is computed once per model_version from the training
-  window and cached in ``drift_reference``; a daily run reads only the recent 7 days.
+* The reference is the SAME SEASON of the training window: only origins (and observations) whose
+  day of the year is within ``SEASON_DAYS`` (30) of the recent window's end date, across all
+  training years (wrapping around the year end; 29 Feb counts as 28 Feb). Otherwise a multi-year
+  window flags plain seasonality as drift. A seasonal reference with fewer than ``MIN_REFERENCE``
+  points is ``insufficient``; there is no fallback to the whole window.
+* The reference side (bin edges and shares) is cached in ``drift_reference`` per model_version
+  and rebuilt when the training window or the season key (``doy±30@<ISO week of the recent end>``)
+  changes, so in practice about weekly; a daily run reads only the recent 7 days.
 * Status: PSI below ``PSI_WARN`` is ``ok``, up to ``PSI_ALERT`` ``warn``, above it ``alert`` only
   if the previous daily run was also above ``PSI_ALERT`` (otherwise ``warn``). ``insufficient``
   (stored without a PSI, never an alert): fewer than ``MIN_RECENT`` recent or ``MIN_REFERENCE``
@@ -62,6 +68,7 @@ MIN_REFERENCE = 200  # fewer reference points: insufficient
 MIN_BINS = 3  # fewer distinct reference bins (near-constant or integer-heavy data): insufficient
 CAMS_MIN_COVERAGE = 0.5  # cams_pm25 needs CAMS for at least this share of the reference origins
 RECENT_WINDOW = timedelta(days=7)
+SEASON_DAYS = 30  # reference = training rows within this many days of the year of the recent end
 PSI_BINS = 5
 PSI_EPSILON = 1e-4  # share used for an empty bin, so the logarithm is defined
 TARGET_FEATURE = "target_pm25"
@@ -96,18 +103,19 @@ ON CONFLICT (checked_at, model_version, feature) DO UPDATE SET
     computed_at = excluded.computed_at
 """
 SELECT_REFERENCE = """
-SELECT feature, edges, shares, n_ref, n_origins, usable, ref_start, ref_end FROM drift_reference
+SELECT feature, edges, shares, n_ref, n_origins, usable, ref_start, ref_end, season_key
+FROM drift_reference
 WHERE model_version = %(model_version)s
 """
 UPSERT_REFERENCE = """
 INSERT INTO drift_reference (model_version, feature, edges, shares, n_ref, n_origins, usable,
-                             computed_at, ref_start, ref_end)
+                             computed_at, ref_start, ref_end, season_key)
 VALUES (%(model_version)s, %(feature)s, %(edges)s, %(shares)s, %(n_ref)s, %(n_origins)s,
-        %(usable)s, %(computed_at)s, %(ref_start)s, %(ref_end)s)
+        %(usable)s, %(computed_at)s, %(ref_start)s, %(ref_end)s, %(season_key)s)
 ON CONFLICT (model_version, feature) DO UPDATE SET
     edges = excluded.edges, shares = excluded.shares, n_ref = excluded.n_ref,
     n_origins = excluded.n_origins, usable = excluded.usable, computed_at = excluded.computed_at,
-    ref_start = excluded.ref_start, ref_end = excluded.ref_end
+    ref_start = excluded.ref_start, ref_end = excluded.ref_end, season_key = excluded.season_key
 """
 SELECT_PREVIOUS_PSI = """
 SELECT psi FROM drift_checks
@@ -202,6 +210,29 @@ def classify(value: float | None, n_ref: int, n_recent: int) -> str:
     if value < PSI_WARN:
         return OK
     return WARN if value <= PSI_ALERT else ALERT
+
+
+# --- season ------------------------------------------------------------------------------------
+
+
+def _day_of_year(moment: datetime) -> int:
+    """Day of the year on a non-leap calendar (29 Feb counts as 28 Feb)."""
+    day = moment.date()
+    if day.month == 2 and day.day == 29:
+        day = day.replace(day=28)
+    return day.replace(year=2001).timetuple().tm_yday
+
+
+def in_season(moment: datetime, anchor: datetime, days: int = SEASON_DAYS) -> bool:
+    """True if ``moment`` is within ``days`` days of the year of ``anchor``, in any year."""
+    gap = abs(_day_of_year(moment) - _day_of_year(anchor))
+    return min(gap, 365 - gap) <= days
+
+
+def season_key(anchor: datetime, days: int = SEASON_DAYS) -> str:
+    """Cache key of the seasonal reference: the half width and the ISO week of ``anchor``."""
+    iso = anchor.isocalendar()
+    return f"doy±{days}@{iso.year}-W{iso.week:02d}"
 
 
 # --- reading and rebuilding inputs -------------------------------------------------------------
@@ -331,22 +362,34 @@ class Inputs:
                     (c.issue_time, c.valid_time, c.pm25_pred, CAMS_MODEL_VERSION)
                 )
 
-    def target_values(self, start: datetime, end: datetime) -> list[float]:
+    def target_values(
+        self, start: datetime, end: datetime, keep: Callable[[datetime], bool] | None = None
+    ) -> list[float]:
         out: list[float] = []
         for station, times in self.times.items():
             lo, hi = bisect_left(times, start), bisect_right(times, end)
-            out.extend(self.values[station][lo:hi])
+            if keep is None:
+                out.extend(self.values[station][lo:hi])
+            else:
+                pairs = zip(times[lo:hi], self.values[station][lo:hi], strict=True)
+                out.extend(v for t, v in pairs if keep(t))
         return out
 
     def feature_values(
-        self, start: datetime, end: datetime, lag: timedelta, horizons: Sequence[int]
+        self,
+        start: datetime,
+        end: datetime,
+        lag: timedelta,
+        horizons: Sequence[int],
+        keep: Callable[[datetime], bool] | None = None,
     ) -> tuple[dict[str, list[float]], int]:
         """Hourly features for origins in [start, end], through the shared ``build_features``.
 
         One feature set per station, origin and horizon (as ``predict`` builds them). The history
         passed is the 24 h up to ``origin - lag``, as in ``train_model``. ``pm25_latest`` does not
         depend on the horizon and is counted once per origin. Also returns the number of
-        (station, origin, horizon) combinations that had any feature value.
+        (station, origin, horizon) combinations that had any feature value. With ``keep``, only
+        origins for which it returns True are used (the seasonal reference).
         """
         out: dict[str, list[float]] = {name: [] for name in FEATURE_NAMES}
         n_origins = 0
@@ -358,6 +401,8 @@ class Inputs:
             values = self.values[station]
             for i in range(max(origin_count, 0)):
                 origin = first + timedelta(hours=i)
+                if keep is not None and not keep(origin):
+                    continue
                 lo = bisect_left(times, origin - HISTORY)
                 hi = bisect_right(times, origin - lag)
                 history = list(zip(times[lo:hi], values[lo:hi], strict=True))
@@ -398,19 +443,22 @@ def make_reference(feature: str, values: list[float], n_origins: int) -> Referen
 
 
 def load_reference(
-    con: Any, model_version: str, window: Window | None = None
+    con: Any, model_version: str, window: Window | None = None, season: str | None = None
 ) -> dict[str, Reference] | None:
     """The cached reference for every feature and the target, or None if not (fully) cached.
 
     With ``window`` (the manifest's training window), a reference built from a different window,
     or one that stored no window (written before KAN-24), counts as not cached and is rebuilt.
+    The same holds for ``season`` (the season key) against the stored ``season_key``.
     """
     rows = con.execute(SELECT_REFERENCE, {"model_version": model_version}).fetchall()
     found: dict[str, Reference] = {}
-    for feature, edges, shares, n_ref, n_origins, usable, ref_start, ref_end in rows:
+    for feature, edges, shares, n_ref, n_origins, usable, ref_start, ref_end, stored_key in rows:
         if window is not None and (
             as_utc(ref_start) != as_utc(window.start) or as_utc(ref_end) != as_utc(window.end)
         ):
+            return None
+        if season is not None and stored_key != season:
             return None
         try:
             found[feature] = Reference(
@@ -431,6 +479,7 @@ def save_reference(
     reference: dict[str, Reference],
     now: datetime,
     window: Window | None = None,
+    season: str | None = None,
 ) -> None:
     rows = [
         {
@@ -444,6 +493,7 @@ def save_reference(
             "computed_at": now,
             "ref_start": None if window is None else window.start,
             "ref_end": None if window is None else window.end,
+            "season_key": season,
         }
         for feature, ref in reference.items()
     ]
@@ -451,15 +501,21 @@ def save_reference(
 
 
 def build_reference(
-    con: Any, manifest: Manifest, stations: set[str] | None
+    con: Any, manifest: Manifest, stations: set[str] | None, anchor: datetime
 ) -> dict[str, Reference]:
-    """Rebuild the reference from the training window (once per model_version, then cached)."""
+    """Rebuild the reference: training-window rows in season with ``anchor`` (then cached)."""
     window = manifest.training_window
+
+    def keep(moment: datetime) -> bool:
+        return in_season(moment, anchor)
+
     lag = timedelta(hours=manifest.assumed_reporting_lag_hours or 0)
     inputs = Inputs(con, window.start, window.end, stations, manifest.horizons)
-    features, n_origins = inputs.feature_values(window.start, window.end, lag, manifest.horizons)
+    features, n_origins = inputs.feature_values(
+        window.start, window.end, lag, manifest.horizons, keep
+    )
     reference = {name: make_reference(name, features[name], n_origins) for name in FEATURE_NAMES}
-    target = inputs.target_values(window.start, window.end)
+    target = inputs.target_values(window.start, window.end, keep)
     reference[TARGET_FEATURE] = make_reference(TARGET_FEATURE, target, len(target))
     return reference
 
@@ -491,10 +547,11 @@ def model_checks(
     recent = Window(start=recent_end - RECENT_WINDOW, end=recent_end)
     lag = timedelta(hours=manifest.assumed_reporting_lag_hours or 0)
 
-    reference = load_reference(con, model_version, ref)
-    if reference is None:  # not cached, or built from a window other than the manifest's
-        reference = build_reference(con, manifest, stations)
-        save_reference(con, model_version, reference, now, ref)
+    season = season_key(recent_end)
+    reference = load_reference(con, model_version, ref, season)
+    if reference is None:  # not cached, or built from another window or season
+        reference = build_reference(con, manifest, stations, recent_end)
+        save_reference(con, model_version, reference, now, ref, season)
 
     recent_inputs = Inputs(con, recent.start, recent.end, stations, manifest.horizons)
     recent_features, _ = recent_inputs.feature_values(

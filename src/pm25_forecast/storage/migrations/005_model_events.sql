@@ -20,3 +20,7 @@ CREATE TABLE IF NOT EXISTS model_events (
 -- this migration) also triggers one rebuild.
 ALTER TABLE drift_reference ADD COLUMN IF NOT EXISTS ref_start timestamptz;
 ALTER TABLE drift_reference ADD COLUMN IF NOT EXISTS ref_end timestamptz;
+
+-- Same-season drift reference: the season the cached reference was built for, e.g.
+-- 'doy±30@2026-W44'. A different key (or NULL, rows written before this) triggers a rebuild.
+ALTER TABLE drift_reference ADD COLUMN IF NOT EXISTS season_key text;

@@ -95,8 +95,9 @@ CREATE TABLE IF NOT EXISTS drift_checks (
     PRIMARY KEY (checked_at, model_version, feature)
 );
 
--- Reference distribution per model and feature, computed once from the model's training window
--- (immutable per model_version) so the daily run only reads the recent days. `edges` and `shares`
+-- Reference distribution per model and feature, computed from the same-season rows of the model's
+-- training window (`season_key`, e.g. 'doy±30@2026-W44'; rebuilt when it or the window changes)
+-- so the daily run only reads the recent days. `edges` and `shares`
 -- are JSON arrays; `usable` is false when the reference is too small, has too few distinct bins,
 -- or (cams_pm25) covers too few of the training origins.
 CREATE TABLE IF NOT EXISTS drift_reference (
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS drift_reference (
     computed_at    timestamptz NOT NULL DEFAULT now(),
     ref_start      timestamptz,
     ref_end        timestamptz,
+    season_key     text,
     PRIMARY KEY (model_version, feature)
 );
 
