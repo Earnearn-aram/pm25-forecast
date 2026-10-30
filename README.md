@@ -164,8 +164,6 @@ most runs before (KAN-50, KAN-67).
 | Predict fails after baselines are written | `CHALLENGER_MODEL_VERSION` points at a missing or incompatible model | Run `registry_cli check <version>`; unset the variable to turn the challenger off. |
 | No heartbeat arrives at all | Not detected automatically yet | Planned: dead-man switch (KAN-30). Until then, check the Actions tab by hand. |
 
-Diagrams: https://earnrw.atlassian.net/wiki/spaces/EARN/pages/66244/PM2.5+Architecture+Diagrams
-
 ## Quickstart
 
 Needs [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if missing).
