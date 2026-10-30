@@ -4,7 +4,6 @@ holdout is shown separately as description only."""
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +31,12 @@ def run(grid: Grid) -> dict:
             x = v[src == code]
             if len(x):
                 rows[f"{s}/{nm}"] = {
-                    "n": int(len(x)), "mean": float(x.mean()), "median": float(np.median(x)),
-                    "sd": float(x.std()), "p90": float(np.quantile(x, 0.9)), "max": float(x.max()),
+                    "n": len(x),
+                    "mean": float(x.mean()),
+                    "median": float(np.median(x)),
+                    "sd": float(x.std()),
+                    "p90": float(np.quantile(x, 0.9)),
+                    "max": float(x.max()),
                     "share_above_37.5": float((x > HIGH).mean()),
                 }
     out["station_source_stats"] = rows
@@ -51,8 +54,13 @@ def run(grid: Grid) -> dict:
         d = np.diff(idx)
         big = np.where(d > 6)[0]
         gaps[s] = [
-            {"from": grid.time(int(idx[i])).isoformat(), "to": grid.time(int(idx[i + 1])).isoformat(),
-             "hours": int(d[i] - 1)} for i in big if d[i] - 1 >= 48
+            {
+                "from": grid.time(int(idx[i])).isoformat(),
+                "to": grid.time(int(idx[i + 1])).isoformat(),
+                "hours": int(d[i] - 1),
+            }
+            for i in big
+            if d[i] - 1 >= 48
         ]
         del span
     out["grid_coverage"] = cov
@@ -89,15 +97,22 @@ def run(grid: Grid) -> dict:
     loc = [grid.time(int(i)) + BKK for i in t24.target_idx]
     lh = np.array([x.hour for x in loc])
     mo = np.array([x.strftime("%Y-%m") for x in loc])
+
     def grp(mask):
-        d = {"n": int(mask.sum()), "mae": float(err[mask].mean()),
-             "bias_pred_minus_y": float((t24.latest - t24.y)[mask].mean()),
-             "mean_y": float(t24.y[mask].mean())}
+        d = {
+            "n": int(mask.sum()),
+            "mae": float(err[mask].mean()),
+            "bias_pred_minus_y": float((t24.latest - t24.y)[mask].mean()),
+            "mean_y": float(t24.y[mask].mean()),
+        }
         return d
+
     out["persistence_mae_overall"] = {"train": grp(train), "holdout": grp(hold)}
     out["persistence_mae_by_hour_group"] = {
-        f"{a:02d}-{b:02d}": {"train": grp(train & (lh >= a) & (lh <= b)),
-                             "holdout": grp(hold & (lh >= a) & (lh <= b))}
+        f"{a:02d}-{b:02d}": {
+            "train": grp(train & (lh >= a) & (lh <= b)),
+            "holdout": grp(hold & (lh >= a) & (lh <= b)),
+        }
         for a, b in ((0, 5), (6, 11), (12, 17), (18, 23))
     }
     out["persistence_mae_by_station"] = {
@@ -109,13 +124,17 @@ def run(grid: Grid) -> dict:
     }
     bins = [(0, 15), (15, 25), (25, 37.5), (37.5, 1e9)]
     out["persistence_mae_by_latest_level"] = {
-        f"{lo}-{hi}": {"train": grp(train & (t24.latest > lo) & (t24.latest <= hi)),
-                       "holdout": grp(hold & (t24.latest > lo) & (t24.latest <= hi))}
+        f"{lo}-{hi}": {
+            "train": grp(train & (t24.latest > lo) & (t24.latest <= hi)),
+            "holdout": grp(hold & (t24.latest > lo) & (t24.latest <= hi)),
+        }
         for lo, hi in bins
     }
     out["persistence_mae_by_actual_level"] = {
-        f"{lo}-{hi}": {"train": grp(train & (t24.y > lo) & (t24.y <= hi)),
-                       "holdout": grp(hold & (t24.y > lo) & (t24.y <= hi))}
+        f"{lo}-{hi}": {
+            "train": grp(train & (t24.y > lo) & (t24.y <= hi)),
+            "holdout": grp(hold & (t24.y > lo) & (t24.y <= hi)),
+        }
         for lo, hi in bins
     }
     # 6 cross-station correlation and lead-lag (train span), concurrent and lagged
@@ -153,29 +172,33 @@ def run(grid: Grid) -> dict:
         "pm25_t48": t24.feats["pm25_t48"][tr],
         "pm25_t168": t24.feats["pm25_t168"][tr],
     }
-    out["train_probe_mae_plus24"] = {
-        k: float(np.nanmean(np.abs(y - v))) for k, v in cand.items()
-    }
+    out["train_probe_mae_plus24"] = {k: float(np.nanmean(np.abs(y - v))) for k, v in cand.items()}
     out["train_probe_n"] = int(tr.sum())
     # OLS slope of y on latest (shrinkage toward the mean?) on train
     x = t24.latest[train]
     yy = t24.y[train]
     out["train_slope_y_on_latest"] = float(np.polyfit(x, yy, 1)[0])
-    out["train_rel_change_cv"] = float(np.std((yy - x))/np.mean(yy))
+    out["train_rel_change_cv"] = float(np.std(yy - x) / np.mean(yy))
     # 8 episode proxy: persistence error when PM is rising vs falling over the last 6 h
     tr6 = train & ~np.isnan(t24.feats["trend6"])
-    for nm, m in (("rising>3", t24.feats["trend6"] > 3), ("falling<-3", t24.feats["trend6"] < -3),
-                  ("flat", np.abs(t24.feats["trend6"]) <= 3)):
+    for nm, m in (
+        ("rising>3", t24.feats["trend6"] > 3),
+        ("falling<-3", t24.feats["trend6"] < -3),
+        ("flat", np.abs(t24.feats["trend6"]) <= 3),
+    ):
         mm = tr6 & m
         out.setdefault("train_persistence_by_6h_trend", {})[nm] = {
-            "n": int(mm.sum()), "mae": float(err[mm].mean()),
-            "bias_pred_minus_y": float((t24.latest - t24.y)[mm].mean())}
+            "n": int(mm.sum()),
+            "mae": float(err[mm].mean()),
+            "bias_pred_minus_y": float((t24.latest - t24.y)[mm].mean()),
+        }
     out["data_span"] = {"first": grid.t0.isoformat(), "last": grid.t_last.isoformat()}
     return out
 
 
 if __name__ == "__main__":
     import sys
+
     g = Grid(Path(sys.argv[1]))
     r = run(g)
     Path(sys.argv[2]).parent.mkdir(parents=True, exist_ok=True)

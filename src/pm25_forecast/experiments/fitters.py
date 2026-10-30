@@ -32,10 +32,19 @@ def inverse(kind: str, out: np.ndarray, latest: np.ndarray) -> np.ndarray:
 
 def lgb_params(objective: str, leaves: int) -> dict:
     return {
-        "objective": objective, "metric": "l1", "learning_rate": 0.05, "num_leaves": leaves,
-        "min_child_samples": 50, "feature_fraction": 0.9, "seed": MODEL_SEED,
-        "feature_fraction_seed": MODEL_SEED, "bagging_seed": MODEL_SEED, "deterministic": True,
-        "force_row_wise": True, "verbosity": -1, "num_threads": 8,
+        "objective": objective,
+        "metric": "l1",
+        "learning_rate": 0.05,
+        "num_leaves": leaves,
+        "min_child_samples": 50,
+        "feature_fraction": 0.9,
+        "seed": MODEL_SEED,
+        "feature_fraction_seed": MODEL_SEED,
+        "bagging_seed": MODEL_SEED,
+        "deterministic": True,
+        "force_row_wise": True,
+        "verbosity": -1,
+        "num_threads": 8,
     }
 
 
@@ -44,8 +53,13 @@ def lgb_fit_es(params, x, y, xv, yv, names, cat, cap=400):
     FIT_COUNT["lgbm"] += 1
     ds = lgb.Dataset(x, label=y, feature_name=names, categorical_feature=cat, free_raw_data=False)
     dv = lgb.Dataset(xv, label=yv, reference=ds)
-    b = lgb.train(params, ds, num_boost_round=cap, valid_sets=[dv],
-                  callbacks=[lgb.early_stopping(30, verbose=False)])
+    b = lgb.train(
+        params,
+        ds,
+        num_boost_round=cap,
+        valid_sets=[dv],
+        callbacks=[lgb.early_stopping(30, verbose=False)],
+    )
     return b, max(20, b.best_iteration)
 
 
@@ -76,7 +90,7 @@ class Ridge:
             cols.append(z[:, None])
             if self.miss_cols[j]:
                 cols.append(miss.astype(float)[:, None])
-        return np.hstack([np.ones((len(x), 1))] + cols)
+        return np.hstack([np.ones((len(x), 1)), *cols])
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         return self._design(x) @ self.w

@@ -46,7 +46,7 @@ class Grid:
         self.n = int((self.t_last - self.t0) / timedelta(hours=1)) + 1
         self.values = {s: np.full(self.n, np.nan) for s in STATIONS}
         self.source = {s: np.zeros(self.n, dtype=np.int8) for s in STATIONS}  # 1 openaq 2 air4thai
-        for (st, ts, v, src), t in zip(rows, all_ts, strict=True):
+        for (st, _ts, v, src), t in zip(rows, all_ts, strict=True):
             if not np.isfinite(v) or v < 0 or st not in self.values:
                 continue
             i = int((t - self.t0) / timedelta(hours=1))
@@ -61,8 +61,12 @@ class Grid:
 
 
 def day_block_ci(
-    diff: np.ndarray, days: np.ndarray, n_boot: int = 10000, seed: int = BOOT_SEED,
-    block: int = 1, level: float = 0.95,
+    diff: np.ndarray,
+    days: np.ndarray,
+    n_boot: int = 10000,
+    seed: int = BOOT_SEED,
+    block: int = 1,
+    level: float = 0.95,
 ) -> tuple[float, float, float]:
     """Mean paired difference with percentile CI from a block bootstrap over target days.
 

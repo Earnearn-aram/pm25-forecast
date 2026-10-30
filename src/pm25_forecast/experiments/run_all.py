@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import warnings
 import platform
 import sys
 import time
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,7 +25,13 @@ from . import eda
 from .common import BOOT_SEED, EXPECTED_SHA, HIGH, STATIONS, Grid
 from .dataset import ALL_FEATURES, BKK, SET_FEATURES, build_table
 from .fitters import (
-    FIT_COUNT, forward, inverse, lgb_fit_es, lgb_params, lgb_refit, ridge_fit,
+    FIT_COUNT,
+    forward,
+    inverse,
+    lgb_fit_es,
+    lgb_params,
+    lgb_refit,
+    ridge_fit,
 )
 
 HORIZONS = (6, 12, 24)
@@ -33,9 +39,23 @@ SETS = ("A", "B", "D", "E")
 KINDS = ("direct", "resid", "logratio")
 LGB_GRID = [(o, nl) for o in ("l2", "l1") for nl in (7, 31)]
 ALPHAS = (0.1, 1.0, 10.0, 100.0)
-CANDS = ("seasonal", "current", "smooth", "ridge", "lgbm_direct", "lgbm_resid", "ens", "shrink",
-         "global", "global_id")
-GROUPS = {"HOLDOUT": ["HOLDOUT"], "REGIME_B": ["F4", "R1", "R2", "R3"], "REGIME_A": ["F1", "F2", "F3"]}
+CANDS = (
+    "seasonal",
+    "current",
+    "smooth",
+    "ridge",
+    "lgbm_direct",
+    "lgbm_resid",
+    "ens",
+    "shrink",
+    "global",
+    "global_id",
+)
+GROUPS = {
+    "HOLDOUT": ["HOLDOUT"],
+    "REGIME_B": ["F4", "R1", "R2", "R3"],
+    "REGIME_A": ["F1", "F2", "F3"],
+}
 
 
 def d(y, m, dd):
@@ -46,24 +66,71 @@ def make_runs(grid: Grid, test_start_idx: int):
     ix = grid.idx
     end = grid.n + 10**6
     return [
-        dict(name="F1", B=ix(d(2025, 12, 31)), t0=ix(d(2026, 1, 1)), t1=ix(d(2026, 2, 12)), vd=45),
-        dict(name="F2", B=ix(d(2026, 3, 31)), t0=ix(d(2026, 4, 1)), t1=ix(d(2026, 5, 13)), vd=45),
-        dict(name="F3", B=ix(d(2026, 5, 31)), t0=ix(d(2026, 6, 1)), t1=ix(d(2026, 7, 13)), vd=45),
-        dict(name="F4", B=ix(d(2026, 7, 31)), t0=ix(d(2026, 8, 1)), t1=ix(d(2026, 9, 12)), vd=45),
-        dict(name="R1", B=ix(d(2026, 9, 1)), t0=ix(d(2026, 9, 1)), t1=ix(d(2026, 9, 22)), vd=10,
-             native=True),
-        dict(name="R2", B=ix(d(2026, 9, 22)), t0=ix(d(2026, 9, 22)), t1=ix(d(2026, 10, 13)), vd=10,
-             native=True),
-        dict(name="R3", B=ix(d(2026, 10, 13)), t0=ix(d(2026, 10, 13)), t1=end, vd=10, native=True),
-        dict(name="HOLDOUT", B=test_start_idx, t0=test_start_idx, t1=end, vd=45),
+        {
+            "name": "F1",
+            "B": ix(d(2025, 12, 31)),
+            "t0": ix(d(2026, 1, 1)),
+            "t1": ix(d(2026, 2, 12)),
+            "vd": 45,
+        },
+        {
+            "name": "F2",
+            "B": ix(d(2026, 3, 31)),
+            "t0": ix(d(2026, 4, 1)),
+            "t1": ix(d(2026, 5, 13)),
+            "vd": 45,
+        },
+        {
+            "name": "F3",
+            "B": ix(d(2026, 5, 31)),
+            "t0": ix(d(2026, 6, 1)),
+            "t1": ix(d(2026, 7, 13)),
+            "vd": 45,
+        },
+        {
+            "name": "F4",
+            "B": ix(d(2026, 7, 31)),
+            "t0": ix(d(2026, 8, 1)),
+            "t1": ix(d(2026, 9, 12)),
+            "vd": 45,
+        },
+        {
+            "name": "R1",
+            "B": ix(d(2026, 9, 1)),
+            "t0": ix(d(2026, 9, 1)),
+            "t1": ix(d(2026, 9, 22)),
+            "vd": 10,
+            "native": True,
+        },
+        {
+            "name": "R2",
+            "B": ix(d(2026, 9, 22)),
+            "t0": ix(d(2026, 9, 22)),
+            "t1": ix(d(2026, 10, 13)),
+            "vd": 10,
+            "native": True,
+        },
+        {
+            "name": "R3",
+            "B": ix(d(2026, 10, 13)),
+            "t0": ix(d(2026, 10, 13)),
+            "t1": end,
+            "vd": 10,
+            "native": True,
+        },
+        {"name": "HOLDOUT", "B": test_start_idx, "t0": test_start_idx, "t1": end, "vd": 45},
     ]
 
 
 def split(tab, run):
     o, t = tab.origin_idx, tab.target_idx
     vs = run["B"] - run["vd"] * 24
-    m = {"train": t < run["B"], "fit": t < vs, "val": (o >= vs) & (t < run["B"]),
-         "test": (o >= run["t0"]) & (o < run["t1"])}
+    m = {
+        "train": t < run["B"],
+        "fit": t < vs,
+        "val": (o >= vs) & (t < run["B"]),
+        "test": (o >= run["t0"]) & (o < run["t1"]),
+    }
     if run.get("native"):
         m["val"] &= tab.source_target == 2
     return m
@@ -81,15 +148,15 @@ def search_horizon(tab, run, h, log):
 
     def upd(fam, val_mae, vpred, meta):
         if fam not in best or val_mae < best[fam]["val_mae"]:
-            best[fam] = dict(val_mae=val_mae, vpred=vpred, meta=meta)
+            best[fam] = {"val_mae": val_mae, "vpred": vpred, "meta": meta}
 
     lat_v, y_v = tab.latest[m["val"]], tab.y[m["val"]]
     for var in variants:
         rf = (tab.source_target == 2) if var == "bonly" else np.ones(len(tab.y), bool)
         extra = ["src_air4thai"] if var == "ab" else []
-        fit_m, tr_m = m["fit"] & rf, m["train"] & rf
+        fit_m, _tr_m = m["fit"] & rf, m["train"] & rf
         if fit_m.sum() < 300 or m["val"].sum() < 50:
-            log(f"  {run['name']} +{h}: skip variant {var} (fit={fit_m.sum()}, val={m['val'].sum()})")
+            log(f"  {run['name']} +{h}: skip {var} (fit={fit_m.sum()}, val={m['val'].sum()})")
             continue
         for sname in SETS:
             names = SET_FEATURES[sname] + extra
@@ -99,29 +166,64 @@ def search_horizon(tab, run, h, log):
                 yt = forward(kind, tab.y, tab.latest)
                 fam = "lgbm_direct" if kind == "direct" else "lgbm_resid"
                 for obj, nl in LGB_GRID:
-                    b, it = lgb_fit_es(lgb_params(obj, nl), X[fit_m], yt[fit_m], X[m["val"]],
-                                       yt[m["val"]], names, cat)
+                    b, it = lgb_fit_es(
+                        lgb_params(obj, nl),
+                        X[fit_m],
+                        yt[fit_m],
+                        X[m["val"]],
+                        yt[m["val"]],
+                        names,
+                        cat,
+                    )
                     vp = inverse(kind, b.predict(X[m["val"]], num_iteration=it), lat_v)
-                    upd(fam, mae(vp, y_v), vp,
-                        dict(model="lgbm", var=var, set=sname, kind=kind, obj=obj, leaves=nl,
-                             iters=it, names=names, cat=cat))
+                    upd(
+                        fam,
+                        mae(vp, y_v),
+                        vp,
+                        {
+                            "model": "lgbm",
+                            "var": var,
+                            "set": sname,
+                            "kind": kind,
+                            "obj": obj,
+                            "leaves": nl,
+                            "iters": it,
+                            "names": names,
+                            "cat": cat,
+                        },
+                    )
                 for al in ALPHAS:
                     r = ridge_fit(X[fit_m], yt[fit_m], names, al)
                     vp = inverse(kind, r.predict(X[m["val"]]), lat_v)
-                    upd("ridge", mae(vp, y_v), vp,
-                        dict(model="ridge", var=var, set=sname, kind=kind, alpha=al, names=names))
+                    upd(
+                        "ridge",
+                        mae(vp, y_v),
+                        vp,
+                        {
+                            "model": "ridge",
+                            "var": var,
+                            "set": sname,
+                            "kind": kind,
+                            "alpha": al,
+                            "names": names,
+                        },
+                    )
     # simple smoothers on validation (no fitting beyond choosing the variant)
     f = tab.feats
-    sm_opts = {"latest": lambda s: s["pm25_latest"], "mean3": lambda s: s["mean3"],
-               "mean6": lambda s: s["mean6"], "mean24": lambda s: s["mean24"]}
+    sm_opts = {
+        "latest": lambda s: s["pm25_latest"],
+        "mean3": lambda s: s["mean3"],
+        "mean6": lambda s: s["mean6"],
+        "mean24": lambda s: s["mean24"],
+    }
     for beta in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
-        sm_opts[f"shrink_mean24_{beta}"] = (
-            lambda s, b=beta: s["pm25_latest"] + b * (s["mean24"] - s["pm25_latest"])
+        sm_opts[f"shrink_mean24_{beta}"] = lambda s, b=beta: (
+            s["pm25_latest"] + b * (s["mean24"] - s["pm25_latest"])
         )
     vfeats = {k: v[m["val"]] for k, v in f.items()}
     for nm, fn in sm_opts.items():
         vp = fn(vfeats)
-        upd("smooth", mae(vp, y_v), vp, dict(model="smooth", name=nm))
+        upd("smooth", mae(vp, y_v), vp, {"model": "smooth", "name": nm})
     return best, m
 
 
@@ -141,15 +243,21 @@ def predict_test(best, tab, m, run, h):
                 b = float(nm.rsplit("_", 1)[1])
                 out[fam] = fs["pm25_latest"] + b * (fs["mean24"] - fs["pm25_latest"])
             else:
-                out[fam] = fs[nm]
+                out[fam] = fs["pm25_latest" if nm == "latest" else nm]
             continue
         rf = (tab.source_target == 2) if meta["var"] == "bonly" else np.ones(len(tab.y), bool)
         tr = m["train"] & rf
         X = tab.X(meta["names"])
         yt = forward(meta["kind"], tab.y, tab.latest)
         if meta["model"] == "lgbm":
-            bst = lgb_refit(lgb_params(meta["obj"], meta["leaves"]), X[tr], yt[tr],
-                            meta["names"], meta["cat"], meta["iters"])
+            bst = lgb_refit(
+                lgb_params(meta["obj"], meta["leaves"]),
+                X[tr],
+                yt[tr],
+                meta["names"],
+                meta["cat"],
+                meta["iters"],
+            )
             out[fam] = inverse(meta["kind"], bst.predict(X[te]), lat_t)
         else:
             r = ridge_fit(X[tr], yt[tr], meta["names"], meta["alpha"])
@@ -168,8 +276,15 @@ def predict_test(best, tab, m, run, h):
     names = ["pm25_latest", "pm25_t24"]
     Xc = tab.X(names)
     tr = m["train"]
-    cp = {"objective": "regression", "metric": "mae", "verbosity": -1, "seed": 20261029,
-          "feature_fraction_seed": 20261029, "bagging_seed": 20261029, "num_threads": 1}
+    cp = {
+        "objective": "regression",
+        "metric": "mae",
+        "verbosity": -1,
+        "seed": 20261029,
+        "feature_fraction_seed": 20261029,
+        "bagging_seed": 20261029,
+        "num_threads": 1,
+    }
     bst = lgb.train(cp, lgb.Dataset(Xc[tr], label=tab.y[tr], feature_name=names), 200)
     FIT_COUNT["lgbm_refit"] += 1
     out["current"] = np.maximum(0.0, bst.predict(Xc[te]))
@@ -214,19 +329,33 @@ def global_search(tabs, run, log):
                     vp = inverse(kind, b.predict(xv, num_iteration=it), lv)
                     v = mae(vp, ytrue)
                     if best is None or v < best["val_mae"]:
-                        best = dict(val_mae=v, var=var, kind=kind, obj=obj, leaves=nl, iters=it,
-                                    names=names, cat=cat)
+                        best = {
+                            "val_mae": v,
+                            "var": var,
+                            "kind": kind,
+                            "obj": obj,
+                            "leaves": nl,
+                            "iters": it,
+                            "names": names,
+                            "cat": cat,
+                        }
         if best is None:
             continue
         xt, yt_, _, _ = stack(best["var"], "train", best["names"][:-1], best["kind"])
-        bst = lgb_refit(lgb_params(best["obj"], best["leaves"]), xt, yt_, best["names"],
-                        best["cat"], best["iters"])
+        bst = lgb_refit(
+            lgb_params(best["obj"], best["leaves"]),
+            xt,
+            yt_,
+            best["names"],
+            best["cat"],
+            best["iters"],
+        )
         preds = {}
         for h in HORIZONS:
             tab, te = tabs[h], masks[h]["test"]
             x = np.column_stack([tab.X(best["names"][:-1])[te], np.full(te.sum(), float(h))])
             preds[h] = inverse(best["kind"], bst.predict(x), tab.latest[te])
-        res[gv] = dict(preds=preds, meta={k: v for k, v in best.items() if k != "names"})
+        res[gv] = {"preds": preds, "meta": {k: v for k, v in best.items() if k != "names"}}
         log(f"  {run['name']} {gv}: {res[gv]['meta']}")
     return res
 
@@ -248,9 +377,14 @@ def boot_draws(diff, days, n_boot, seed=BOOT_SEED):
 
 def ci_pack(diff, days, n_boot, q_bonf=None):
     dr = boot_draws(diff, days, n_boot)
-    res = {"n": int(len(diff)), "days": int(len(np.unique(days))), "diff": float(diff.mean()),
-           "lo": float(np.quantile(dr, 0.025)), "hi": float(np.quantile(dr, 0.975)),
-           "p": float((min((dr <= 0).sum(), (dr >= 0).sum()) * 2 + 1) / (n_boot + 1))}
+    res = {
+        "n": len(diff),
+        "days": len(np.unique(days)),
+        "diff": float(diff.mean()),
+        "lo": float(np.quantile(dr, 0.025)),
+        "hi": float(np.quantile(dr, 0.975)),
+        "p": float((min((dr <= 0).sum(), (dr >= 0).sum()) * 2 + 1) / (n_boot + 1)),
+    }
     if q_bonf:
         res["lo_bonf"] = float(np.quantile(dr, q_bonf / 2))
         res["hi_bonf"] = float(np.quantile(dr, 1 - q_bonf / 2))
@@ -269,8 +403,12 @@ def holm(ps):
 
 def metrics(y, p, lat):
     e = p - y
-    out = {"n": int(len(y)), "mae": float(np.abs(e).mean()), "rmse": float(np.sqrt((e**2).mean())),
-           "bias": float(e.mean())}
+    out = {
+        "n": len(y),
+        "mae": float(np.abs(e).mean()),
+        "rmse": float(np.sqrt((e**2).mean())),
+        "bias": float(e.mean()),
+    }
     hi = y > HIGH
     out["high_n"] = int(hi.sum())
     out["high_mae"] = float(np.abs(e[hi]).mean()) if hi.any() else None
@@ -288,7 +426,7 @@ def audit(grid: Grid, tabs, seed=7, n=300):
     out = {}
     for h, tab in tabs.items():
         rows = rng.choice(len(tab.y), size=n, replace=False)
-        worst: dict = {k: 0.0 for k in ALL_FEATURES}
+        worst: dict = dict.fromkeys(ALL_FEATURES, 0.0)
         mism = 0
         for r in rows:
             s, o = str(tab.station[r]), int(tab.origin_idx[r])
@@ -322,8 +460,12 @@ def audit(grid: Grid, tabs, seed=7, n=300):
             exp["month_sin"] = np.sin(2 * np.pi * (lt.month - 1) / 12)
             exp["month_cos"] = np.cos(2 * np.pi * (lt.month - 1) / 12)
             exp["station_id"] = float(STATIONS.index(s))
-            for nm, back in (("pm25_t24", 24), ("pm25_t48", 48), ("pm25_t72", 72),
-                             ("pm25_t168", 168)):
+            for nm, back in (
+                ("pm25_t24", 24),
+                ("pm25_t48", 48),
+                ("pm25_t72", 72),
+                ("pm25_t168", 168),
+            ):
                 exp[nm] = get(s, t - back)
             for w in (3, 6, 24):
                 exp[f"mean{w}"], exp[f"max{w}"], exp[f"std{w}"] = win(s, w)
@@ -341,26 +483,33 @@ def audit(grid: Grid, tabs, seed=7, n=300):
                 dd = abs(a - b) if not (np.isnan(a) or np.isnan(b)) else np.inf
                 worst[k] = max(worst[k], dd)
                 mism += dd > 1e-9
-        out[f"+{h}"] = {"rows": n, "mismatching_cells": int(mism),
-                        "max_abs_diff": {k: float(v) for k, v in worst.items()},
-                        "t24_all_nan_at_h24": bool(
-                            h != 24 or np.isnan(tab.feats["pm25_t24"]).all())}
+        out[f"+{h}"] = {
+            "rows": n,
+            "mismatching_cells": int(mism),
+            "max_abs_diff": {k: float(v) for k, v in worst.items()},
+            "t24_all_nan_at_h24": bool(h != 24 or np.isnan(tab.feats["pm25_t24"]).all()),
+        }
     return out
 
 
-def leaky_control(tabs, all_runs, grid):
+def leaky_control(tabs, runs, grid):
     tab = tabs[24]
-    run = [r for r in runs if r["name"] == "HOLDOUT"][0]
+    run = next(r for r in runs if r["name"] == "HOLDOUT")
     m = split(tab, run)
     names = SET_FEATURES["D"] + ["leak_nbr_target"]
     X = tab.X(names)
-    b = lgb_refit(lgb_params("l2", 31), X[m["train"]], tab.y[m["train"]], names, ["station_id"], 200)
+    b = lgb_refit(
+        lgb_params("l2", 31), X[m["train"]], tab.y[m["train"]], names, ["station_id"], 200
+    )
     p = np.maximum(0, b.predict(X[m["test"]]))
     y, lat = tab.y[m["test"]], tab.latest[m["test"]]
     diff = np.abs(p - y) - np.abs(lat - y)
-    return {"description": "set D + neighbours' mean reading AT the target hour (future info)",
-            "mae": mae(p, y), "persistence_mae": mae(lat, y),
-            "paired": ci_pack(diff, tab.target_day[m["test"]], 5000)}
+    return {
+        "description": "set D + neighbours' mean reading AT the target hour (future info)",
+        "mae": mae(p, y),
+        "persistence_mae": mae(lat, y),
+        "paired": ci_pack(diff, tab.target_day[m["test"]], 5000),
+    }
 
 
 def main(argv=None):
@@ -378,10 +527,15 @@ def main(argv=None):
 
     grid = Grid(args.database)
     info = {
-        "snapshot_sha256": grid.sha, "matches_kan15_snapshot": grid.sha == EXPECTED_SHA,
-        "python": sys.version.split()[0], "platform": platform.platform(),
-        "numpy": np.__version__, "scipy": scipy.__version__, "lightgbm": lgb.__version__,
-        "duckdb": duckdb.__version__, "boot_seed": BOOT_SEED,
+        "snapshot_sha256": grid.sha,
+        "matches_kan15_snapshot": grid.sha == EXPECTED_SHA,
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "numpy": np.__version__,
+        "scipy": scipy.__version__,
+        "lightgbm": lgb.__version__,
+        "duckdb": duckdb.__version__,
+        "boot_seed": BOOT_SEED,
     }
     log(f"snapshot {grid.sha} matches={info['matches_kan15_snapshot']}")
     tabs = {h: build_table(grid, h) for h in HORIZONS}
@@ -410,24 +564,43 @@ def main(argv=None):
             for gv, g in gl.items():
                 preds[gv] = g["preds"][h]
             te = m["test"]
-            rec = dict(y=tab.y[te], lat=tab.latest[te], station=tab.station[te],
-                       day=tab.target_day[te], src=tab.source_target[te],
-                       local=[grid.time(int(i)) + BKK for i in tab.target_idx[te]], preds=preds)
+            rec = {
+                "y": tab.y[te],
+                "lat": tab.latest[te],
+                "station": tab.station[te],
+                "day": tab.target_day[te],
+                "src": tab.source_target[te],
+                "local": [grid.time(int(i)) + BKK for i in tab.target_idx[te]],
+                "preds": preds,
+            }
             store[(run["name"], h)] = rec
             selections[f"{run['name']}/+{h}"] = {
                 fam: {k: v for k, v in b["meta"].items() if k not in ("names", "cat")}
                 | {"val_mae": b["val_mae"], "names": b["meta"].get("names")}
                 for fam, b in best.items()
             } | {"global": {k: v["meta"] for k, v in gl.items()}}
-            log(f"{run['name']} +{h}: n_test={int(te.sum())} persistence MAE "
+            log(
+                f"{run['name']} +{h}: n_test={int(te.sum())} persistence MAE "
                 f"{mae(rec['lat'], rec['y']):.3f}  "
-                + "  ".join(f"{c}={mae(np.nan_to_num(p, nan=0)[np.isfinite(p)], rec['y'][np.isfinite(p)]):.3f}"
-                            for c, p in preds.items() if c in CANDS))
+                + "  ".join(
+                    f"{c}={mae(p[np.isfinite(p)], rec['y'][np.isfinite(p)]):.3f}"
+                    for c, p in preds.items()
+                    if c in CANDS
+                )
+            )
 
     # ---------------- statistics
-    results: dict = {"info": info, "audit": aud, "selections": selections,
-                     "runs": {r["name"]: {k: (int(v) if isinstance(v, (int, np.integer)) else v)
-                                          for k, v in r.items()} for r in runs}}
+    results: dict = {
+        "info": info,
+        "audit": aud,
+        "selections": selections,
+        "runs": {
+            r["name"]: {
+                k: (int(v) if isinstance(v, (int, np.integer)) else v) for k, v in r.items()
+            }
+            for r in runs
+        },
+    }
     claims = []
     per_run: dict = {}
     nclaim = len(CANDS) * len(HORIZONS) * len(GROUPS)
@@ -437,10 +610,15 @@ def main(argv=None):
         recs = [store[(r, h)] for r in runs_in if (r, h) in store]
         if not recs:
             return None
-        cat = {k: np.concatenate([r[k] for r in recs]) for k in ("y", "lat", "station", "day", "src")}
+        cat = {
+            k: np.concatenate([r[k] for r in recs]) for k in ("y", "lat", "station", "day", "src")
+        }
         cat["local"] = [x for r in recs for x in r["local"]]
-        cat["preds"] = {c: np.concatenate([r["preds"][c] for r in recs if c in r["preds"]])
-                        for c in CANDS if all(c in r["preds"] for r in recs)}
+        cat["preds"] = {
+            c: np.concatenate([r["preds"][c] for r in recs if c in r["preds"]])
+            for c in CANDS
+            if all(c in r["preds"] for r in recs)
+        }
         return cat
 
     for h in HORIZONS:
@@ -474,7 +652,8 @@ def main(argv=None):
                 # point-estimate difference in the two high-pollution subsets (target / latest)
                 for nm, mk in (("high_by_target", y > HIGH), ("high_by_latest", lat > HIGH)):
                     r[f"vs_persistence_{nm}"] = (
-                        ci_pack(diff[mk], days[mk], 10000) if mk.sum() >= 10 else None)
+                        ci_pack(diff[mk], days[mk], 10000) if mk.sum() >= 10 else None
+                    )
                 if c != "current" and cur is not None:
                     dc = np.abs(p - P["y"]) - np.abs(cur - P["y"])
                     okc = np.isfinite(dc)
@@ -492,7 +671,9 @@ def main(argv=None):
                         continue
                     ok = np.isfinite(rec["preds"][c])
                     tot += 1
-                    wins += mae(rec["preds"][c][ok], rec["y"][ok]) < mae(rec["lat"][ok], rec["y"][ok])
+                    wins += mae(rec["preds"][c][ok], rec["y"][ok]) < mae(
+                        rec["lat"][ok], rec["y"][ok]
+                    )
                 stab[c] = f"{wins}/{tot}"
             gr["stability_runs_beating_persistence"] = stab
             group_res[f"{gname}/+{h}"] = gr
@@ -512,8 +693,7 @@ def main(argv=None):
         loc = P["local"]
         hg = np.array([x.hour // 6 for x in loc])
         mo = np.array([x.strftime("%Y-%m") for x in loc])
-        views = {"station": P["station"], "hour_group_local": hg, "month": mo,
-                 "source": P["src"]}
+        views = {"station": P["station"], "hour_group_local": hg, "month": mo, "source": P["src"]}
         b = {}
         for vname, arr in views.items():
             b[vname] = {}

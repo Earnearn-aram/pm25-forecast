@@ -22,12 +22,27 @@ BKK = timedelta(hours=7)  # local-time shift used only for calendar features / E
 SET_FEATURES: dict[str, list[str]] = {}
 _A = ["pm25_latest"]
 _B = [
-    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos", "station_id",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "month_sin",
+    "month_cos",
+    "station_id",
 ]
 _C = ["pm25_t24", "pm25_t48", "pm25_t72", "pm25_t168"]
 _D = [
-    "mean3", "max3", "std3", "mean6", "max6", "std6", "mean24", "max24", "std24",
-    "trend3", "trend6",
+    "mean3",
+    "max3",
+    "std3",
+    "mean6",
+    "max6",
+    "std6",
+    "mean24",
+    "max24",
+    "std24",
+    "trend3",
+    "trend6",
 ]
 _E = ["nbr_latest_mean", "nbr_mean24"]
 EXTRA = ["src_air4thai", "leak_nbr_target"]
@@ -59,9 +74,18 @@ class Table:
 
     def mask(self, m: np.ndarray) -> Table:
         return Table(
-            self.station[m], self.origin_idx[m], self.target_idx[m], self.y[m], self.latest[m],
-            {k: v[m] for k, v in self.feats.items()}, self.target_day[m], self.is_train[m],
-            self.is_test[m], self.source_target[m], self.test_start_idx, self.grid,
+            self.station[m],
+            self.origin_idx[m],
+            self.target_idx[m],
+            self.y[m],
+            self.latest[m],
+            {k: v[m] for k, v in self.feats.items()},
+            self.target_day[m],
+            self.is_train[m],
+            self.is_test[m],
+            self.source_target[m],
+            self.test_start_idx,
+            self.grid,
         )
 
 
@@ -132,7 +156,12 @@ def build_table(grid: Grid, horizon: int = HORIZON) -> Table:
         f["dow_sin"], f["dow_cos"] = np.sin(2 * np.pi * dow / 7), np.cos(2 * np.pi * dow / 7)
         f["month_sin"], f["month_cos"] = np.sin(2 * np.pi * mon / 12), np.cos(2 * np.pi * mon / 12)
         f["station_id"] = np.full(len(o), float(si))
-        for name, back in (("pm25_t24", 24), ("pm25_t48", 48), ("pm25_t72", 72), ("pm25_t168", 168)):
+        for name, back in (
+            ("pm25_t24", 24),
+            ("pm25_t48", 48),
+            ("pm25_t72", 72),
+            ("pm25_t168", 168),
+        ):
             idx = t - back
             f[name] = _at(a, np.where(idx <= o - 1, idx, -1))  # as-of: reading must be <= r
         for w in (3, 6, 24):
@@ -151,7 +180,7 @@ def build_table(grid: Grid, horizon: int = HORIZON) -> Table:
             f["nbr_mean24"] = np.where(np.isnan(nm).all(1), np.nan, np.nanmean(nm, 1))
         # flag: the latest reading comes from the air4thai feed (live feed = 1)
         f["src_air4thai"] = (srclat[s][keep] == 2).astype(float)
-        # DELIBERATELY LEAKY control (never a candidate): neighbours' mean reading at the target hour
+        # DELIBERATELY LEAKY control (never a candidate): neighbours' reading at the target hour
         nt = np.column_stack([_at(grid.values[x], t) for x in others])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -172,8 +201,16 @@ def build_table(grid: Grid, horizon: int = HORIZON) -> Table:
     base_day = int(grid.t0.replace(hour=0).timestamp() // 86400)
     day = base_day + (t_all + grid.t0.hour) // 24
     return Table(
-        station=take(cat(st_l)), origin_idx=o_all, target_idx=t_all, y=take(cat(y_l)),
-        latest=take(cat(l_l)), feats={k: take(cat(v)) for k, v in cols.items()},
-        target_day=day, is_train=t_all < test_start_idx, is_test=o_all >= test_start_idx,
-        source_target=take(cat(src_l)), test_start_idx=test_start_idx, grid=grid,
+        station=take(cat(st_l)),
+        origin_idx=o_all,
+        target_idx=t_all,
+        y=take(cat(y_l)),
+        latest=take(cat(l_l)),
+        feats={k: take(cat(v)) for k, v in cols.items()},
+        target_day=day,
+        is_train=t_all < test_start_idx,
+        is_test=o_all >= test_start_idx,
+        source_target=take(cat(src_l)),
+        test_start_idx=test_start_idx,
+        grid=grid,
     )
