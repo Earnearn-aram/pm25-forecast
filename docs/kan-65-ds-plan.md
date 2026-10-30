@@ -299,3 +299,75 @@ candidate that Amendment 2 already defined as "best candidate" and recomputes th
    reading > 37.5). The report will state the outcome even if it fails and will separately discuss that
    conditioning on the realised outcome penalises any shrinking predictor mechanically; that
    discussion does not change the pre-registered verdict.
+
+---
+
+# Amendment 5: redesign after independent review (WRITTEN AFTER SEEING RESULTS)
+
+Honesty statement: this amendment is written after the v1 results (PR #51, report v1) were seen
+and after an independent reviewer reproduced them and found design problems. Anything below that
+was chosen with knowledge of v1 results is flagged "informed by v1". The v1 harness and its outputs
+stay in the repository (`run_all.py`, `out/kan65/`) for transparency; v2 is a separate entry point
+(`run_review.py`, `out/kan65_v2/`). Nothing is tuned on a test span.
+
+1. **No overlapping test windows.** v1 folds F4 and R1 overlapped (1-11 Sep) and F4/R1-R3 lay inside
+   the HOLDOUT span. v2 regime-B folds are consecutive, non-overlapping, regime-B-native windows:
+   G1 train targets < 2026-08-22, test origins 08-22..09-11; G2 train < 09-12, test 09-12..10-02;
+   G3 train < 10-03, test 10-03..end (10-27 21:00). Regime-A folds F1-F3 are unchanged (they do not
+   overlap). F4 and R1-R3 are dropped. The script asserts that no (station, origin) is tested twice
+   within a pooled group and reports unique station-hour and day counts. The KAN-15 HOLDOUT
+   (origins 07-10 10:00 to the end) is kept as the second headline group but it **overlaps** G1-G3
+   in time, so HOLDOUT and the regime-B pool are NOT independent evidence; they are two views of the
+   same ~90 days of regime B (the HOLDOUT additionally tests training on regime A only).
+2. **7-day-block bootstrap** (blocks of 7 calendar target days, seed 20261030, 40,000 draws for family
+   claims) is run alongside the 1-day block for every headline CI. The decision uses the 7-day
+   block (the more conservative, as consecutive days are dependent); the 1-day CI is shown for
+   comparability with KAN-64. Per-run CIs (3 weeks) use 1-day blocks only and are descriptive.
+3. **High-pollution rule (d) replaced.** Selecting hours by the realised target (> 37.5) conditions on
+   the outcome and mechanically penalises any shrinking predictor; v1 rule (d) is withdrawn.
+   New rule uses forecast-time information: subset = hours whose latest reading (= the persistence
+   forecast) is > 37.5. Testable only if the subset has >= 200 station-hours and >= 10 distinct target
+   days in the group; else the result is "untestable" (not pass, not fail). If testable: FAIL if the
+   7-day-block 95% CI of (candidate minus persistence) MAE lies entirely above zero, otherwise PASS
+   with the CI shown. Event-level metric, defined now without looking at onsets by group: an
+   **onset** at horizon h is a station-hour whose realised target exceeds the latest reading by
+   >= 15 ug/m3; a candidate **catches** it if its forecast exceeds the latest reading by >= 7.5 ug/m3
+   (half the event size). Reported per group: number of onsets (and distinct days), share caught
+   (7-day-block CI), false-alarm share among non-onsets (forecast rise >= 7.5), mean error and MAE at
+   onsets vs persistence. Persistence catches none by construction. If onsets < 30 in a group the
+   event metric is "untestable". With ~60 regime-B test days the safeguard may be untestable
+   there; if so, the report says so and the recommendation is capped at "shadow only".
+4. **Selection uses same-regime validation.** ML models in v2 use FIXED pre-declared configurations
+   (no tuning at all, see 5), so the only selection left is the smoother parameter beta:
+   regime-B folds G1-G3 choose beta on the last 10 days of their regime-B training data; regime-A
+   folds choose beta on the last 45 days of regime-A training data. The HOLDOUT has **no
+   regime-B validation data before its test start** (regime B begins 2026-07-29), so selection is
+   impossible there: beta is fixed at 0.5 (a priori midpoint; informed by v1 where chosen betas
+   were 0.3-0.7) and ML models use their fixed configurations. The regime-B training variant is
+   fixed: regime A+B rows with a `src_air4thai` flag (flag=1 as live); the B-only variant is shown as a
+   descriptive sensitivity.
+5. **Small pre-declared candidate set, fixed grids.** Candidates: persistence (reference); smoother
+   (latest + beta*(mean24 - latest), beta in {0, 0.1, ..., 0.9}, 0 = persistence); LightGBM direct
+   (feature set D, l1 objective, 7 leaves, lr 0.05, 150 rounds, min_child_samples 50, feature_fraction
+   0.9, seed 20261029); LightGBM log-ratio (same config, target log1p(y)-log1p(latest)); ridge (set D,
+   residual target, alpha 10, closed form); current per-horizon LightGBM (KAN-15 params; reference
+   from KAN-64). Descriptive extras outside the family: smoother with fixed beta 0.5, the beta
+   curve, B-only variants, global multi-horizon LightGBM with and without station id (fixed config).
+   **Family for correction:** 5 candidates (smoother, LGBM direct, LGBM log-ratio, ridge, current)
+   x 3 horizons x 2 headline groups (HOLDOUT, unique regime-B pool) = 30 claims; Holm and Bonferroni
+   (0.05/30) are both reported, separately for the 1-day and 7-day block bootstrap. Regime-A pool is
+   descriptive and used for the safeguard. Number of fits is printed by the script; there is no hyper-
+   parameter search besides the beta grid (10 values per run and horizon).
+6. **Smoother evaluated prominently**: beta choice procedure as in 4; table of chosen beta and the
+   test-optimal beta per fold (descriptive only), full beta curve of the paired difference per
+   group, per-fold differences, folds beating persistence, fixed-beta-0.5 version, and the
+   high-pollution and onset results for it.
+7. **Decision rule (v2), for the single headline candidate named in advance as the smoother** (selected
+   a priori on being the lowest-risk, near-parameter-free candidate, informed by v1), and the
+   same rule applied to every other family member for information: at +24 h (a) HOLDOUT 7-day-block
+   Bonferroni(30) CI entirely below zero; (b) unique regime-B pool 7-day-block Bonferroni(30) CI
+   entirely below zero; (c) point MAE below persistence in at least 2 of the 3 regime-B folds;
+   (d) safeguard as in 3 not FAIL in the regime-A pool and, if testable, in the regime-B pool.
+   Verdict states: PROMOTE only if a-d pass AND the safeguard is testable in regime B; "SHADOW"
+   if a-c pass but the regime-B safeguard is untestable; otherwise no gain / more data. This rule is
+   shadow-or-promote advice only: nothing is implemented in this PR.
