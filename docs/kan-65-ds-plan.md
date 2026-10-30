@@ -117,3 +117,105 @@ Targets: direct y, or residual y - persistence (prediction = persistence + model
 Scripts under `src/pm25_forecast/experiments/` (not imported by serving code), run with
 `PYTHONPATH=src` from the repo venv. Fixed seeds as above. All report numbers are produced by those
 scripts into `out/kan65/*.json`; the report quotes them.
+
+---
+
+# Amendment 1 and 2 (written before any model was fitted or scored)
+
+State of knowledge at amendment time: data availability by month (row counts per station-month),
+the source column (openaq to 2026-07-31 16:00 UTC, air4thai from 2026-07-31 17:00 UTC), and a
+sanity check that the persistence MAE on the KAN-15 test pair set at +24 h reproduces 4.4976 with
+10,729 pairs. No candidate model has been fitted. This amendment supersedes the "Split",
+"Models and search" and "Multiplicity" sections wherever they conflict.
+
+## Amendment 1: global multi-horizon model (coordinator request)
+
+Extra family: ONE LightGBM trained on samples stacked over horizons 6/12/24 with numeric `horizon`
+as a feature, in two variants reported separately: G (no station id) and G+id (station id as a
+LightGBM categorical). Hypothesis: sharing structure across horizons/stations helps small data, but
+with near-univariate inputs the gain is negligible and horizon interactions may hurt +6 h.
+Features: set D (+ horizon, and station id only in G+id; station id is also removed from the
+per-horizon sets for the "no id" variants: per-horizon sets B-E include station id as in the table,
+the global G variant excludes it). Evaluated per horizon against persistence AND the current
+per-horizon boosters on the same station-hours. Serving constraint to check (not change):
+`models/serving.py` accepts a multi-horizon bundle of one booster per horizon, or a single-horizon
+bundle, and checks every booster's feature names equal the manifest `feature_list`, and every name
+must be produced by `features.build_features` (only pm25_latest, pm25_same_hour_24h, cams_pm25 now).
+
+## Amendment 2: walk-forward backtest
+
+Harness note: `backtest.py` (KAN-14) is a JSON-input, CAMS-vs-challenger scorer with per-origin
+callbacks, 28-day windows and `available_at` gating; it cannot refit models per fold and CAMS
+history does not exist. I reuse its rules, not its code: common station-hour intersection per
+horizon, no filling of gaps, day-block bootstrap on target days, seeded, no unpaired comparison.
+Deviation: the common pair set is "target present and persistence present" (the KAN-15/64 rule),
+not the intersection with seasonal naive; seasonal naive is compared to persistence on its own
+intersection (its own pairs are a subset), because requiring it would change the headline pair set.
+
+**Folds** (expanding window; train rows need target < boundary B, so a gap of one horizon is left;
+test rows are origins in [B, B + window)); boundaries and windows fixed here:
+
+| Run | Train targets before | Test origins | Note |
+|---|---|---|---|
+| F1 | 2025-12-31 00:00 | 2026-01-01 .. 2026-02-11 (42 d) | dry/haze season |
+| F2 | 2026-03-31 00:00 | 2026-04-01 .. 2026-05-12 | bkp gap 05-19..21 is after window |
+| F3 | 2026-05-31 00:00 | 2026-06-01 .. 2026-07-12 | export has almost no data 2026-07-03..31, so effective ~33 d |
+| F4 | 2026-07-31 00:00 | 2026-08-01 .. 2026-09-11 | air4thai source |
+| F5 | 2026-09-11 00:00 | 2026-09-12 .. 2026-10-27 | air4thai source |
+| HOLDOUT | KAN-15 test_start (2026-07-10 10:00) | origins 2026-07-10 10:00 .. 2026-10-27 21:00 | headline, reported separately |
+
+F4/F5 test origins lie inside the HOLDOUT span, so folds and holdout are not independent. Tuning
+(feature set, target, objective, num_leaves, ridge alpha, and number of rounds) happens only inside
+each run's training period: validation slice = last 45 days of that run's training origins
+(models fit on origins with target before validation start, rounds by early stopping with patience
+30 and cap 600, then refit on full train with the best iteration; ridge/linear has no rounds).
+
+**Candidates, each at +6, +12, +24 h on identical station-hours per run:**
+1 persistence (reference); 2 seasonal naive (reading at target-24 h if servable, i.e. horizon
+< 24; at +24 h the servable form is target-48 h); 3 current per-horizon LightGBM (set A, direct,
+KAN-15 params, 200 rounds, untuned); 4 LightGBM direct, val-selected over set x config; 5 LightGBM
+residual (y minus persistence), val-selected; 6 ridge, val-selected over set x target x alpha;
+7 global G; 8 global G+id (global selected over objective x leaves x target on pooled-horizon val
+MAE). "Best candidate" at each run/horizon = lowest validation MAE among 4, 5, 6 (8 for global
+variants shown separately); it is determined without looking at test.
+
+**Grid replaced by a smaller one** (early stopping replaces rounds/learning rate): learning rate 0.05,
+objective {l2, l1} x num_leaves {7, 31}, min_child_samples 50, feature_fraction 0.9, deterministic,
+seed 20261029. Per run and horizon: 5 sets x 2 targets x 4 configs = 40 LightGBM fits + 40 ridge
+(5 sets x 2 targets x 4 alphas). Global: 2 objectives x 2 leaves x 2 targets x 2 variants = 16 fits
+per run. Total tuned configs: (80 x 3 + 16) x 6 runs = 1,536, plus 3 untuned current-model fits
+per run. Set C additionally includes `pm25_t24` (reading at target-24 h, always NaN at +24 h by
+the as-of rule, informative at +6/+12 h). Features are built per horizon with the same reference
+time r = origin - 1 h.
+
+**Reporting**: per run and pooled-over-folds (F1-F5; target days resampled jointly in one pool) and
+HOLDOUT, per horizon: MAE (primary), RMSE, mean signed error (bias), MAE on high hours (target > 37.5),
+MAE in three bands (<= 15, 15-37.5, > 37.5), and for the headline +24 h candidate also per station,
+per local hour-of-day group (0-5, 6-11, 12-17, 18-23, Bangkok time) and per target month.
+Paired difference vs persistence and vs current LightGBM, day-block bootstrap 95% CI (10,000
+draws) per run and pooled; stability = number of folds (of 5) where the candidate's point MAE beats
+persistence. Source sensitivity: the holdout split by target source (openaq / air4thai).
+
+**Multiple comparisons**: claims "beats persistence" are the pooled-fold and HOLDOUT comparisons:
+7 candidates (2-8) x 3 horizons x 2 = 42 claims. Correction: Bonferroni, i.e. CI at level
+1 - 0.05/42 (20,000 draws) must be entirely below zero; Holm-adjusted bootstrap p-values are also
+reported. Per-fold comparisons (7 x 3 x 5 = 105) are descriptive only. Total comparisons
+disclosed: 42 + 105 = 147 candidate x horizon x run comparisons vs persistence.
+
+**Promotion rule (final, supersedes the earlier one-sentence rule)**: a candidate may be recommended
+only if at +24 h ALL hold: (a) HOLDOUT CI entirely below zero after Bonferroni correction;
+(b) pooled-fold CI entirely below zero after Bonferroni correction; (c) point MAE beats persistence
+in at least 4 of 5 folds; (d) point-estimate paired difference <= 0 in both high-pollution subsets
+(target > 37.5 and latest reading > 37.5), pooled and in HOLDOUT. Otherwise: "no reliable gain"
+(or "more data needed" when the CI cannot exclude a 0.25 ug/m3 gain).
+
+**Leakage audit**: (i) an independent scalar re-implementation recomputes every feature for 300
+sampled rows per horizon from a grid truncated to indices <= origin - 1 and must match the vectorized
+table exactly; (ii) a deliberately leaky control (set D + the neighbor stations' mean reading AT the
+target hour) must beat persistence massively, demonstrating the harness would expose leakage. The control is
+not a candidate and is not counted; (iii) a table of each feature's as-of rule.
+
+**Entry point**: `PYTHONPATH=src python -m pm25_forecast.experiments.run_all --database
+data/history.duckdb --out out/kan65` reruns EDA, audit, all runs; prints SHA-256, library versions
+and total runtime. Priority if budget runs short: folds and per-horizon comparison, then the global
+model, then breakdowns; any skipped item is stated in the report.
