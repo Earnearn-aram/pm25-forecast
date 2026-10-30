@@ -1,6 +1,7 @@
 """Public dashboard builder (KAN-25). Run with ``python -m pm25_forecast.dashboard --out site/``.
 
-Reads the database (read-only SELECTs, one short connection per query) and writes a static site:
+Reads the database (read-only SELECTs, one read-only connection for the whole build) and writes
+a static site:
 ``index.html`` (server-rendered, inline SVG charts), ``data.json`` (the same numbers), plus
 ``dashboard.css`` and ``dashboard.js`` (station pills and the animation pause only).
 
@@ -122,9 +123,11 @@ SELECT model_version, created_at FROM models WHERE model_version LIKE %(prefix)s
 ORDER BY created_at DESC LIMIT 1
 """
 SELECT_FIRST_ISSUE = """
-SELECT issue_time FROM predictions WHERE model_version = %(m)s ORDER BY issue_time LIMIT 1
+SELECT issue_time FROM predictions
+WHERE model_version = %(m)s AND issue_time >= %(since)s ORDER BY issue_time LIMIT 1
 """
 SET_READ_ONLY = "SET TRANSACTION READ ONLY"
+SET_TIMEOUT = "SET LOCAL statement_timeout = '30s'"
 SAVEPOINT = "dashboard_section"
 
 
@@ -144,16 +147,21 @@ class Reader:
         con = open_db(self._connect, self._url)
         try:
             con.execute(SET_READ_ONLY, {})
+            con.execute(SET_TIMEOUT, {})
         except Exception:
             con.close()
             raise
         self._con = con
 
     def close(self) -> None:
-        if self._con is not None:
-            self._con.rollback()  # read-only transaction: nothing to keep, never commit
-            self._con.close()
-            self._con = None
+        con, self._con = self._con, None
+        if con is None:
+            return
+        try:
+            con.rollback()  # read-only transaction: nothing to keep, never commit
+            con.close()
+        except Exception as exc:  # a dropped connection must not replace the collected data
+            logger.warning("dashboard: closing connection failed (%s)", type(exc).__name__)
 
     def query(self, statement: str, params: dict[str, Any]) -> list[Sequence[Any]]:
         if self._con is None:
@@ -246,7 +254,9 @@ def _scores(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any]
                 }
             )
     if challenger and out["challenger"][str(HEADLINE_H)] is None:
-        raw = rd.query(SELECT_FIRST_ISSUE, {"m": challenger})
+        raw = rd.query(
+            SELECT_FIRST_ISSUE, {"m": challenger, "since": now - WINDOW - timedelta(hours=24)}
+        )
         first = raw[0][0] if raw else None
         if first is not None:
             issue = TypeAdapter(AwareDatetime).validate_python(first)
@@ -434,6 +444,8 @@ def collect(
     rd = Reader(connect, url)
     try:
         rd.open()
+    except ConfigError:
+        raise
     except Exception as exc:  # type only: driver messages can echo the connection string
         logger.warning("dashboard: database unavailable (%s)", type(exc).__name__)
     try:

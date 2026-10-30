@@ -45,7 +45,7 @@ class Fake(FakeDb):
 
     def execute(self, statement, params=()):
         self.statements.append(statement.strip())
-        if statement.startswith("SET TRANSACTION"):
+        if statement.startswith(("SET TRANSACTION", "SET LOCAL")):
             return self.con.execute("SELECT 1")
         return super().execute(statement, params)
 
@@ -264,7 +264,7 @@ def test_read_only_single_connection_never_commits(tmp_path):
     assert fake.statements[0] == "SET TRANSACTION READ ONLY"
     assert fake.statements[-1] == "ROLLBACK"  # the only way the transaction ends; no COMMIT
     assert fake.closed
-    ignored = ("SET TRANSACTION", "SAVEPOINT", "RELEASE", "ROLLBACK", "SELECT")
+    ignored = ("SET TRANSACTION", "SET LOCAL", "SAVEPOINT", "RELEASE", "ROLLBACK", "SELECT")
     assert not [s for s in fake.statements if not s.upper().startswith(ignored)]
     assert not [s for s in fake.statements if "min(" in s]
 
@@ -334,3 +334,23 @@ def test_html_escapes_station_ids(tmp_path):
     page = (tmp_path / "index.html").read_text()
     assert "<script>x</script>" not in page
     assert "&lt;script&gt;" in page
+
+
+def test_failing_rollback_on_close_keeps_collected_data(tmp_path):
+    class Dropped(Fake):
+        def rollback(self):
+            raise psycopg.OperationalError(f"server closed the connection {DB_URL}")
+
+    fake = Dropped()
+    seed(fake)
+    assert dashboard.run(settings(), tmp_path, connect=lambda _u: fake, clock=lambda: NOW) == 0
+    assert fake.statements[1] == "SET LOCAL statement_timeout = '30s'"
+    assert (tmp_path / "index.html").exists()
+
+
+def test_malformed_url_is_config_error_not_unavailable(tmp_path):
+    def bad(_url):
+        raise psycopg.ProgrammingError("invalid dsn")
+
+    with pytest.raises(dashboard.ConfigError):
+        dashboard.run(settings(), tmp_path, connect=bad, clock=lambda: NOW)
