@@ -288,8 +288,10 @@ def test_no_secrets_in_output(tmp_path):
     seed(fake)
     fake.con.execute("DROP TABLE drift_checks")  # also exercise the failure path
     build(fake, tmp_path)
-    for path in tmp_path.iterdir():
-        text = path.read_text()
+    for path in tmp_path.rglob("*"):
+        if not path.is_file():
+            continue
+        text = path.read_bytes().decode("utf-8", errors="ignore")
         assert DB_URL not in text and DB_PASSWORD not in text
         assert "postgresql://" not in text
 
