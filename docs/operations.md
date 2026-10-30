@@ -53,7 +53,8 @@ history bodies are archived under `<RAW_ARCHIVE_DIR>/air4thai/air4thai-history-<
 daily backfill covers older hours.
 
 One-off repair (owner; needs `DATABASE_URL`, `STATION_LOCATIONS`, `AIR4THAI_CA_BUNDLE`). Order
-matters: an upsert sets `ingested_at` to now, which is how the old rows are told apart.
+matters: an upsert that changes a row's value sets `ingested_at` to now, which is how the old rows
+are told apart (an upsert of an identical value keeps the old `ingested_at`).
 
 1. Before anything: run the two queries in "Identify" below and keep the output.
 2. Merge the KAN-74 PR and note the time `T` (UTC) from which the new collector is live (the
@@ -64,7 +65,8 @@ matters: an upsert sets `ingested_at` to now, which is how the old rows are told
    `AIR4THAI_CA_BUNDLE=certs/air4thai-ca.pem uv run python -m pm25_forecast.backfill --lookback-days 120`.
    Read the per-station log lines (rows upserted, empty or failed chunks).
 4. Remove what the backfill could not overwrite ("Delete" below; only if step 3 had 0 failed chunks).
-5. Re-score from 2026-10-27 (exact command below), then re-run drift and retrain only after 1-4.
+5. Re-run step 3 once more after the Delete (it restores any correct row the Delete removed, see below).
+6. Re-score from 2026-10-27 (exact command below), then re-run drift and retrain only after 1-4.
 
 Identify (read-only; run before the repair). Rows written by the old collector have `ingested_at`
 within a few minutes (at most about 3 h with a late cron and PCD lag) of `ts`; the backfill writes
@@ -88,8 +90,11 @@ GROUP BY model_version ORDER BY model_version;
 Delete (owner runs after step 3; replace `<T>` with the time from step 2, in UTC, e.g.
 `2026-11-01T03:00:00+00:00`). HARD GATE: run it only if every station's step-3 backfill log line
 shows 0 failed chunks; otherwise re-run step 3 first, because good hourly rows that a failed chunk
-did not overwrite would match the filter and be deleted. Every row the backfill rewrote has
-`ingested_at` after `<T>`, so what is still older than `<T>` and was written within 3 h of its
+did not overwrite would match the filter and be deleted. Every row whose value the backfill
+changed has `ingested_at` after `<T>`. A row whose hourly value already equalled the stored one keeps
+its old `ingested_at` (an unchanged upsert does not refresh it), so such a correct row can match the
+filter too; this is rare and harmless because the step-5 backfill re-inserts it (a fresh insert gets
+a new `ingested_at`). Otherwise, what is still older than `<T>` and was written within 3 h of its
 `ts` is an old collector row the backfill had no hourly value for.
 
 1. Run the SELECT and compare its total with the "Identify" output.
@@ -196,7 +201,7 @@ and counts of observations and forecast vintages available by their own timestam
 this gate by replacing `available_at` with `ts` or by assuming a historical download was available
 when its timestamp occurred. The chronological validation split also requires 20 training rows
 per horizon after its horizon-length embargo, so the required sample count can be higher. The live
-observations table is upserted and refreshes `ingested_at`; it does not preserve original arrival
+observations table is upserted and refreshes `ingested_at` when a value changes; it does not preserve original arrival
 times or prior values. The export therefore
 supports conservative eligibility checks for the current row, but it cannot reconstruct a fully
 faithful historical feature/label snapshot. Collect immutable, timestamped captures over time
