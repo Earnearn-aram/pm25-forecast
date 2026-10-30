@@ -1,0 +1,52 @@
+[      0s] snapshot fdd9b90ba6b96a1de512175f638808efe34fc8ae80c35b3e89bf440e71553a09 matches=True
+[      0s] pairs per horizon: {6: 63184, 12: 62951, 24: 63292}
+[      1s] eda done
+[      1s] audit: {'+6': 0, '+12': 0, '+24': 0}
+[      6s]   F1 global: {'val_mae': 2.9085609242846835, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 31, 'iters': 46, 'cat': 'auto'}
+[     10s]   F1 global_id: {'val_mae': 2.909124370617194, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 31, 'iters': 40, 'cat': ['station_id']}
+[     31s] F1 +6: n_test=4927 persistence MAE 2.533  lgbm_direct=2.098  lgbm_resid=1.994  ridge=2.158  smooth=2.533  ens=2.030  shrink=2.036  current=2.363  val_best=1.994  seasonal=6.921  global=2.082  global_id=2.078
+[     48s] F1 +12: n_test=4927 persistence MAE 4.289  lgbm_direct=3.511  lgbm_resid=3.631  ridge=3.664  smooth=4.289  ens=3.500  shrink=3.585  current=3.891  val_best=3.631  seasonal=6.832  global=3.613  global_id=3.614
+[     61s] F1 +24: n_test=4922 persistence MAE 6.969  lgbm_direct=6.538  lgbm_resid=6.321  ridge=6.069  smooth=6.969  ens=6.032  shrink=6.147  current=6.659  val_best=6.321  seasonal=9.765  global=6.285  global_id=6.300
+[     66s]   F2 global: {'val_mae': 2.7814051216972127, 'var': 'all', 'kind': 'direct', 'obj': 'l1', 'leaves': 31, 'iters': 56, 'cat': 'auto'}
+[     73s]   F2 global_id: {'val_mae': 2.7644123435325954, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 31, 'iters': 165, 'cat': ['station_id']}
+[     92s] F2 +6: n_test=4801 persistence MAE 1.348  lgbm_direct=1.197  lgbm_resid=1.206  ridge=1.168  smooth=1.348  ens=1.166  shrink=1.184  current=1.328  val_best=1.206  seasonal=3.303  global=1.247  global_id=1.380
+[    109s] F2 +12: n_test=4789 persistence MAE 2.163  lgbm_direct=1.952  lgbm_resid=1.978  ridge=1.854  smooth=2.163  ens=1.882  shrink=1.918  current=2.171  val_best=1.978  seasonal=3.304  global=1.952  global_id=2.054
+[    128s] F2 +24: n_test=4765 persistence MAE 3.370  lgbm_direct=3.134  lgbm_resid=3.270  ridge=2.928  smooth=3.370  ens=3.025  shrink=3.074  current=3.483  val_best=3.134  seasonal=4.486  global=3.015  global_id=2.989
+[    135s]   F3 global: {'val_mae': 1.7284387236642356, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 7, 'iters': 306, 'cat': 'auto'}
+[    144s]   F3 global_id: {'val_mae': 1.7015781452994998, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 7, 'iters': 341, 'cat': ['station_id']}
+[    162s] F3 +6: n_test=3194 persistence MAE 0.770  lgbm_direct=0.830  lgbm_resid=0.751  ridge=0.762  smooth=0.770  ens=0.741  shrink=0.744  current=0.863  val_best=0.762  seasonal=1.689  global=0.794  global_id=0.806
+[    181s] F3 +12: n_test=3149 persistence MAE 1.151  lgbm_direct=1.248  lgbm_resid=1.139  ridge=1.155  smooth=1.151  ens=1.126  shrink=1.120  current=1.342  val_best=1.155  seasonal=1.671  global=1.134  global_id=1.149
+[    198s] F3 +24: n_test=3089 persistence MAE 1.716  lgbm_direct=1.836  lgbm_resid=1.675  ridge=1.703  smooth=1.716  ens=1.651  shrink=1.647  current=2.062  val_best=1.703  seasonal=2.034  global=1.696  global_id=1.716
+[    205s]   F4 global: {'val_mae': 1.2256345306152734, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 31, 'iters': 132, 'cat': 'auto'}
+[    212s]   F4 global_id: {'val_mae': 1.2207982050201538, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 31, 'iters': 110, 'cat': ['station_id']}
+[    236s] F4 +6: n_test=5040 persistence MAE 3.186  lgbm_direct=3.422  lgbm_resid=3.397  ridge=3.324  smooth=3.186  ens=3.348  shrink=3.336  current=3.357  val_best=3.397  seasonal=3.226  global=3.438  global_id=3.444
+[    258s] F4 +12: n_test=5040 persistence MAE 3.508  lgbm_direct=3.488  lgbm_resid=3.672  ridge=3.811  smooth=3.508  ens=3.721  shrink=3.615  current=3.926  val_best=3.672  seasonal=3.255  global=3.733  global_id=3.753
+[    276s] F4 +24: n_test=5040 persistence MAE 3.284  lgbm_direct=2.976  lgbm_resid=3.122  ridge=3.424  smooth=2.896  ens=3.234  shrink=3.146  current=3.316  val_best=3.122  seasonal=3.320  global=3.320  global_id=3.322
+[    290s]   R1 global: {'val_mae': 2.2808869573418, 'var': 'bonly', 'kind': 'resid', 'obj': 'l2', 'leaves': 7, 'iters': 67, 'cat': 'auto'}
+[    307s]   R1 global_id: {'val_mae': 2.214993412503229, 'var': 'bonly', 'kind': 'resid', 'obj': 'l2', 'leaves': 31, 'iters': 43, 'cat': ['station_id']}
+[    355s] R1 +6: n_test=2520 persistence MAE 3.811  lgbm_direct=3.092  lgbm_resid=3.056  ridge=3.444  smooth=3.154  ens=3.173  shrink=3.087  current=3.552  val_best=3.056  seasonal=3.926  global=3.144  global_id=3.113
+[    397s] R1 +12: n_test=2520 persistence MAE 4.179  lgbm_direct=3.337  lgbm_resid=3.360  ridge=3.283  smooth=3.265  ens=3.255  shrink=3.384  current=3.808  val_best=3.360  seasonal=3.914  global=3.185  global_id=3.200
+[    442s] R1 +24: n_test=2520 persistence MAE 3.938  lgbm_direct=3.408  lgbm_resid=3.405  ridge=3.504  smooth=3.288  ens=3.424  shrink=3.329  current=3.960  val_best=3.504  seasonal=4.183  global=3.170  global_id=3.193
+[    455s]   R2 global: {'val_mae': 3.2341953385370705, 'var': 'ab', 'kind': 'direct', 'obj': 'l2', 'leaves': 7, 'iters': 400, 'cat': 'auto'}
+[    469s]   R2 global_id: {'val_mae': 3.1834154562089014, 'var': 'ab', 'kind': 'direct', 'obj': 'l2', 'leaves': 7, 'iters': 397, 'cat': ['station_id']}
+[    514s] R2 +6: n_test=2520 persistence MAE 4.557  lgbm_direct=4.501  lgbm_resid=4.354  ridge=4.563  smooth=4.626  ens=4.343  shrink=4.254  current=4.699  val_best=4.354  seasonal=5.879  global=4.480  global_id=4.517
+[    550s] R2 +12: n_test=2520 persistence MAE 5.421  lgbm_direct=4.911  lgbm_resid=5.187  ridge=5.042  smooth=5.156  ens=4.987  shrink=5.067  current=5.557  val_best=5.187  seasonal=5.897  global=5.129  global_id=5.143
+[    584s] R2 +24: n_test=2520 persistence MAE 6.258  lgbm_direct=5.502  lgbm_resid=5.724  ridge=5.546  smooth=5.872  ens=5.544  shrink=5.709  current=6.164  val_best=5.724  seasonal=6.919  global=5.860  global_id=5.803
+[    591s]   R3 global: {'val_mae': 5.387577467302622, 'var': 'ab', 'kind': 'direct', 'obj': 'l1', 'leaves': 31, 'iters': 31, 'cat': 'auto'}
+[    600s]   R3 global_id: {'val_mae': 5.359068797055389, 'var': 'ab', 'kind': 'direct', 'obj': 'l1', 'leaves': 31, 'iters': 38, 'cat': ['station_id']}
+[    631s] R3 +6: n_test=1784 persistence MAE 5.407  lgbm_direct=4.638  lgbm_resid=4.505  ridge=4.768  smooth=4.933  ens=4.578  shrink=4.648  current=5.116  val_best=4.638  seasonal=6.445  global=4.793  global_id=4.676
+[    660s] R3 +12: n_test=1759 persistence MAE 6.050  lgbm_direct=4.977  lgbm_resid=5.235  ridge=5.270  smooth=5.532  ens=5.154  shrink=5.359  current=5.759  val_best=4.977  seasonal=6.476  global=5.225  global_id=5.154
+[    689s] R3 +24: n_test=1714 persistence MAE 6.197  lgbm_direct=5.094  lgbm_resid=5.214  ridge=5.355  smooth=6.121  ens=5.207  shrink=5.267  current=6.038  val_best=5.094  seasonal=7.705  global=5.502  global_id=5.358
+[    694s]   HOLDOUT global: {'val_mae': 1.2208230308081773, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 31, 'iters': 20, 'cat': 'auto'}
+[    698s]   HOLDOUT global_id: {'val_mae': 1.2182801256356308, 'var': 'all', 'kind': 'resid', 'obj': 'l1', 'leaves': 31, 'iters': 26, 'cat': ['station_id']}
+[    717s] HOLDOUT +6: n_test=10799 persistence MAE 3.908  lgbm_direct=4.026  lgbm_resid=4.064  ridge=4.103  smooth=3.908  ens=4.050  shrink=3.996  current=4.094  val_best=4.064  seasonal=4.458  global=4.082  global_id=4.113
+[    734s] HOLDOUT +12: n_test=10774 persistence MAE 4.394  lgbm_direct=4.448  lgbm_resid=4.450  ridge=4.809  smooth=4.394  ens=4.582  shrink=4.399  current=4.783  val_best=4.450  seasonal=4.457  global=4.551  global_id=4.576
+[    748s] HOLDOUT +24: n_test=10729 persistence MAE 4.498  lgbm_direct=4.036  lgbm_resid=4.347  ridge=4.551  smooth=4.212  ens=4.402  shrink=4.376  current=4.503  val_best=4.347  seasonal=5.033  global=4.551  global_id=4.590
+[    749s] per-run stats +6 done
+[    749s] per-run stats +12 done
+[    749s] per-run stats +24 done
+[    750s] group stats HOLDOUT done
+[    751s] group stats REGIME_B done
+[    752s] group stats REGIME_A done
+[    753s] leaky control: {'description': "set D + neighbours' mean reading AT the target hour (future info)", 'mae': 3.0078282578106488, 'persistence_mae': 4.497576661385032, 'paired': {'n': 10729, 'days': 91, 'diff': -1.4897484035743824, 'lo': -1.8543661842637456, 'hi': -1.153665101848555, 'p': 0.0001999600079984003}}
+[    753s] done: fits {'lgbm': 1760, 'ridge': 1608, 'lgbm_refit': 89}
