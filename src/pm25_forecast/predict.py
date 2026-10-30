@@ -7,9 +7,9 @@ Per run, for every station in STATION_LOCATIONS: read stored data, make baseline
   hour has the same natural key (station_id, issue_time, valid_time, model_version) and the
   insert is ``DO NOTHING``: the first vintage is kept, no duplicates.
 * ``persistence-24h``: the latest observation at or before issue_time (at most 3 h old).
-* ``cams``: pass-through of the collector's stored ``cams_global`` rows for the same valid_time,
-  from the latest vintage issued at or before the run. There is no historical CAMS data (the
-  collector started 2026-10-27), so early on some valid_times have no row: they are skipped.
+* No ``cams`` pass-through rows are written any more (KAN-69): nothing read them and KAN-20 skips
+  them. Old ``cams`` rows stay and expire under the 90-day retention. The stored ``cams_global``
+  vintages are still read, only to build the ``cams_pm25`` feature for the challenger.
 * Missing inputs are skipped and logged, never filled in. They are listed in the run summary.
 * Challenger (KAN-29, shadow mode): when ``CHALLENGER_MODEL_VERSION`` is set, that registered
   model is read from the registry once per run (content-verified, KAN-16) and its predictions are
@@ -174,18 +174,6 @@ def build_station_rows(
         )
         logger.warning(msg)
         result.skipped.append(msg)
-
-    for h, target in targets.items():
-        cams_pm25 = features[h]["cams_pm25"]
-        if cams_pm25 is not None:
-            forecast = Forecast(h, target, cams_pm25)
-            rows.append(
-                _row(station_id, issue_time, run_id, CAMS_PASSTHROUGH_MODEL_VERSION, forecast)
-            )
-            continue
-        msg = f"{station_id}: no CAMS row for +{h}h ({targets[h].isoformat()}), skipped"
-        logger.warning(msg)
-        result.skipped.append(msg)
     return rows
 
 
@@ -270,7 +258,7 @@ def run(
         if challenger is not None:
             rows += build_challenger_rows(challenger, station_features, issue_time, run_id, result)
         result.rows_built = len(rows)
-        served = [PERSISTENCE_MODEL_VERSION, CAMS_PASSTHROUGH_MODEL_VERSION]
+        served = [PERSISTENCE_MODEL_VERSION]
         if challenger is not None:
             served.append(challenger.model_version)
         for model_version in served:

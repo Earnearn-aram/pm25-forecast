@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from pm25_forecast import predict, registry_cli
-from pm25_forecast.models.baselines import CAMS_PASSTHROUGH_MODEL_VERSION, PERSISTENCE_MODEL_VERSION
+from pm25_forecast.models.baselines import PERSISTENCE_MODEL_VERSION
 from pm25_forecast.models.serving import ModelLoadError, load_registered_model, load_serving_model
 from pm25_forecast.storage import registry
 from test_model_registry import InMemoryRegistry
@@ -157,7 +157,7 @@ def test_no_challenger_configured_keeps_baseline_behaviour(inputs_db, monkeypatc
     monkeypatch.setattr(predict, "load_registered_model", unexpected)
     result = do_run(inputs_db, challenger_model_version="  ")
     assert not result.failures
-    assert set(result.per_model) == {PERSISTENCE_MODEL_VERSION, CAMS_PASSTHROUGH_MODEL_VERSION}
+    assert set(result.per_model) == {PERSISTENCE_MODEL_VERSION}
 
 
 def test_unservable_challenger_fails_loudly_but_baselines_are_written(inputs_db, monkeypatch):

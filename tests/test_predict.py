@@ -207,7 +207,7 @@ def test_predictors_reject_naive_datetimes():
 # --- the predict step ------------------------------------------------------------------------
 
 
-def test_run_writes_both_models_for_each_horizon(fake_db):
+def test_run_writes_only_persistence_for_each_horizon(fake_db):
     result = do_run(fake_db)
     assert result.failures == []
     assert result.issue_time == ISSUE
@@ -219,12 +219,11 @@ def test_run_writes_both_models_for_each_horizon(fake_db):
         ("59t", PERSISTENCE_MODEL_VERSION, iso(t6)): 40.0,
         ("59t", PERSISTENCE_MODEL_VERSION, iso(t12)): 40.0,
         ("59t", PERSISTENCE_MODEL_VERSION, iso(t24)): 40.0,
-        ("59t", CAMS_PASSTHROUGH_MODEL_VERSION, iso(t6)): 35.0,
-        ("59t", CAMS_PASSTHROUGH_MODEL_VERSION, iso(t12)): 36.0,
     }
     assert all(r[1] == ISSUE.isoformat() and r[4] == result.run_id for r in rows)
-    assert result.per_model == {PERSISTENCE_MODEL_VERSION: 3, CAMS_PASSTHROUGH_MODEL_VERSION: 2}
-    assert result.rows_written == 5
+    assert result.per_model == {PERSISTENCE_MODEL_VERSION: 3}
+    assert result.rows_written == 3
+    assert all(r[3] != CAMS_PASSTHROUGH_MODEL_VERSION for r in rows)
 
 
 def test_predict_ignores_rows_ingested_after_the_issue_time(fake_db):
@@ -248,15 +247,13 @@ def test_predict_ignores_rows_ingested_after_the_issue_time(fake_db):
     got = {(r[3], r[2]): r[5] for r in rows if r[0] == "59t"}
 
     assert got[(PERSISTENCE_MODEL_VERSION, (ISSUE + 6 * H).isoformat())] == 38.0
-    assert got[(CAMS_PASSTHROUGH_MODEL_VERSION, (ISSUE + 6 * H).isoformat())] == 30.0
 
 
-def test_missing_cams_row_and_missing_observation_are_skipped_and_reported(fake_db):
+def test_missing_observation_is_skipped_and_reported(fake_db):
     result = do_run(fake_db)
     skipped = "\n".join(result.skipped)
-    assert "59t: no CAMS row for +24h" in skipped
     assert "61t: no observation" in skipped and "persistence skipped" in skipped
-    assert "61t: no CAMS row for +6h" in skipped
+    assert "CAMS" not in skipped
     stations = {r[0] for r in fake_db.predictions()}
     assert stations == {"59t"}  # nothing invented for 61t
     assert result.failures == []
@@ -268,8 +265,8 @@ def test_rerun_in_the_same_hour_is_idempotent(fake_db):
     again = do_run(fake_db)
     later_same_hour = do_run(fake_db, now=NOW + timedelta(minutes=40))
     assert fake_db.predictions() == before
-    assert first.rows_written == 5 and first.rows_ignored == 0
-    assert again.rows_written == 0 and again.rows_ignored == 5
+    assert first.rows_written == 3 and first.rows_ignored == 0
+    assert again.rows_written == 0 and again.rows_ignored == 3
     assert later_same_hour.rows_written == 0
 
 
