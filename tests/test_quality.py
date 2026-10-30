@@ -23,6 +23,7 @@ NOW = datetime(2026, 10, 30, 12, 20, tzinfo=UTC)
 HOUR = datetime(2026, 10, 30, 12, tzinfo=UTC)
 H = timedelta(hours=1)
 P = PERSISTENCE_MODEL_VERSION
+REAL_RUN = quality.run  # captured before any test patches quality.run
 
 
 @pytest.fixture(autouse=True)
@@ -326,8 +327,7 @@ def run_main(fake, monkeypatch, now=NOW) -> list[str]:
     alerts: list[str] = []
     monkeypatch.setattr(quality, "get_settings", lambda: settings())
     monkeypatch.setattr(quality, "make_alert", lambda *_a, **_k: alerts.append)
-    orig = quality.run
-    monkeypatch.setattr(quality, "run", lambda s: orig(s, connect=fake, clock=lambda: now))
+    monkeypatch.setattr(quality, "run", lambda s: REAL_RUN(s, connect=fake, clock=lambda: now))
     assert quality.main() == 0  # failing data is alerted, not a failed run
     return alerts
 
@@ -399,8 +399,7 @@ def test_no_alert_when_everything_is_ok_or_warn(fake, monkeypatch):
     alerts: list[str] = []
     monkeypatch.setattr(quality, "get_settings", lambda: settings())
     monkeypatch.setattr(quality, "make_alert", lambda *_a, **_k: alerts.append)
-    orig = quality.run
-    monkeypatch.setattr(quality, "run", lambda s: orig(s, connect=fake, clock=lambda: NOW))
+    monkeypatch.setattr(quality, "run", lambda s: REAL_RUN(s, connect=fake, clock=lambda: NOW))
     assert quality.main() == 0 and alerts == []
 
 
