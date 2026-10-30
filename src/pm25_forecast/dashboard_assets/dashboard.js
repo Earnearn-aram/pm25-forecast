@@ -28,7 +28,7 @@
     "Previous": "ก่อนหน้า",
     "Next": "ถัดไป",
     "Warning": "คำเตือน",
-    "Each point: the forecast made 24 h before that hour. Last 24 hours, hourly, UTC. Future dots are forecasts; dashed lines connect available points and do not imply intermediate predictions.": "แต่ละจุดคือค่าพยากรณ์ล่วงหน้า 24 ชั่วโมง แสดงย้อนหลัง 24 ชั่วโมงตามเวลา UTC จุดในอนาคตคือค่าพยากรณ์ เส้นประเชื่อมเฉพาะจุดที่มีโดยไม่ได้แสดงค่าพยากรณ์ระหว่างจุด",
+    "Each point: the forecast made 24 h before that hour. Last 24 hours, hourly. Times in Bangkok time (UTC+7). Future dots are forecasts; lines connect available points only and do not imply intermediate predictions.": "แต่ละจุดคือค่าพยากรณ์ล่วงหน้า 24 ชั่วโมง แสดงย้อนหลัง 24 ชั่วโมงรายชั่วโมง เวลาเป็นเวลากรุงเทพฯ (UTC+7) จุดในอนาคตคือค่าพยากรณ์ เส้นเชื่อมเฉพาะจุดที่มีโดยไม่ได้แสดงค่าพยากรณ์ระหว่างจุด",
     "PSI measures how far recent inputs have moved from what the model was trained on. The threshold is 0.2; an alert requires two consecutive daily breaches.": "PSI วัดความเปลี่ยนแปลงของข้อมูลเทียบกับข้อมูลที่ใช้ฝึก เกณฑ์คือ 0.2 และจะแจ้งเตือนเมื่อเกินเกณฑ์สองวันติดกัน",
     "Air4Thai quality checks; Python and Neon Postgres. These checks do not prove workflow completion.": "ผลตรวจคุณภาพ Air4Thai; Python และ Neon Postgres ผลตรวจไม่ได้ยืนยันว่า workflow ทำงานสำเร็จ",
     "Persistence prediction quality checks; Python and Neon Postgres. These checks do not prove workflow completion.": "ผลตรวจคุณภาพค่าพยากรณ์วิธีค่าคงเดิม; Python และ Neon Postgres ผลตรวจไม่ได้ยืนยันว่า workflow ทำงานสำเร็จ",
@@ -37,6 +37,7 @@
     "Select a station · latest PM2.5 (µg/m³)": "เลือกสถานี · PM2.5 ล่าสุด (µg/m³)",
     "Numbers are PM2.5 concentrations, not AQI. Use the station list if the map is unavailable.": "ตัวเลขคือความเข้มข้น PM2.5 ไม่ใช่ AQI เลือกสถานีจากรายการหากแผนที่ไม่พร้อมใช้งาน",
     "Upcoming forecasts": "ค่าพยากรณ์ล่วงหน้า",
+    "Future forecast": "ค่าพยากรณ์ล่วงหน้า",
     "Waiting for future forecasts.": "กำลังรอค่าพยากรณ์ล่วงหน้า",
     "Persistence": "วิธีค่าคงเดิม",
     "Persistence forecast": "พยากรณ์วิธีค่าคงเดิม",
@@ -161,7 +162,7 @@
     [/^(.+) unavailable right now\.$/, function (m) { return (sections[m[1]] || m[1]) + "ไม่พร้อมใช้งานในขณะนี้"; }],
     [/^Some data is unavailable right now: (.+)\.$/, function (m) { return "ข้อมูลบางส่วนไม่พร้อมใช้งาน: " + m[1].split(", ").map(function (s) { return sections[s] || s; }).join(", "); }],
     [/^from$/, function () { return "ตั้งแต่"; }],
-    [/^Station (.+), last 24 hours in UTC: actual PM2.5 in µg\/m³ against persistence and challenger forecasts made 24 h earlier$/, function (m) { return "สถานี " + m[1] + " ย้อนหลัง 24 ชั่วโมง (UTC): PM2.5 จริง หน่วย µg/m³ เทียบกับวิธีค่าคงเดิมและโมเดลท้าชิงที่พยากรณ์ล่วงหน้า 24 ชั่วโมง"; }],
+    [/^Station (.+), last 24 hours in Bangkok time: actual PM2.5 in µg\/m³ against persistence and challenger forecasts made 24 h earlier$/, function (m) { return "สถานี " + m[1] + " ย้อนหลัง 24 ชั่วโมง (เวลากรุงเทพฯ): PM2.5 จริง หน่วย µg/m³ เทียบกับวิธีค่าคงเดิมและโมเดลท้าชิงที่พยากรณ์ล่วงหน้า 24 ชั่วโมง"; }],
     [/^(Collect|Predict|Quality): (\d+) of 24 hours ok, (\d+) warning, (\d+) failed, (\d+) missed$/, function (m) { return (thai[m[1]] || "คุณภาพ") + ": สำเร็จ " + m[2] + " จาก 24 ชั่วโมง เตือน " + m[3] + " ล้มเหลว " + m[4] + " ไม่พบการทำงาน " + m[5]; }]
   ];
   thai.Quality = "คุณภาพ";

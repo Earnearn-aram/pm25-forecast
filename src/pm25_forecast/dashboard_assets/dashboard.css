@@ -244,40 +244,34 @@ header {
   align-items: center;
   gap: 6px;
 }
-.plotwrap {
-  padding-left: 48px;
-}
-.ytitle {
-  margin-left: -48px;
-  font-size: 15px;
-  color: var(--muted);
-  padding-bottom: 4px;
-}
 .plot {
   position: relative;
+  overflow-x: auto;
 }
 .plot svg {
   display: block;
   width: 100%;
-  height: clamp(180px, 36vw, 280px);
+  min-width: 560px;
+  height: auto;
 }
-.ylab {
-  position: absolute;
-  left: -48px;
-  width: 42px;
-  text-align: right;
-  transform: translateY(-50%);
-  font: 15px "JetBrains Mono", ui-monospace, monospace;
-  color: var(--muted);
+.ax-text, .pt-label, .axis-now {
+  font: 13px system-ui, sans-serif;
+  fill: var(--muted);
 }
-.xlabs {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 15px;
-  color: var(--muted);
-  padding-top: 6px;
+.ax-title {
+  font: 13px system-ui, sans-serif;
+  fill: var(--muted);
 }
+.tick {
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+.pt-label { font-weight: 600; }
+.pt-label.pers { fill: var(--muted); }
+.pt-label.chal { fill: var(--accent-hover); }
+.axis-now { font-weight: 600; fill: var(--text); }
+.hover-pt { fill: transparent; stroke: none; }
+.hover-pt:hover { fill: var(--accent); fill-opacity: .25; }
 .grid-line {
   stroke: var(--grid);
   stroke-width: 1;
@@ -285,6 +279,7 @@ header {
 .ln {
   fill: none;
   stroke-linejoin: round;
+  stroke-linecap: round;
 }
 .ln-actual {
   stroke: var(--text);
@@ -313,6 +308,13 @@ header {
 .sw.pers {
   border-top-style: dashed;
   border-color: var(--neutral);
+}
+.sw.dot {
+  width: 9px;
+  height: 9px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
 }
 .hrow {
   display: flex;
@@ -659,9 +661,10 @@ html[lang="th"] .status {
 .future-forecasts strong { width: 100%; }
 .forecast-point { padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--card); }
 .forecast-point small { color: var(--muted); }
-.future-line { stroke-dasharray: 4 4; }
-.forecast-dot.ln-pers { fill: var(--neutral); stroke: var(--neutral); }
-.forecast-dot.ln-chal { fill: var(--accent); stroke: var(--accent); }
+.future-line.ln-pers { stroke-dasharray: 5 4; }
+.forecast-dot, .forecast-dot.ln-pers, .forecast-dot.ln-chal { stroke: var(--card); stroke-width: 1.5; stroke-dasharray: none; }
+.forecast-dot.ln-pers { fill: var(--neutral); }
+.forecast-dot.ln-chal { fill: var(--accent); }
 .story { padding: 24px; }
 .story-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
 .story-grid h3 { font-size: 16px; margin: 0 0 6px; }
@@ -709,13 +712,11 @@ html[lang="th"] .status {
 @media (max-width: 520px) { .arch { grid-template-columns: repeat(2, minmax(0, 1fr)); } .arch li:nth-child(3) .arch-node::after { display: block; } .arch li:nth-child(even) .arch-node::after { display: none; } }
 @media (prefers-reduced-motion: reduce) { .arch-node::before { animation: none; } }
 .arch.paused .arch-node::before { animation: none; }
-.xlabs { position: relative; }
-.xlabs .axis-now { position: absolute; left: 50%; transform: translateX(-50%); }
 .quality-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .quality-summary span { padding: 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 14px; }
 .quality-summary strong { display: block; color: var(--text); font-size: 20px; }
-@media (max-width: 520px) { .quality-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .xlabs { font-size: 13px; } }
-.actual-dot { fill: var(--text); stroke: var(--text); }
+@media (max-width: 520px) { .quality-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.actual-dot { fill: var(--text); stroke: var(--card); stroke-width: 1.5; }
 .boost-tree { display: flex; flex-direction: column; align-items: center; gap: 3px; animation: example-boost 6s ease-in-out infinite; }
 .boost-tree:nth-of-type(2) { animation-delay: 1s; }.boost-tree:nth-of-type(3) { animation-delay: 2s; }
 .boost-tree svg { width: 34px; height: 30px; }
@@ -748,6 +749,6 @@ html[lang="th"] .status {
 .feature-point:first-child i { animation-delay: .8s; }.feature-point:nth-child(2) i { animation-delay: 0s; }
 @keyframes feature-travel { 0%,8% { left: 5px; opacity: 0; } 12% { opacity: 1; } 72% { left: calc(100% - 10px); opacity: 1; } 82%,100% { left: calc(100% - 10px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .feature-timeline::after { display: none; } }
-.forecast-region { fill: #2dd4bf; fill-opacity: .045; }
-.forecast-boundary { stroke: #6d8880; stroke-width: 1; stroke-dasharray: 4 5; }
-.forecast-empty { display: block; width: 100%; color: #9aa3ad; padding: 9px 12px; border: 1px solid #35433f; border-radius: 6px; background: #151d1c; }
+.forecast-region { fill: var(--accent); fill-opacity: .05; }
+.forecast-boundary { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 4; }
+.forecast-empty { display: block; width: 100%; color: var(--muted); padding: 9px 12px; border-radius: 6px; background: var(--none-tint); }

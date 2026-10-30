@@ -198,7 +198,7 @@ def test_stylesheet_is_light_theme(tmp_path):
     build(Fake(), tmp_path)
     css = (tmp_path / "dashboard.css").read_text()
     assert "--bg: #f6f8fa;" in css
-    assert "kan73-light-mode" in (tmp_path / "index.html").read_text()
+    assert "kan73-chart-light" in (tmp_path / "index.html").read_text()
     for dark in ("#0e1116", "#141b22", "#10201d"):
         assert dark not in css
 
@@ -556,10 +556,13 @@ def test_chart_gives_equal_space_to_recent_history_and_future(tmp_path):
     assert build(fake, tmp_path) == 0
     page = (tmp_path / "index.html").read_text()
     assert 'class="axis-now"' in page
-    assert 'cx="500.0"' in page
-    assert 'cx="600.0"' in page
-    assert 'cx="800.0"' in page
-    assert "Last 24 hours, hourly, UTC" in page
+    assert 'class="forecast-region" x="432.0"' in page  # now sits at the midpoint of 60..804
+    assert 'class="forecast-dot ln-pers" cx="525.0"' in page  # +6 h
+    assert 'class="forecast-dot ln-pers" cx="618.0"' in page  # +12 h
+    assert 'class="forecast-dot ln-pers" cx="804.0"' in page  # +24 h
+    for label in ("+6h", "+12h", "+24h"):
+        assert f">{label}</text>" in page
+    assert "Times in Bangkok time (UTC+7)" in page
 
 
 def test_chart_uses_full_width_when_no_future_forecasts_exist(tmp_path):
@@ -570,4 +573,32 @@ def test_chart_uses_full_width_when_no_future_forecasts_exist(tmp_path):
     assert 'class="forecast-region"' not in page
     assert 'class="axis-now"' not in page
     assert 'class="forecast-empty"' in page
-    assert 'class="actual-dot" cx="800.0"' in page
+    assert 'class="actual-dot" cx="804.0"' in page
+
+
+def test_chart_axes_legend_and_series_markup(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0)
+    fake.con.execute(
+        "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id,"
+        " pm25_pred) VALUES ('59t', ?, ?, ?, 'f', 30.0)",
+        (issue.isoformat(), (issue + 6 * H).isoformat(), CHALLENGER),
+    )
+    fake.con.commit()
+    build(fake, tmp_path)
+    page = (tmp_path / "index.html").read_text()
+    assert "PM2.5 (\u00b5g/m\u00b3)" in page
+    assert page.count('class="grid-line"') >= 5
+    ticks = re.findall(r'class="ax-text" x="[\d.]+" y="\d+" text-anchor="middle">(\d\d):00', page)
+    assert ticks and {int(t) % 6 for t in ticks} == {0}
+    assert re.search(r'<tspan x="[\d.]+" dy="17">\d\d [A-Z][a-z]{2}</tspan>', page)  # date at 00:00
+    assert page.count('class="legend"') >= 1
+    for swatch in ("sw actual", "sw pers", "sw chal", "sw dot"):
+        assert f'<i class="{swatch}">' in page
+    assert 'class="forecast-boundary"' in page
+    hover = r'<circle class="hover-pt"[^>]*><title>Actual: [\d.]+ \u00b5g/m\u00b3 at '
+    assert re.search(hover, page)
+    assert "stroke-linecap: round" in (tmp_path / "dashboard.css").read_text()
+    assert "kan73-chart-light" in page
+    assert "Times in Bangkok time (UTC+7)" in (tmp_path / "dashboard.js").read_text()
