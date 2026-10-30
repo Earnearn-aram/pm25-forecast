@@ -144,6 +144,29 @@ repo activity (noted in `collector.yml` and `heartbeat.yml`). Open the Actions t
 (Collector, Predict, Heartbeat, Backfill), click "Enable workflow", then "Run workflow" once and
 check the log. A commit to the repo counts as activity.
 
+**Dead-man switch (KAN-30).** The alerts above only fire when something runs and fails. If nothing
+runs at all, only an outside watcher notices. Each successful Predict run pings healthchecks.io; if
+no ping arrives for 3 hours, it alerts you. Predict also runs after every Collector run, so more than
+one ping per hour is normal and fine.
+
+Set up once:
+1. Create a free account at healthchecks.io and add a check named `pm25-predict`.
+2. Set Period to 1 hour and Grace Time to 2 hours (the alert fires after 3 hours without a ping).
+3. Under Integrations, add an alert channel (Discord or email) and attach it to the check.
+4. Copy the check's ping URL. Treat it like a password; do not paste it in chat, issues or code.
+5. In GitHub open the repo, Settings, Secrets and variables, Actions, New repository secret. Name
+   it `HEALTHCHECK_PING_URL`, paste the URL, save.
+6. Copy the new last step from `docs/predict-workflow.yml.txt` into `.github/workflows/predict.yml`
+   (the agent token cannot push workflow files). Without the secret the step does nothing.
+
+Test once: in the Actions tab, run Predict with "Run workflow" and confirm the check turns green on
+healthchecks.io. Then open the Actions tab, pick Predict, click the "..." menu and "Disable
+workflow" (do the same for Collector). After about 3 hours the alert should arrive. Re-enable both
+with "Enable workflow" and run Predict once; the check turns green again.
+
+If GitHub disabled the schedules after 60 days of inactivity (see the first runbook item), the
+alert arrives after 3 hours and the fix is: Actions tab, select the workflow, "Enable workflow".
+
 **Renew the cron-job.org token before 2027-01-27.** The timer uses a fine-grained PAT with only
 Actions read/write on this repo. Create a new PAT with the same scope, replace it in the cron-job.org
 job (all three schedules), trigger a test run, confirm a new Collector run appears in the Actions
@@ -166,7 +189,7 @@ most runs before (KAN-50, KAN-67).
 | `[pm25 retrain] AUTO_PROMOTE: <version> is now the production champion` | `AUTO_PROMOTE=true` and a candidate won | Check it is wanted; `registry_cli rollback --confirm` reverts; unset `AUTO_PROMOTE` to stop it. |
 | Drift alert, then a retrain run from the Drift workflow | Drift confirmed on two days; `retrain --if-drift` ran the normal (recommend-only) retrain | As the recommend alert above; the run is a no-op when there is no drift alert. |
 | `[pm25 housekeeping]` failure or crash | The weekly purge or prune dry run failed | Open the run; the `RUN_SUMMARY` lists the models a prune would delete (the job never deletes models). |
-| No heartbeat arrives at all | Not detected automatically yet | Planned: dead-man switch (KAN-30). Until then, check the Actions tab by hand. |
+| healthchecks.io alert: no ping for 3 h | Predict has not succeeded for 3 h, or nothing is running | Check the Actions tab; re-enable disabled workflows (Runbook, "Dead-man switch"). |
 
 ## Live dashboard
 
