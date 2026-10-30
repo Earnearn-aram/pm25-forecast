@@ -12,14 +12,17 @@
 # Triggers: after each Predict run completes (workflow_run is an event, not cron, so it is not
 # dropped like schedules), plus a daily backup cron and manual dispatch. Predict runs up to three
 # times an hour (the Collector runs at :07, :27, :47). The page only needs hourly data, so a
-# workflow_run build goes ahead only when that Predict run STARTED before minute 20 of its hour,
-# i.e. it follows the :07 collector run. Other runs skip every later step and finish green.
-# Builds never overlap (concurrency below); a pending build is replaced by a newer one.
+# workflow_run build first fetches the live data.json and skips every later step (job stays
+# green) when its generated_at is under 45 minutes old; if the fetch fails, it builds. It builds
+# after failed Predict runs too: the page then shows the degraded state. Cron and manual runs
+# always build.
+# A newer run cancels an older one still in progress (concurrency below).
 # The build only reads the database (SELECTs). The site contains numbers derived from it, no
 # secrets and no connection strings. If every database section fails, the build exits non-zero,
 # nothing is deployed, and the previous site stays up; the last step alerts.
 # Failure alerting: the last step posts the job status and run link to ALERT_WEBHOOK_URL
-# when any step fails or the job is cancelled (e.g. timeout), as in the other templates.
+# when any step fails, as in the other templates. Cancellation is not alerted: with
+# cancel-in-progress a newer run cancelling an older one is normal.
 name: Dashboard
 
 on:
@@ -35,11 +38,11 @@ permissions:
   pages: write
   id-token: write
 
-# One build at a time. Do not cancel a running deploy; a newer pending run replaces older pending
-# ones automatically.
+# One build at a time; a newer run cancels an older one in progress (the build is a read-only
+# snapshot, so cancelling loses nothing).
 concurrency:
   group: dashboard
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   dashboard:
@@ -53,12 +56,17 @@ jobs:
         id: gate
         env:
           EVENT: ${{ github.event_name }}
-          RUN_STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
         run: |
           build=true
           if [ "$EVENT" = "workflow_run" ]; then
-            minute=$(date -u -d "$RUN_STARTED_AT" +%M 2>/dev/null || echo 00)
-            [ "$((10#$minute))" -lt 20 ] || build=false
+            # Skip when the live page was generated less than 45 minutes ago. Any failure to
+            # fetch or parse it means: build.
+            live=$(curl -fsS --max-time 10 https://earnearn-aram.github.io/pm25-forecast/data.json \
+              | jq -r .generated_at 2>/dev/null) || live=""
+            if [ -n "$live" ] && then_s=$(date -u -d "$live" +%s 2>/dev/null); then
+              age=$(( $(date -u +%s) - then_s ))
+              [ "$age" -ge 0 ] && [ "$age" -lt 2700 ] && build=false
+            fi
           fi
           echo "build=$build" >> "$GITHUB_OUTPUT"
           echo "build: $build"
@@ -89,12 +97,12 @@ jobs:
       - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
         id: deployment
         if: steps.gate.outputs.build == 'true'
-      # Alert when any step above failed, or the job was cancelled (timeout-minutes hit).
+      # Alert when any step above failed.
       # Independent of the dashboard module: no DB, no settings. If uv or the venv is unusable a
       # curl fallback posts a fixed message. The webhook URL is a secret: it comes in through env,
       # reaches curl on stdin (-K -), never the command line, and is never echoed.
       - name: Alert on failure
-        if: failure() || cancelled()
+        if: failure() # not cancelled(): a newer run cancelling this one is normal here
         timeout-minutes: 2
         env:
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}

@@ -172,7 +172,9 @@ It answers one question ("is the model beating 'tomorrow = today'?") and shows f
 actual, skill by horizon, the last 24 h of pipeline runs, data quality, drift and the models. It is
 rebuilt about hourly by the Dashboard workflow after Predict (`docs/dashboard-workflow.yml.txt`),
 from database reads only; the site holds derived numbers, never secrets. A section whose query
-fails shows "unavailable"; empty data shows "waiting".
+fails shows "unavailable"; empty data shows "waiting". The page publishes model versions, station
+ids and feature names on purpose, and no credentials or raw data dumps. Fonts are self-hosted
+(Archivo, JetBrains Mono; SIL OFL, licenses in `dashboard_assets/fonts/`).
 
 Owner setup (once): Settings -> Pages -> Source: **GitHub Actions**, then copy the workflow
 template to `.github/workflows/dashboard.yml` and run it once. Preview locally with

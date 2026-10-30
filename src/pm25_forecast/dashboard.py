@@ -121,18 +121,51 @@ SELECT_RETRAIN = """
 SELECT model_version, created_at FROM models WHERE model_version LIKE %(prefix)s
 ORDER BY created_at DESC LIMIT 1
 """
-SELECT_FIRST_ISSUE = "SELECT min(issue_time) FROM predictions WHERE model_version = %(m)s"
+SELECT_FIRST_ISSUE = """
+SELECT issue_time FROM predictions WHERE model_version = %(m)s ORDER BY issue_time LIMIT 1
+"""
+SET_READ_ONLY = "SET TRANSACTION READ ONLY"
+SAVEPOINT = "dashboard_section"
 
 
 class Reader:
-    """One short connection per query, so a failed query cannot poison the next section."""
+    """One read-only connection for the whole build; never commits.
+
+    ``SET TRANSACTION READ ONLY`` is the first statement, so the database itself rejects any write.
+    Each query runs inside a SAVEPOINT: a failed statement aborts only that savepoint (rolled
+    back to), so the next section still runs on the same connection and transaction.
+    """
 
     def __init__(self, connect: Callable[[str], Any], url: str):
         self._connect, self._url = connect, url
+        self._con: Any = None
+
+    def open(self) -> None:
+        con = open_db(self._connect, self._url)
+        try:
+            con.execute(SET_READ_ONLY, {})
+        except Exception:
+            con.close()
+            raise
+        self._con = con
+
+    def close(self) -> None:
+        if self._con is not None:
+            self._con.rollback()  # read-only transaction: nothing to keep, never commit
+            self._con.close()
+            self._con = None
 
     def query(self, statement: str, params: dict[str, Any]) -> list[Sequence[Any]]:
-        with open_db(self._connect, self._url) as con:
-            return list(con.execute(statement, params).fetchall())
+        if self._con is None:
+            raise RuntimeError("database unavailable")
+        self._con.execute(f"SAVEPOINT {SAVEPOINT}", {})
+        try:
+            rows = list(self._con.execute(statement, params).fetchall())
+        except Exception:
+            self._con.execute(f"ROLLBACK TO SAVEPOINT {SAVEPOINT}", {})
+            raise
+        self._con.execute(f"RELEASE SAVEPOINT {SAVEPOINT}", {})
+        return rows
 
 
 def _rows[M: BaseModel](model: type[M], raw: Sequence[Sequence[Any]]) -> list[M]:
@@ -399,6 +432,17 @@ def collect(
 ) -> dict[str, Any]:
     """Query every section; a failing section is recorded as unavailable and the rest go on."""
     rd = Reader(connect, url)
+    try:
+        rd.open()
+    except Exception as exc:  # type only: driver messages can echo the connection string
+        logger.warning("dashboard: database unavailable (%s)", type(exc).__name__)
+    try:
+        return _collect(rd, challenger, now)
+    finally:
+        rd.close()
+
+
+def _collect(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any]:
     sections: dict[str, str] = {}
 
     def section(name: str, fn: Callable[[], Any]) -> Any:
@@ -846,9 +890,6 @@ def render_html(data: dict[str, Any]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
 <link rel="stylesheet" href="dashboard.css">
 <script src="dashboard.js" defer></script>
 </head>
@@ -885,6 +926,7 @@ def write_site(data: dict[str, Any], out: Path) -> None:
     (out / "index.html").write_text(render_html(data), encoding="utf-8")
     for asset in ("dashboard.css", "dashboard.js"):
         shutil.copyfile(ASSETS / asset, out / asset)
+    shutil.copytree(ASSETS / "fonts", out / "fonts", dirs_exist_ok=True)  # self-hosted, OFL
 
 
 def run(

@@ -35,6 +35,28 @@ TOP_KEYS = {
 }
 
 
+class Fake(FakeDb):
+    """FakeDb that records statements and accepts the Postgres-only read-only SET."""
+
+    def __init__(self):
+        super().__init__()
+        self.statements: list[str] = []
+        self.closed = False
+
+    def execute(self, statement, params=()):
+        self.statements.append(statement.strip())
+        if statement.startswith("SET TRANSACTION"):
+            return self.con.execute("SELECT 1")
+        return super().execute(statement, params)
+
+    def rollback(self):
+        self.statements.append("ROLLBACK")
+        self.con.rollback()
+
+    def close(self):
+        self.closed = True
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     def blocked(*_a, **_k):
@@ -116,7 +138,7 @@ def seed(fake: FakeDb, *, challenger_scores: bool = True) -> None:
 
 
 def test_scored_build_json_shape_and_page(tmp_path):
-    fake = FakeDb()
+    fake = Fake()
     seed(fake)
     assert build(fake, tmp_path) == 0
     data = load(tmp_path)
@@ -158,8 +180,21 @@ def test_scored_build_json_shape_and_page(tmp_path):
     assert (tmp_path / "dashboard.css").exists() and (tmp_path / "dashboard.js").exists()
 
 
+def test_fonts_are_self_hosted(tmp_path):
+    build(Fake(), tmp_path)
+    page = (tmp_path / "index.html").read_text()
+    assert "googleapis" not in page and "gstatic" not in page
+    css = (tmp_path / "dashboard.css").read_text()
+    assert "http" not in css
+    for name in ("archivo-latin.woff2", "jetbrains-mono-latin.woff2"):
+        assert (tmp_path / "fonts" / name).stat().st_size > 1000
+        assert name in css
+    assert (tmp_path / "fonts" / "OFL-Archivo.txt").exists()
+    assert (tmp_path / "fonts" / "OFL-JetBrainsMono.txt").exists()
+
+
 def test_empty_db_renders_waiting(tmp_path):
-    assert build(FakeDb(), tmp_path) == 0
+    assert build(Fake(), tmp_path) == 0
     data = load(tmp_path)
     assert data.keys() >= TOP_KEYS
     assert all(v == "ok" for v in data["sections"].values())
@@ -175,7 +210,7 @@ def test_empty_db_renders_waiting(tmp_path):
 
 
 def test_waiting_note_uses_first_forecast_date(tmp_path):
-    fake = FakeDb()
+    fake = Fake()
     seed(fake, challenger_scores=False)
     fake.con.execute(
         "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id,"
@@ -191,7 +226,7 @@ def test_waiting_note_uses_first_forecast_date(tmp_path):
 
 
 def test_no_challenger_configured(tmp_path):
-    fake = FakeDb()
+    fake = Fake()
     seed(fake)
     build(fake, tmp_path, challenger_model_version=None)
     page = (tmp_path / "index.html").read_text()
@@ -200,7 +235,7 @@ def test_no_challenger_configured(tmp_path):
 
 
 def test_missing_table_degrades_one_section(tmp_path):
-    fake = FakeDb()
+    fake = Fake()
     seed(fake)
     fake.con.execute("DROP TABLE drift_checks")
     assert build(fake, tmp_path) == 0
@@ -208,8 +243,30 @@ def test_missing_table_degrades_one_section(tmp_path):
     assert data["sections"]["drift"] == "unavailable"
     assert data["drift"] is None and data["kpi"]["worst_psi"] is None
     assert data["sections"]["scores"] == "ok"
+    assert data["sections"]["models"] == "ok"  # ran after the failure, on the same connection
     assert data["status"] == "degraded"
     assert "Drift unavailable right now" in (tmp_path / "index.html").read_text()
+    assert "ROLLBACK TO SAVEPOINT dashboard_section" in fake.statements
+
+
+def test_read_only_single_connection_never_commits(tmp_path):
+    fake = Fake()
+    seed(fake)
+    opened = []
+
+    def connect(url):
+        opened.append(url)
+        return fake
+
+    fake.statements.clear()
+    assert dashboard.run(settings(), tmp_path, connect=connect, clock=lambda: NOW) == 0
+    assert len(opened) == 1
+    assert fake.statements[0] == "SET TRANSACTION READ ONLY"
+    assert fake.statements[-1] == "ROLLBACK"  # the only way the transaction ends; no COMMIT
+    assert fake.closed
+    ignored = ("SET TRANSACTION", "SAVEPOINT", "RELEASE", "ROLLBACK", "SELECT")
+    assert not [s for s in fake.statements if not s.upper().startswith(ignored)]
+    assert not [s for s in fake.statements if "min(" in s]
 
 
 def test_every_section_failing_writes_nothing(tmp_path):
@@ -223,11 +280,11 @@ def test_every_section_failing_writes_nothing(tmp_path):
 
 def test_missing_database_url_is_config_error(tmp_path):
     with pytest.raises(dashboard.ConfigError):
-        dashboard.run(settings(database_url=None), tmp_path, connect=FakeDb())
+        dashboard.run(settings(database_url=None), tmp_path, connect=Fake())
 
 
 def test_no_secrets_in_output(tmp_path):
-    fake = FakeDb()
+    fake = Fake()
     seed(fake)
     fake.con.execute("DROP TABLE drift_checks")  # also exercise the failure path
     build(fake, tmp_path)
@@ -253,7 +310,7 @@ def test_headline_logic(skill, state, text):
 
 
 def test_negative_skill_page_uses_amber_not_yet(tmp_path):
-    fake = FakeDb()
+    fake = Fake()
     seed(fake)
     fake.con.execute("UPDATE scores SET abs_error = 20 WHERE model_version = ?", (CHALLENGER,))
     fake.con.commit()
@@ -265,7 +322,7 @@ def test_negative_skill_page_uses_amber_not_yet(tmp_path):
 
 
 def test_html_escapes_station_ids(tmp_path):
-    fake = FakeDb()
+    fake = Fake()
     fake.con.execute(
         "INSERT INTO observations (station_id, ts, pm25, source) VALUES (?, ?, 20, 'air4thai')",
         ("<script>x</script>", (NOW - H).isoformat()),
