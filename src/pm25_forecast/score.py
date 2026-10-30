@@ -10,6 +10,8 @@ metrics by model and horizon.
 * Forecasts are (re)scored over a lookback of ``RESCORE_LOOKBACK`` of valid_time, so a late or
   corrected observation updates its score. Only new or changed scores are written (upsert), so a
   re-run writes nothing.
+* ``--since <UTC datetime>`` re-scores from that valid_time instead (one-off repair after
+  observations were corrected, KAN-74); it is idempotent and does not change the metrics window.
 * CAMS rows are not scored: CAMS is out of the plan (decided 2026-10-29).
 * Metrics over ``METRICS_WINDOW`` of valid_time, per model and horizon (+6/+12/+24 h): n, MAE,
   RMSE and skill vs persistence = 1 - MAE_model / MAE_persistence on matched pairs (same station,
@@ -24,6 +26,7 @@ metrics by model and horizon.
 Exit codes: 0 ok (waiting rows are reported, not failures), 1 failed / DB down, 2 config error.
 """
 
+import argparse
 import logging
 import math
 import sys
@@ -189,9 +192,16 @@ def run(
     *,
     connect: Callable[[str], Any] = db.connect,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    since: datetime | None = None,
 ) -> ScoreResult:
-    """One scoring run. Driver connection errors propagate for `run_entrypoint` to map."""
+    """One scoring run. Driver connection errors propagate for `run_entrypoint` to map.
+
+    ``since`` (aware UTC, one-off re-score, KAN-74) replaces the ``RESCORE_LOOKBACK`` start so
+    scores can be recomputed after observations were repaired. It only widens or moves the
+    rescored valid_time range; the metrics window is unchanged.
+    """
     now = sql.require_utc(clock())
+    rescore_from = now - RESCORE_LOOKBACK if since is None else sql.require_utc(since)
     if settings.database_url is None:
         raise ConfigError("DATABASE_URL is not set")
     models = [REFERENCE_MODEL_VERSION]
@@ -205,7 +215,7 @@ def run(
         for model_version in models:
             raw = con.execute(
                 sql.SELECT_MATURED_FORECASTS,
-                {"model_version": model_version, "since": now - RESCORE_LOOKBACK, "now": now},
+                {"model_version": model_version, "since": rescore_from, "now": now},
             ).fetchall()
             matured = _validated(
                 MaturedRow,
@@ -253,7 +263,29 @@ def run(
     return result
 
 
-def main() -> int:
+def parse_since(value: str) -> datetime:
+    """``--since`` value: ISO datetime with an explicit UTC offset, e.g. 2026-10-27T00:00:00Z."""
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an ISO datetime: {value!r}") from None
+    if moment.tzinfo is None:
+        raise argparse.ArgumentTypeError("--since needs a UTC offset, e.g. 2026-10-27T00:00:00Z")
+    return moment.astimezone(UTC)
+
+
+def main(argv: Sequence[str] = ()) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pm25_forecast.score", description=__doc__.splitlines()[0]
+    )
+    parser.add_argument(
+        "--since",
+        type=parse_since,
+        default=None,
+        help="one-off re-score of forecasts with valid_time from this UTC datetime "
+        f"(default: the last {RESCORE_LOOKBACK})",
+    )
+    args = parser.parse_args(list(argv))
     configure_logging()
     alert = make_alert(None, prefix="[pm25 score]")
     try:
@@ -263,7 +295,7 @@ def main() -> int:
         )
         alert = make_alert(webhook, prefix="[pm25 score]")
         result, code = run_entrypoint(
-            lambda: run(settings), alert, connection_errors=db.CONNECTION_ERRORS
+            lambda: run(settings, since=args.since), alert, connection_errors=db.CONNECTION_ERRORS
         )
     except ConfigError as exc:  # messages never contain secret values
         logger.error("configuration error: %s", exc)
@@ -285,4 +317,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

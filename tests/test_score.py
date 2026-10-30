@@ -1,5 +1,6 @@
 """KAN-20: score matured forecasts against actuals. Offline: SQLite built from schema.sql."""
 
+import argparse
 import math
 import socket
 from datetime import UTC, datetime, timedelta
@@ -37,8 +38,8 @@ def settings(**kw):
     return Settings(_env_file=None, **{**values, **kw})
 
 
-def do_run(fake, now=NOW, **kw) -> ScoreResult:
-    return run(settings(**kw), connect=fake, clock=lambda: now)
+def do_run(fake, now=NOW, since=None, **kw) -> ScoreResult:
+    return run(settings(**kw), connect=fake, clock=lambda: now, since=since)
 
 
 def add_obs(fake, station, ts, pm25):
@@ -139,6 +140,52 @@ def test_forecast_older_than_the_lookback_is_not_rescored(fake):
     add_pred(fake, "59t", issue, 24, P, 40.0)
     add_obs(fake, "59t", issue + 24 * H, 30.0)
     assert do_run(fake).matured[P] == 0
+
+
+def test_since_rescoring_reaches_back_beyond_the_default_lookback(fake):
+    issue = NOW - score.RESCORE_LOOKBACK - 30 * H
+    add_pred(fake, "59t", issue, 24, P, 40.0)
+    add_obs(fake, "59t", issue + 24 * H, 30.0)
+    assert do_run(fake).matured[P] == 0
+    since = issue + 24 * H - H
+    assert do_run(fake, since=since).matured[P] == 1
+    assert [r[-2:] for r in scores(fake)] == [(30.0, 10.0)]
+
+
+def test_since_corrects_a_score_after_the_observation_was_repaired(fake):
+    issue = NOW - score.RESCORE_LOOKBACK - 30 * H
+    valid = issue + 24 * H
+    add_pred(fake, "59t", issue, 24, P, 40.0)
+    add_obs(fake, "59t", valid, 30.0)
+    do_run(fake, since=valid - H)
+    fake.con.execute("UPDATE observations SET pm25 = 38.0")
+    do_run(fake, since=valid - H)
+    (row,) = scores(fake)
+    assert row[-2:] == (38.0, 2.0)
+
+
+def test_parse_since_requires_an_offset():
+    assert score.parse_since("2026-10-27T00:00:00Z") == datetime(2026, 10, 27, tzinfo=UTC)
+    assert score.parse_since("2026-10-27T07:00:00+07:00") == datetime(2026, 10, 27, tzinfo=UTC)
+    with pytest.raises(argparse.ArgumentTypeError):
+        score.parse_since("2026-10-27T00:00:00")
+    with pytest.raises(argparse.ArgumentTypeError):
+        score.parse_since("yesterday")
+
+
+def test_main_passes_since_to_run(monkeypatch):
+    monkeypatch.setattr(score, "get_settings", lambda: settings())
+    seen = {}
+
+    def fake_run(_settings, **kw):
+        seen.update(kw)
+        return ScoreResult(run_id="r", scored_at=NOW)
+
+    monkeypatch.setattr(score, "run", fake_run)
+    assert score.main(["--since", "2026-10-27T00:00:00Z"]) == 0
+    assert seen["since"] == datetime(2026, 10, 27, tzinfo=UTC)
+    assert score.main([]) == 0
+    assert seen["since"] is None
 
 
 def test_end_to_end_metrics_and_skill(fake):

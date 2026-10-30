@@ -384,3 +384,136 @@ def test_retry_after_http_date_and_bad_header():
     )
     assert b.retry_wait(response, 0) == b.MAX_WAIT
     assert b.retry_wait(httpx.Response(429), 2) == 4
+
+
+def subwindow_responder(bad_days):
+    """Sensor 900 returns HTTP 500 for any window over one day and for bad_days."""
+
+    def responder(request):
+        if request.url.path.endswith("/locations"):
+            return handler(request)
+        lo = datetime.fromisoformat(request.url.params["datetime_from"])
+        hi = datetime.fromisoformat(request.url.params["datetime_to"])
+        if hi - lo > timedelta(days=1) or lo in bad_days:
+            return httpx.Response(500)
+        return httpx.Response(200, json={"results": [hour(int(lo.day), lo)]})
+
+    return responder
+
+
+SUB_START = datetime(2026, 5, 9, tzinfo=UTC)
+SUB_END = SUB_START + timedelta(days=4)
+
+
+def test_chunk_500_splits_into_subwindows_stores_good_and_reports_bad(caplog):
+    fake = FakeDb()
+    bad = {SUB_START + timedelta(days=1), SUB_START + timedelta(days=3)}
+    sid = TARGET_STATION_IDS[0]
+    reports = run(
+        fake,
+        subwindow_responder(bad),
+        start=SUB_START,
+        end=SUB_END,
+        station_ids=[sid],
+    )
+    stored = {r[1] for r in fake.rows("observations")}
+    assert stored == {SUB_START.isoformat(), (SUB_START + timedelta(days=2)).isoformat()}
+    assert {r[1]: r[2] for r in fake.rows("observations")} == {
+        SUB_START.isoformat(): 9,
+        (SUB_START + timedelta(days=2)).isoformat(): 11,
+    }
+    failures = reports[0].failures
+    assert len(failures) == 2
+    for day in bad:
+        assert any(f.startswith(f"{day.isoformat()}..") and "sensor 900" in f for f in failures)
+        assert any("HTTP 500" in f for f in failures)
+    assert reports[0].chunks == 1 and reports[0].rows_usable == 2
+    assert "synthetic-test-value" not in caplog.text
+    assert "synthetic-test-value" not in " ".join(failures)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(b, "run", lambda *a, **kw: reports)
+        assert b.main([]) == 1
+
+
+def test_chunk_500_all_subwindows_succeed_has_no_failures():
+    fake = FakeDb()
+    sid = TARGET_STATION_IDS[0]
+    reports = run(fake, subwindow_responder(set()), start=SUB_START, end=SUB_END, station_ids=[sid])
+    assert reports[0].failures == []
+    assert {r[1]: r[2] for r in fake.rows("observations")} == {
+        (SUB_START + timedelta(days=n)).isoformat(): 9 + n for n in range(4)
+    }
+    assert reports[0].chunks == 1
+
+
+def hourly_responder(values, bad_los=(), whole_window_500=True):
+    """Per-sensor hourly rows for every whole hour in the window, value from `values`."""
+
+    def responder(request):
+        if request.url.path.endswith("/locations"):
+            payload = handler(request).json()
+            payload["results"][0]["sensors"] = [sensor(sid) for sid in values]
+            return httpx.Response(200, json=payload)
+        sid = int(request.url.path.split("/")[-2])
+        lo = datetime.fromisoformat(request.url.params["datetime_from"])
+        hi = datetime.fromisoformat(request.url.params["datetime_to"])
+        if sid in bad_los and (
+            lo in bad_los[sid] or (whole_window_500 and hi - lo > timedelta(days=1))
+        ):
+            return httpx.Response(500)
+        n = int((hi - lo) / timedelta(hours=1))
+        rows = [hour(values[sid], lo + timedelta(hours=i)) for i in range(n)]
+        return httpx.Response(200, json={"results": rows})
+
+    return responder
+
+
+def test_two_sensors_failed_day_is_not_written_and_not_displaced():
+    sid = TARGET_STATION_IDS[0]
+    three = SUB_START + timedelta(days=3)
+    day2 = SUB_START + timedelta(days=1)
+    kw = {"start": SUB_START, "end": three, "station_ids": [sid]}
+
+    # Fresh DB: higher sensor 901 fails day 2; sensor 900 succeeds everywhere.
+    fresh = FakeDb()
+    responder = hourly_responder({900: 50, 901: 100}, {901: {day2}})
+    reports = run(fresh, responder, **kw)
+    assert len(reports[0].failures) == 1 and "sensor 901" in reports[0].failures[0]
+    stamps = {r[1]: r[2] for r in fresh.rows("observations")}
+    assert len(stamps) == 48  # days 1 and 3 only; day 2's 24 hours are absent
+    assert all(not (day2 <= datetime.fromisoformat(t) < day2 + timedelta(days=1)) for t in stamps)
+    assert set(stamps.values()) == {100}  # 901 wins; sensor 900 is never substituted in
+
+    # Existing data: a full good run, then a replay where 901 fails day 2.
+    fake = FakeDb()
+    assert run(fake, hourly_responder({900: 50, 901: 100}), **kw)[0].failures == []
+    assert {r[2] for r in fake.rows("observations")} == {100}
+    reports = run(fake, hourly_responder({900: 50, 901: 200}, {901: {day2}}), **kw)
+    assert len(reports[0].failures) == 1
+    by_ts = {r[1]: r[2] for r in fake.rows("observations")}
+    assert len(by_ts) == 72
+    for t, value in by_ts.items():
+        in_day2 = day2 <= datetime.fromisoformat(t) < day2 + timedelta(days=1)
+        assert value == (100 if in_day2 else 200)  # day 2 untouched, others refreshed
+
+
+def test_partial_final_window_36h_chunk():
+    sid = TARGET_STATION_IDS[0]
+    end = SUB_START + timedelta(hours=36)
+    final = SUB_START + timedelta(days=1)
+    kw = {"start": SUB_START, "end": end, "station_ids": [sid]}
+
+    ok = FakeDb()
+    reports = run(ok, hourly_responder({900: 7}, {900: set()}), **kw)  # whole 36h -> 500
+    assert reports[0].failures == []
+    rows = {r[1]: r[2] for r in ok.rows("observations")}
+    assert len(rows) == 36 and set(rows.values()) == {7}
+    assert max(datetime.fromisoformat(t) for t in rows) == end - timedelta(hours=1)
+
+    bad = FakeDb()
+    reports = run(bad, hourly_responder({900: 7}, {900: {final}}), **kw)
+    assert reports[0].failures == [f"{final.isoformat()}..{end.isoformat()} sensor 900: HTTP 500"]
+    rows = {r[1]: r[2] for r in bad.rows("observations")}
+    assert len(rows) == 24 and set(rows.values()) == {7}
+    assert max(datetime.fromisoformat(t) for t in rows) == final - timedelta(hours=1)

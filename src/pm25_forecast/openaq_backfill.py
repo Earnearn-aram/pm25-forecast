@@ -1,4 +1,5 @@
-"""KAN-49: restartable OpenAQ hourly history ingestion; see docs/openaq-backfill.md."""
+"""KAN-49: restartable OpenAQ hourly history ingestion, with KAN-52 sub-window retries
+for sensors that fail a whole chunk; see docs/openaq-backfill.md."""
 
 import argparse
 import logging
@@ -32,6 +33,7 @@ from pm25_forecast.storage.sql import require_utc
 
 logger = logging.getLogger(__name__)
 CHUNK_DAYS = 31
+SUBCHUNK_DAYS = 1  # KAN-52: retry unit for a sensor whose whole-chunk fetch fails
 MAX_PAGES = 32
 MAX_ATTEMPTS = 4
 MAX_WAIT = 60.0
@@ -158,6 +160,60 @@ class OpenAQClient:
         return series
 
 
+def chunk_series(
+    client: OpenAQClient,
+    station_id: str,
+    sensors: Sequence[int],
+    chunk_start: datetime,
+    chunk_end: datetime,
+) -> tuple[dict[datetime, float], list[str], list[tuple[datetime, datetime]]]:
+    """One station's merged chunk series, failure messages and failed sub-window spans.
+
+    Sensors merge in ascending id order, so the highest sensor id wins each non-null
+    overlapping hour. A sensor whose whole-chunk fetch fails (KAN-52: the API can HTTP 500
+    on a large window that it serves fine in smaller pieces) is retried alone over
+    SUBCHUNK_DAYS sub-windows and every successful sub-window is kept. Failed sub-windows
+    are returned as spans; their hours are excluded from the merged series so a partial
+    replay can never displace previously stored higher-priority sensor data there.
+    """
+    series: dict[datetime, float] = {}
+    failures: list[str] = []
+    failed_spans: list[tuple[datetime, datetime]] = []
+    for sensor in sensors:
+        try:
+            # Fetch each sensor atomically so a failed later page cannot publish a
+            # partial series that would alter precedence on a subsequent rerun.
+            series.update(client.hours(sensor, chunk_start, chunk_end))
+            continue
+        except OpenAQError as exc:
+            logger.warning(
+                "station %s chunk %s sensor %d: %s; retrying in %d-day sub-windows",
+                station_id,
+                chunk_start.isoformat(),
+                sensor,
+                exc,
+                SUBCHUNK_DAYS,
+            )
+        sub_start = chunk_start
+        while sub_start < chunk_end:
+            sub_end = min(chunk_end, sub_start + timedelta(days=SUBCHUNK_DAYS))
+            try:
+                series.update(client.hours(sensor, sub_start, sub_end))
+            except OpenAQError as sub_exc:
+                failed_spans.append((sub_start, sub_end))
+                failures.append(
+                    f"{sub_start.isoformat()}..{sub_end.isoformat()} sensor {sensor}: {sub_exc}"
+                )
+            sub_start = sub_end
+    if failed_spans:
+        series = {
+            stamp: value
+            for stamp, value in series.items()
+            if not any(lo <= stamp < hi for lo, hi in failed_spans)
+        }
+    return series, failures, failed_spans
+
+
 def run(
     settings: Settings,
     *,
@@ -217,25 +273,24 @@ def run(
             chunk_start = start
             while chunk_start < end:
                 chunk_end = min(end, chunk_start + timedelta(days=CHUNK_DAYS))
-                series = {}
-                failures_before = len(report.failures)
-                for sensor in report.sensor_ids:
-                    try:
-                        # Ascending ids: highest sensor id wins each non-null overlapping hour.
-                        # Fetch each sensor atomically so a failed later page cannot publish a
-                        # partial series that would alter precedence on a subsequent rerun.
-                        series.update(client.hours(sensor, chunk_start, chunk_end))
-                    except OpenAQError as exc:
-                        report.failures.append(f"{chunk_start.isoformat()} sensor {sensor}: {exc}")
-                if len(report.failures) != failures_before:
-                    # Never overwrite a previous higher-priority sensor with a partial replay.
+                series, chunk_failures, failed_spans = chunk_series(
+                    client, station.station_id, report.sensor_ids, chunk_start, chunk_end
+                )
+                report.failures.extend(chunk_failures)
+                if failed_spans:
+                    # Store what succeeded; failed sub-windows stay gaps for a targeted
+                    # replay (KAN-52). With nothing storable, leave the chunk untouched.
                     logger.error(
-                        "station %s chunk %s failed; replay required",
+                        "station %s chunk %s: %d sub-window failures, %d rows storable;"
+                        " replay required for the failed sub-windows",
                         station.station_id,
                         chunk_start.isoformat(),
+                        len(failed_spans),
+                        len(series),
                     )
-                    chunk_start = chunk_end
-                    continue
+                    if not series:
+                        chunk_start = chunk_end
+                        continue
                 rows = [
                     OpenAQObservation(station_id=station.station_id, ts=stamp, pm25=value)
                     for stamp, value in sorted(series.items())

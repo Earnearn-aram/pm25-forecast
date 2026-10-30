@@ -16,9 +16,12 @@
 # Air4Thai TLS: AIR4THAI_CA_BUNDLE (KAN-43).
 # Notes: GitHub cron is best effort (10-40 min late, sometimes skipped) and scheduled workflows are
 # disabled after 60 days without repo activity; the collector keys on data timestamps, so late or
-# doubled runs are safe. Air4Thai only exposes its latest reading, so we poll every 20 minutes
-# (upserts are idempotent, CAMS repeats are deduped); anything still missed is flagged by the gap
-# check, not recovered (true backfill: KAN-34).
+# doubled runs are safe. KAN-74: the collector stores hourly values from the Air4Thai history
+# endpoint (the last 6 hours per station, one request per station per run), never the 24 h headline
+# average of getNewAQI_JSON. Because each run re-reads 6 hours, a run missed within that window is
+# healed by the next one; hourly cron ("7 * * * *") would be enough and would cut the request
+# volume to the history host by two thirds (owner choice, not required). Anything older that was
+# still missed is flagged by the gap check and recovered by the daily backfill (KAN-34).
 name: Collector
 
 on:
