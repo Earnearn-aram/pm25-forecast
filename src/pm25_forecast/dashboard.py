@@ -791,8 +791,7 @@ def render_html(data: dict[str, Any]) -> str:
         note = '<p class="note">No challenger model is configured, so only the baseline runs.</p>'
     if unav:
         note += (
-            f'<p class="note">Some data is unavailable right now: {e(", ".join(sorted(unav)))}.'
-            "</p>"
+            f'<p class="note">Some data is unavailable right now: {e(", ".join(sorted(unav)))}.</p>'
         )
 
     skill = k["skill_24h"]

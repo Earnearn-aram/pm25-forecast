@@ -120,7 +120,7 @@ def test_scored_build_json_shape_and_page(tmp_path):
     seed(fake)
     assert build(fake, tmp_path) == 0
     data = load(tmp_path)
-    assert TOP_KEYS <= data.keys()
+    assert data.keys() >= TOP_KEYS
     assert set(data["sections"]) == set(dashboard.SECTIONS)
     assert all(v == "ok" for v in data["sections"].values())
     assert data["headline"] == {"state": "yes", "text": "Yes, by 50.0%", "skill_pct": 50.0}
@@ -161,7 +161,7 @@ def test_scored_build_json_shape_and_page(tmp_path):
 def test_empty_db_renders_waiting(tmp_path):
     assert build(FakeDb(), tmp_path) == 0
     data = load(tmp_path)
-    assert TOP_KEYS <= data.keys()
+    assert data.keys() >= TOP_KEYS
     assert all(v == "ok" for v in data["sections"].values())
     assert data["status"] == "waiting"
     assert data["headline"]["state"] == "waiting"
@@ -243,7 +243,7 @@ def test_no_secrets_in_output(tmp_path):
         (None, "waiting", "Not scored yet"),
         (float("nan"), "waiting", "Not scored yet"),
         (0.123, "yes", "Yes, by 12.3%"),
-        (-0.081, "not_yet", "Not yet (−8.1%)"),
+        (-0.081, "not_yet", "Not yet (\u22128.1%)"),
         (0.0, "not_yet", "Not yet (0.0%)"),
     ],
 )
@@ -260,7 +260,7 @@ def test_negative_skill_page_uses_amber_not_yet(tmp_path):
     build(fake, tmp_path)
     data = load(tmp_path)
     assert data["headline"]["state"] == "not_yet"
-    assert data["headline"]["text"].startswith("Not yet (−")
+    assert data["headline"]["text"].startswith("Not yet (\u2212")
     assert 'class="answer notyet"' in (tmp_path / "index.html").read_text()
 
 
