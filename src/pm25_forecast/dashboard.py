@@ -1156,8 +1156,8 @@ def render_html(data: dict[str, Any]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
-<link rel="stylesheet" href="dashboard.css?v=kan73-layout-story">
-<script src="dashboard.js?v=kan73-layout-story" defer></script>
+<link rel="stylesheet" href="dashboard.css?v=kan73-readable-fonts">
+<script src="dashboard.js?v=kan73-readable-fonts" defer></script>
 </head>
 <body>
 <main>
