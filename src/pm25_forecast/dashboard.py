@@ -621,7 +621,7 @@ def _lines(points: list[dict[str, Any]], key: str, ymax: float, css: str) -> str
             segments.append([])
             continue
         y = h - pad - min(v, ymax) / ymax * (h - 2 * pad)
-        segments[-1].append(f"{i / n * 700:.1f},{y:.1f}")
+        segments[-1].append(f"{i / n * 400:.1f},{y:.1f}")
     return "".join(
         f'<polyline class="ln {css}" vector-effect="non-scaling-stroke" points="{" ".join(s)}"/>'
         for s in segments
@@ -630,7 +630,8 @@ def _lines(points: list[dict[str, Any]], key: str, ymax: float, css: str) -> str
 
 
 def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
-    points = st["points"]
+    # Show the latest 24 hours beside the next 24 hours on equal time scales.
+    points = st["points"][-25:]
     keys = ["actual", "persistence"] + (["challenger"] if chart["has_challenger"] else [])
     values = [p[k] for p in points for k in keys if p[k] is not None]
     values += [
@@ -661,7 +662,7 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
         ]
         if actual_points:
             i, point = actual_points[-1]
-            x = i / max(len(points) - 1, 1) * 700
+            x = i / max(len(points) - 1, 1) * 400
             y = 212 - min(point["actual"], ymax) / ymax * 204
             description = f"Actual: {point['actual']:g} µg/m³ at {point['t']}"
             series += (
@@ -675,7 +676,7 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
                 if forecast["value"] is None:
                     continue
                 t = datetime.fromisoformat(forecast["valid_time"])
-                x = 700 + (t - forecast_origin).total_seconds() / 86400 * 100
+                x = 400 + (t - forecast_origin).total_seconds() / 86400 * 400
                 y = 212 - min(forecast["value"], ymax) / ymax * 204
                 coords.append((x, y, forecast))
             if len(coords) > 1:
@@ -695,10 +696,11 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
                     f'r="4"><title>{e(description)}</title></circle>'
                 )
         aria = (
-            f"Station {st['label']}, last 7 days in UTC: actual PM2.5 in \u00b5g/m\u00b3 against "
+            f"Station {st['label']}, last 24 hours in UTC: actual PM2.5 in \u00b5g/m\u00b3 against "
             "persistence and challenger forecasts made 24 h earlier"
         )
-        start, end = datetime.fromisoformat(chart["start"]), datetime.fromisoformat(chart["end"])
+        end = datetime.fromisoformat(chart["end"])
+        start = end - timedelta(hours=24)
         future_html = []
         for key, name in (
             ("future_persistence", "Persistence forecast"),
@@ -725,7 +727,7 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
         )
         body = (
             '<div class="plotwrap"><div class="ytitle">\u00b5g/m\u00b3</div><div class="plot">'
-            f'{labels}<svg viewBox="0 0 800 220" preserveAspectRatio="none" role="img" '
+            f'{labels}<svg viewBox="-8 0 816 220" preserveAspectRatio="none" role="img" '
             f'aria-label="{e(aria)}">{grid}{series}</svg></div>'
             f'<div class="xlabs"><span>{start:%d %b %H:%M} UTC</span>'
             f'<span class="axis-now" title="{end:%d %b %H:%M} UTC">Now</span>'
@@ -767,7 +769,7 @@ def _section_chart(data: dict[str, Any]) -> str:
         f'<div class="pills" role="group" aria-label="Station">{pills}</div></div>'
         f"{legend}{inner}"
         '<figcaption class="muted small">Each point: the forecast made 24 h before that hour. '
-        "Last 7 days, hourly, UTC. Future dots are forecasts; dashed lines connect available "
+        "Last 24 hours, hourly, UTC. Future dots are forecasts; dashed lines connect available "
         "points and do not imply intermediate predictions.</figcaption></figure>"
     )
 
@@ -1052,11 +1054,13 @@ def _section_story() -> str:
 <h2 data-en="Behind the forecast" data-th="เบื้องหลังการพยากรณ์">Behind the forecast</h2>
 <div class="story-grid">
 <article><h3 data-en="Data sources" data-th="แหล่งข้อมูล">Data sources</h3>
-<p data-en="Air4Thai provides readings; OpenAQ backfills history; Open-Meteo provides CAMS forecasts." data-th="Air4Thai ให้ค่าตรวจวัด OpenAQ เติมข้อมูลย้อนหลัง และ Open-Meteo ให้ค่าพยากรณ์ CAMS">Air4Thai provides readings; OpenAQ backfills history; Open-Meteo provides CAMS forecasts.</p></article>
+<p data-en="Air4Thai provides readings; OpenAQ backfills history; Open-Meteo provides CAMS forecasts." data-th="Air4Thai ให้ค่าตรวจวัด OpenAQ เติมข้อมูลย้อนหลัง และ Open-Meteo ให้ค่าพยากรณ์ CAMS">Air4Thai provides readings; OpenAQ backfills history; Open-Meteo provides CAMS forecasts.</p>
+<div class="source-list"><details><summary>Air4Thai<span class="source-unmeasured" data-en="Coverage not measured" data-th="ยังไม่วัดความครบ">Coverage not measured</span></summary><p data-en="Station PM2.5 readings. Collection runs up to every 20 minutes; Air4Thai backfill runs daily." data-th="ข้อมูล PM2.5 จากสถานี เก็บข้อมูลสูงสุดทุก 20 นาที และเติมข้อมูลย้อนหลังทุกวัน">Station PM2.5 readings. Collection runs up to every 20 minutes; Air4Thai backfill runs daily.</p></details><details><summary>OpenAQ<span class="source-unmeasured" data-en="Coverage not measured" data-th="ยังไม่วัดความครบ">Coverage not measured</span></summary><p data-en="Historical PM2.5 backfill, run manually. Stored source labels do not prove complete source coverage." data-th="เติมข้อมูล PM2.5 ย้อนหลังด้วยตนเอง ป้ายแหล่งข้อมูลในฐานข้อมูลไม่ได้ยืนยันความครบของข้อมูลต้นทาง">Historical PM2.5 backfill, run manually. Stored source labels do not prove complete source coverage.</p></details><details><summary>Open-Meteo / CAMS<span class="source-unmeasured" data-en="Coverage not measured" data-th="ยังไม่วัดความครบ">Coverage not measured</span></summary><p data-en="CAMS forecast vintages collected up to every 20 minutes. Provider update schedules can differ." data-th="เก็บชุดพยากรณ์ CAMS สูงสุดทุก 20 นาที รอบอัปเดตของผู้ให้บริการอาจแตกต่างกัน">CAMS forecast vintages collected up to every 20 minutes. Provider update schedules can differ.</p></details></div></article>
 <article><h3 data-en="Time-safe inputs" data-th="ข้อมูลเข้า ณ เวลาพยากรณ์">Time-safe inputs</h3>
-<p data-en="Features use only information available by forecast time. Training and serving share the same feature builder." data-th="ใช้เฉพาะข้อมูลที่มี ณ เวลาพยากรณ์ และใช้วิธีสร้างตัวแปรเดียวกันทั้งตอนฝึกและใช้งาน">Features use only information available by forecast time. Training and serving share the same feature builder.</p></article>
+<p data-en="Features use only information available by forecast time. Training and serving share the same feature builder." data-th="ใช้เฉพาะข้อมูลที่มี ณ เวลาพยากรณ์ และใช้วิธีสร้างตัวแปรเดียวกันทั้งตอนฝึกและใช้งาน">Features use only information available by forecast time. Training and serving share the same feature builder.</p><div class="feature-timeline" role="img" aria-label="Past features are available at forecast time; predictions extend to six, twelve and twenty-four hours"><div class="feature-point"><i></i><b data-en="Past" data-th="อดีต">Past</b><small data-en="Available inputs" data-th="ข้อมูลที่มี">Available inputs</small></div><div class="feature-point"><i></i><b data-en="Now" data-th="ตอนนี้">Now</b><small data-en="Issue time" data-th="เวลาพยากรณ์">Issue time</small></div><div class="feature-point"><i></i><b>+6h</b></div><div class="feature-point"><i></i><b>+12h</b></div><div class="feature-point"><i></i><b>+24h</b></div></div><p class="story-note" data-en="Up to every 20 minutes; issue times are hourly. Model horizons vary." data-th="ทำงานสูงสุดทุก 20 นาที เวลาออกพยากรณ์เป็นรายชั่วโมง ระยะพยากรณ์ขึ้นอยู่กับโมเดล">Up to every 20 minutes; issue times are hourly. Model horizons vary.</p></article>
 <article><h3 data-en="Why five stations?" data-th="ทำไมเลือกห้าสถานี?">Why five stations?</h3>
-<p data-en="The initial pilot selected five stations with the fewest missing hourly readings in the Air4Thai probe." data-th="โครงการนำร่องเลือกห้าสถานีที่มีข้อมูลรายชั่วโมงขาดน้อยที่สุดจากการตรวจ Air4Thai">The initial pilot selected five stations with the fewest missing hourly readings in the Air4Thai probe.</p></article>
+<p data-en="The pilot selected the five stations with the fewest missing hourly readings in the Air4Thai probe." data-th="โครงการนำร่องเลือกห้าสถานีที่มีข้อมูลรายชั่วโมงขาดน้อยที่สุดจากการตรวจ Air4Thai">The pilot selected the five stations with the fewest missing hourly readings in the Air4Thai probe.</p>
+<div class="selection-chart"><div class="selection-chart-head"><span data-en="SELECTED STATIONS · HISTORICAL PROBE" data-th="สถานีที่เลือก · ผลตรวจย้อนหลัง">SELECTED STATIONS · HISTORICAL PROBE</span><span>~87 days</span></div><div class="selection-row"><span data-en="Government Public Relations Dept." data-th="กรมประชาสัมพันธ์">Government Public Relations Dept.</span><i></i><b>~100%</b></div><div class="selection-row"><span data-en="Bodindecha School" data-th="โรงเรียนบดินทรเดชา">Bodindecha School</span><i></i><b>~100%</b></div><div class="selection-row"><span data-en="Bueng Kum District Office" data-th="สำนักงานเขตบึงกุ่ม">Bueng Kum District Office</span><i></i><b>~100%</b></div><div class="selection-row"><span data-en="Khlong Sam Wa District Office" data-th="สำนักงานเขตคลองสามวา">Khlong Sam Wa District Office</span><i></i><b>~100%</b></div><div class="selection-row"><span data-en="Bansomdejchaopraya Rajabhat Univ." data-th="มหาวิทยาลัยราชภัฏบ้านสมเด็จเจ้าพระยา">Bansomdejchaopraya Rajabhat Univ.</span><i></i><b>~100%</b></div><small data-en="Rounded values within the available ~87-day window in the 27 Oct 2026 probe. The full ranking was not retained." data-th="ค่าปัดในช่วงที่มีข้อมูลประมาณ 87 วัน จากการตรวจวันที่ 27 ต.ค. 2026 รายงานเดิมไม่ได้เก็บอันดับทั้งหมด">Rounded values within the available ~87-day window in the 27 Oct 2026 probe. The full ranking was not retained.</small></div><details class="story-details"><summary data-en="How to expand" data-th="แนวทางขยาย">How to expand</summary><p data-en="Check additional public stations and historical coverage before scaling ingestion, evaluation and monitoring." data-th="ตรวจสถานีสาธารณะและข้อมูลย้อนหลังเพิ่มเติมก่อนขยายการเก็บข้อมูล การประเมิน และการเฝ้าระวัง">Check additional public stations and historical coverage before scaling ingestion, evaluation and monitoring.</p></details></article>
 <article><h3 data-en="Persistence baseline" data-th="วิธีพื้นฐาน Persistence">Persistence baseline</h3>
 <p data-en="The latest usable reading is carried forward. A reading older than three hours is not used." data-th="ใช้ค่าล่าสุดที่ใช้ได้เป็นค่าพยากรณ์ หากข้อมูลเก่ากว่าสามชั่วโมงจะไม่ใช้">The latest usable reading is carried forward. A reading older than three hours is not used.</p>
 <small data-en="Illustrative example" data-th="ตัวอย่างประกอบ">Illustrative example</small><svg class="explain-chart" viewBox="0 0 300 105" role="img" aria-label="Persistence example: the latest reading is carried forward to the forecast horizons."><polyline class="explain-actual" points="5,75 40,60 75,68 110,42 145,55"/><path class="explain-forecast" d="M145 55 H290"/><circle class="explain-current" cx="145" cy="55" r="4"/><circle class="explain-predicted" cx="195" cy="55" r="4"/><circle class="explain-predicted" cx="240" cy="55" r="4"/><circle class="explain-predicted" cx="290" cy="55" r="4"/><text x="132" y="93">Now</text><text x="183" y="93">+6h</text><text x="225" y="93">+12h</text><text x="273" y="93">+24h</text></svg>
@@ -1152,8 +1156,8 @@ def render_html(data: dict[str, Any]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
-<link rel="stylesheet" href="dashboard.css?v=kan73-full-width">
-<script src="dashboard.js?v=kan73-redesign" defer></script>
+<link rel="stylesheet" href="dashboard.css?v=kan73-layout-story">
+<script src="dashboard.js?v=kan73-layout-story" defer></script>
 </head>
 <body>
 <main>

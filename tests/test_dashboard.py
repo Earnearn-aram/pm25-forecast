@@ -532,3 +532,22 @@ def test_every_future_forecast_label_says_forecast(tmp_path):
     for chip in chips:  # the Thai chip text also names the forecast (พยากรณ์)
         match = re.search(rf'"{chip}": "([^"]+)"', js)
         assert match and "พยากรณ์" in match[1]
+
+
+def test_chart_gives_equal_space_to_recent_history_and_future(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0)
+    for horizon in (6, 12, 24):
+        fake.con.execute(
+            "INSERT INTO predictions (station_id, issue_time, valid_time, model_version,"
+            " run_id, pm25_pred) VALUES (?, ?, ?, ?, 'future', ?)",
+            ("59t", issue.isoformat(), (issue + horizon * H).isoformat(), P, 25.0),
+        )
+    assert build(fake, tmp_path) == 0
+    page = (tmp_path / "index.html").read_text()
+    assert 'class="axis-now"' in page
+    assert 'cx="500.0"' in page
+    assert 'cx="600.0"' in page
+    assert 'cx="800.0"' in page
+    assert "Last 24 hours, hourly, UTC" in page
