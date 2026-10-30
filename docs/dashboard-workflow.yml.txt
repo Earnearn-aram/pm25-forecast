@@ -1,0 +1,116 @@
+# DRAFT for KAN-25. The agent token has no `workflow` scope, so this is committed as text.
+# Owner: copy to .github/workflows/dashboard.yml (drop the .txt), then:
+#   1. Settings -> Pages -> Source: "GitHub Actions" (one-time). The site is then served at
+#      https://earnearn-aram.github.io/pm25-forecast/ . The first deploy also creates the
+#      "github-pages" environment; if you added branch rules to it, allow `main`.
+#   2. Secrets and variables already used by the other workflows: DATABASE_URL, ALERT_WEBHOOK_URL
+#      (secrets), CHALLENGER_MODEL_VERSION (variable, optional: unset = the challenger shows as
+#      "not scored yet").
+#   3. Run it once with "Run workflow" (workflow_dispatch) and open the deployed URL before
+#      relying on the triggers. See the "Live dashboard" section of the README.
+#   4. Actions are pinned by commit sha, checkout and setup-uv copied from the retrain template.
+# Triggers: after each Predict run completes (workflow_run is an event, not cron, so it is not
+# dropped like schedules), plus a daily backup cron and manual dispatch. Predict runs up to three
+# times an hour (the Collector runs at :07, :27, :47). The page only needs hourly data, so a
+# workflow_run build first fetches the live data.json and skips every later step (job stays
+# green) when its generated_at is under 45 minutes old; if the fetch fails, it builds. It builds
+# after failed Predict runs too: the page then shows the degraded state. Cron and manual runs
+# always build.
+# A newer run cancels an older one still in progress (concurrency below).
+# The build only reads the database (SELECTs). The site contains numbers derived from it, no
+# secrets and no connection strings. If every database section fails, the build exits non-zero,
+# nothing is deployed, and the previous site stays up; the last step alerts.
+# Failure alerting: the last step posts the job status and run link to ALERT_WEBHOOK_URL
+# when any step fails, as in the other templates. Cancellation is not alerted: with
+# cancel-in-progress a newer run cancelling an older one is normal.
+name: Dashboard
+
+on:
+  workflow_run:
+    workflows: [Predict]
+    types: [completed]
+  schedule:
+    - cron: "41 2 * * *" # daily backup, 02:41 UTC (off the hour)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One build at a time; a newer run cancels an older one in progress (the build is a read-only
+# snapshot, so cancelling loses nothing).
+concurrency:
+  group: dashboard
+  cancel-in-progress: true
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Decide whether to build
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          build=true
+          if [ "$EVENT" = "workflow_run" ]; then
+            # Skip when the live page was generated less than 45 minutes ago. Any failure to
+            # fetch or parse it means: build.
+            live=$(curl -fsS --max-time 10 https://earnearn-aram.github.io/pm25-forecast/data.json \
+              | jq -r .generated_at 2>/dev/null) || live=""
+            if [ -n "$live" ] && then_s=$(date -u -d "$live" +%s 2>/dev/null); then
+              age=$(( $(date -u +%s) - then_s ))
+              [ "$age" -ge 0 ] && [ "$age" -lt 2700 ] && build=false
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "build: $build"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.gate.outputs.build == 'true'
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        if: steps.gate.outputs.build == 'true'
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        if: steps.gate.outputs.build == 'true'
+        run: uv sync --locked --no-dev
+      - name: Build site
+        if: steps.gate.outputs.build == 'true'
+        # Secrets come in through env only; they are never echoed or put on a command line.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }} # unset = no challenger
+        run: uv run --no-dev python -m pm25_forecast.dashboard --out site/
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+        if: steps.gate.outputs.build == 'true'
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: steps.gate.outputs.build == 'true'
+        with:
+          path: site
+      - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        id: deployment
+        if: steps.gate.outputs.build == 'true'
+      # Alert when any step above failed.
+      # Independent of the dashboard module: no DB, no settings. If uv or the venv is unusable a
+      # curl fallback posts a fixed message. The webhook URL is a secret: it comes in through env,
+      # reaches curl on stdin (-K -), never the command line, and is never echoed.
+      - name: Alert on failure
+        if: failure() # not cancelled(): a newer run cancelling this one is normal here
+        timeout-minutes: 2
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          uv run --no-dev python -m pm25_forecast.monitoring.notify failure && exit 0
+          [ -n "$ALERT_WEBHOOK_URL" ] || { echo "ALERT_WEBHOOK_URL is not set"; exit 0; }
+          msg="[pm25 ci] ${JOB_STATUS:-failure} (fallback): workflow ${GITHUB_WORKFLOW}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -
