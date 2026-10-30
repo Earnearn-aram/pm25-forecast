@@ -64,11 +64,12 @@ def pm25(ts: datetime, shift: float = 0.0) -> float:
     return 20.0 + (int(ts.timestamp() // 3600) * 37) % 23 + shift  # stationary, deterministic
 
 
-def add_model(fake, version, lag=0, start=REF_START, end=REF_END):
+def add_model(fake, version, lag=0, start=REF_START, end=REF_END, horizons=(24,)):
     manifest = {
         "version": version,
         "training_window": {"start": start.isoformat(), "end": end.isoformat()},
         "assumed_reporting_lag_hours": lag,
+        "metrics": {str(h): {"mae": 1.0} for h in horizons},
     }
     fake.con.execute(
         "INSERT INTO models (model_version, sha256, artifact, manifest) VALUES (?, 'x', x'00', ?)",
@@ -77,10 +78,10 @@ def add_model(fake, version, lag=0, start=REF_START, end=REF_END):
     fake.con.commit()
 
 
-def add_series(fake, start=REF_START - 2 * H, end=NOW, shift=0.0, shift_from=SHIFT_FROM):
+def add_series(fake, start=REF_START - 2 * H, end=NOW, shift=0.0, shift_from=SHIFT_FROM, fn=None):
     ts, rows = start, []
     while ts <= end:
-        value = pm25(ts, shift if ts >= shift_from else 0.0)
+        value = fn(ts) if fn else pm25(ts, shift if ts >= shift_from else 0.0)
         rows.append(("59t", ts.isoformat(), value))
         ts += H
     fake.con.executemany(
@@ -96,6 +97,34 @@ def shift_recent(fake, delta):
         "UPDATE observations SET pm25 = pm25 + ? WHERE ts >= ?", (delta, SHIFT_FROM.isoformat())
     )
     fake.con.commit()
+
+
+def add_cams(fake, start, end, every=1):
+    """CAMS vintages (issued 1 h before an origin, valid 24 h after it) for every n-th origin."""
+    rows, origin, i = [], start, 0
+    while origin <= end:
+        if i % every == 0:
+            valid = origin + 24 * H
+            rows.append(("59t", (origin - H).isoformat(), valid.isoformat(), pm25(valid)))
+        origin += H
+        i += 1
+    fake.con.executemany(
+        "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id,"
+        f" pm25_pred) VALUES (?, ?, ?, '{drift.CAMS_MODEL_VERSION}', 'collector', ?)",
+        rows,
+    )
+    fake.con.commit()
+
+
+def two_alert_days(fake):
+    """Shifted recent week seen on two consecutive daily runs; returns the second run's time."""
+    add_model(fake, CHALLENGER)
+    add_series(fake, shift=60.0)
+    do_run(fake)
+    later = NOW + timedelta(days=1)
+    add_series(fake, start=NOW, end=later, shift=60.0)
+    do_run(fake, now=later)
+    return later
 
 
 def checks(fake):
@@ -182,26 +211,55 @@ def test_stable_data_is_ok_for_features_and_target(fake):
     assert not latest_drift_alert(fake)
 
 
-def test_shifted_recent_week_alerts(fake):
+def test_first_day_above_threshold_is_only_a_warning(fake):
     add_model(fake, CHALLENGER)
     add_series(fake, shift=60.0)
     result = do_run(fake)
     got = by_feature(result)
-    assert got["pm25_latest"].status == ALERT and got[TARGET_FEATURE].status == ALERT
-    assert got[TARGET_FEATURE].psi > 0.2
-    assert latest_drift_alert(fake)
+    assert got["pm25_latest"].status == WARN and got[TARGET_FEATURE].status == WARN
+    assert got[TARGET_FEATURE].psi > 0.2  # the PSI is stored; only the status waits a day
+    assert not result.alerts and not latest_drift_alert(fake, now=NOW)
     window = got[TARGET_FEATURE]
     assert window.ref.start == REF_START
     assert window.recent.end == datetime(2026, 10, 30, 12, tzinfo=UTC)
 
 
-def test_manifest_lag_removes_same_hour_feature(fake):
-    add_model(fake, CHALLENGER, lag=1)  # same-hour 24h reading is the origin's own: unavailable
+def test_second_consecutive_day_above_threshold_alerts(fake):
+    later = two_alert_days(fake)
+    rows = {r[2]: r[4] for r in checks(fake) if r[0].startswith("2026-10-31")}
+    assert rows["pm25_latest"] == ALERT and rows[TARGET_FEATURE] == ALERT
+    assert latest_drift_alert(fake, now=later)
+
+
+def test_alert_needs_the_previous_run_to_be_recent_and_above_threshold(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake, shift=60.0)
+    do_run(fake)
+    add_series(fake, start=NOW, end=NOW + timedelta(days=4), shift=60.0)
+    result = do_run(fake, now=NOW + timedelta(days=3))  # the run before is 3 days old
+    assert not result.alerts
+    fake.con.execute("UPDATE drift_checks SET psi = 0.15")  # previous run only moderate
+    fake.con.commit()
+    result = do_run(fake, now=NOW + timedelta(days=4))
+    assert not result.alerts
+
+
+def test_manifest_lag_without_extra_horizons_has_no_same_hour_feature(fake):
+    # A 24 h model with a reporting lag never sees the origin's own reading, in training either.
+    add_model(fake, CHALLENGER, lag=1)
     add_series(fake)
     got = by_feature(do_run(fake))
     assert got["pm25_same_hour_24h"].status == INSUFFICIENT
     assert got["pm25_same_hour_24h"].n_ref == 0
     assert got["pm25_latest"].status == OK
+
+
+def test_same_hour_feature_has_data_with_lag_for_shorter_horizons(fake):
+    add_model(fake, CHALLENGER, lag=1, horizons=(6, 12, 24))
+    add_series(fake)
+    got = by_feature(do_run(fake))["pm25_same_hour_24h"]
+    assert got.n_ref > 0 and got.n_recent > 0
+    assert got.status != INSUFFICIENT
 
 
 def test_too_little_recent_data_is_insufficient_and_no_alert(fake):
@@ -226,23 +284,82 @@ def test_rerun_same_day_upserts_and_next_day_adds_rows(fake):
     do_run(fake, now=NOW + timedelta(hours=4))
     updated = checks(fake)
     assert len(updated) == len(first) and updated != first  # same keys, new values
-    assert {r[4] for r in updated if r[2] == TARGET_FEATURE} == {ALERT}
+    assert {r[4] for r in updated if r[2] == TARGET_FEATURE} == {WARN}  # first day above 0.2
     do_run(fake, now=NOW + timedelta(days=1))
     assert len(checks(fake)) == 2 * len(first)
 
 
-def test_latest_drift_alert_looks_at_the_latest_run_only(fake):
-    add_model(fake, CHALLENGER)
-    add_series(fake, shift=60.0)
-    do_run(fake)
-    assert latest_drift_alert(fake)
-    shift_recent(fake, -60.0)
-    do_run(fake, now=NOW + timedelta(days=1))  # recovered
-    assert not latest_drift_alert(fake)
+def test_latest_drift_alert_filters_by_model_and_ignores_stale_runs(fake):
+    later = two_alert_days(fake)
+    assert latest_drift_alert(fake, now=later)
+    assert latest_drift_alert(fake, CHALLENGER, now=later)
+    assert not latest_drift_alert(fake, "some-other-model", now=later)
+    assert latest_drift_alert(fake, now=later + timedelta(hours=35))
+    assert not latest_drift_alert(fake, now=later + timedelta(hours=37))
+    assert not latest_drift_alert(fake, CHALLENGER, now=later + timedelta(days=5))
 
 
 def test_latest_drift_alert_is_false_on_an_empty_table(fake):
-    assert latest_drift_alert(fake) is False
+    assert latest_drift_alert(fake, now=NOW) is False
+    assert latest_drift_alert(fake, CHALLENGER, now=NOW) is False
+
+
+def test_reference_is_cached_per_model_and_not_rebuilt_daily(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    cached = fake.con.execute("SELECT feature FROM drift_reference ORDER BY 1").fetchall()
+    assert len(cached) == len(FEATURE_NAMES) + 1
+    first = checks(fake)
+    # The training-window observations are gone; only the cached reference can explain the result.
+    fake.con.execute("DELETE FROM observations WHERE ts < '2026-10-01'")
+    fake.con.commit()
+    do_run(fake, now=NOW + timedelta(minutes=30))
+    assert checks(fake) == first
+
+
+def test_cams_needs_half_of_the_reference_origins_covered(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    add_cams(fake, REF_START, REF_END, every=5)  # 20 % of the reference origins
+    add_cams(fake, NOW - timedelta(days=8), NOW)
+    assert by_feature(do_run(fake))["cams_pm25"].status == INSUFFICIENT
+
+
+def test_cams_with_full_coverage_is_compared(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    add_cams(fake, REF_START, REF_END)
+    add_cams(fake, NOW - timedelta(days=8), NOW)
+    got = by_feature(do_run(fake))["cams_pm25"]
+    assert got.n_ref >= drift.MIN_REFERENCE and got.status in {OK, WARN}
+
+
+def test_integer_heavy_reference_with_fewer_than_three_bins_is_insufficient(fake):
+    def mostly_ten(ts):
+        return 11.0 if ts.timestamp() // 3600 % 20 == 0 else 10.0  # 95 % identical values
+
+    add_model(fake, CHALLENGER)
+    add_series(fake, fn=mostly_ten)
+    result = do_run(fake)
+    assert {c.status for c in result.checks} == {INSUFFICIENT}
+    assert all(c.psi is None for c in result.checks)
+
+
+def test_make_reference_rules():
+    spread = [float(i % 40) for i in range(400)]
+    assert drift.make_reference("pm25_latest", spread, 400).usable
+    assert not drift.make_reference("pm25_latest", [10.0] * 380 + [11.0] * 20, 400).usable
+    assert not drift.make_reference("pm25_latest", spread[:100], 100).usable  # too few points
+    assert not drift.make_reference("cams_pm25", spread, 1000).usable  # 40 % coverage
+    assert drift.make_reference("cams_pm25", spread, 700).usable  # 57 % coverage
+
+
+def test_psi_with_stored_profile_equals_direct_psi():
+    ref = [float(i % 40) for i in range(400)]
+    recent = [float(i % 25) for i in range(200)]
+    edges, shares = drift.reference_profile(ref, 5)
+    assert drift.psi_vs_profile(edges, shares, recent) == pytest.approx(psi(ref, recent, 5))
 
 
 def test_champion_is_checked_too_and_not_twice_when_same(fake):

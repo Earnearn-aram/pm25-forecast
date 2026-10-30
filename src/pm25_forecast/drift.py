@@ -7,15 +7,21 @@ feature in ``FEATURE_NAMES``, plus the shift of the observed PM2.5 itself (``tar
 
 * Both sides are rebuilt from the database (stored observations and CAMS vintages) through the
   shared ``build_features`` module, so training and serving feature logic is not duplicated. One
-  hourly origin per station, target 24 h ahead, observations no newer than the model's
-  ``assumed_reporting_lag_hours`` before the origin (the same rule the model was trained with).
-  Origins without any feature value are skipped, as in training.
-* Status: PSI below ``PSI_WARN`` is ``ok``, up to ``PSI_ALERT`` ``warn``, above it ``alert``.
-  Fewer than ``MIN_RECENT`` recent or ``MIN_REFERENCE`` reference points is ``insufficient``:
-  stored without a PSI, never an alert. See docs/drift.md.
+  hourly origin per station and per horizon the model was trained for (manifest ``metrics`` keys,
+  default 24 h), observations from the 24 h before the origin up to the model's
+  ``assumed_reporting_lag_hours`` before it (as in training). Origins without any feature value
+  are skipped, as in training.
+* The reference side (bin edges and shares) is computed once per model_version from the training
+  window and cached in ``drift_reference``; a daily run reads only the recent 7 days.
+* Status: PSI below ``PSI_WARN`` is ``ok``, up to ``PSI_ALERT`` ``warn``, above it ``alert`` only
+  if the previous daily run was also above ``PSI_ALERT`` (otherwise ``warn``). ``insufficient``
+  (stored without a PSI, never an alert): fewer than ``MIN_RECENT`` recent or ``MIN_REFERENCE``
+  reference points, fewer than ``MIN_BINS`` distinct reference bins, or ``cams_pm25`` covering
+  under ``CAMS_MIN_COVERAGE`` of the reference origins. See docs/drift.md.
 * Results are upserted into ``drift_checks`` per (UTC day, model_version, feature): a re-run the
   same day updates the rows. One alert per run lists the features in ``alert`` status.
-* ``latest_drift_alert(con)`` tells the retrain job (KAN-24) whether the latest run had an alert.
+* ``latest_drift_alert(con, model_version=None)`` tells the retrain job (KAN-24) whether the latest
+  run had an alert; a run older than ``STALE_AFTER`` counts as no alert.
 * Reads observations, predictions (CAMS vintages) and the model registry; writes only
   ``drift_checks``. DB down: ``run_entrypoint`` skips the run, alerts, exits non-zero.
 
@@ -51,14 +57,19 @@ EXIT_FAILED, EXIT_CONFIG = 1, 2
 
 PSI_WARN = 0.1  # below: ok
 PSI_ALERT = 0.2  # above: alert; in between: warn
-MIN_RECENT = 48  # fewer recent points: insufficient
+MIN_RECENT = 150  # fewer recent points: insufficient (a full week is 168 per station and horizon)
 MIN_REFERENCE = 200  # fewer reference points: insufficient
+MIN_BINS = 3  # fewer distinct reference bins (near-constant or integer-heavy data): insufficient
+CAMS_MIN_COVERAGE = 0.5  # cams_pm25 needs CAMS for at least this share of the reference origins
 RECENT_WINDOW = timedelta(days=7)
-PSI_BINS = 10
+PSI_BINS = 5
 PSI_EPSILON = 1e-4  # share used for an empty bin, so the logarithm is defined
 TARGET_FEATURE = "target_pm25"
-HORIZON = timedelta(hours=24)  # the models forecast 24 h ahead; features are built for it
-FRESH = timedelta(hours=3)  # observations older than this cannot be the latest input
+CAMS_FEATURE = "cams_pm25"
+DEFAULT_HORIZONS = (24,)  # used when the manifest metrics do not name horizons
+HISTORY = timedelta(hours=24)  # observation history given to build_features, as in training
+CONSECUTIVE_WITHIN = timedelta(days=2)  # the previous run counts as "consecutive" within this
+STALE_AFTER = timedelta(hours=36)  # latest_drift_alert ignores a run older than this
 
 OK, WARN, ALERT, INSUFFICIENT = "ok", "warn", "alert", "insufficient"
 
@@ -84,9 +95,43 @@ ON CONFLICT (checked_at, model_version, feature) DO UPDATE SET
     recent_end = excluded.recent_end, n_ref = excluded.n_ref, n_recent = excluded.n_recent,
     computed_at = excluded.computed_at
 """
+SELECT_REFERENCE = """
+SELECT feature, edges, shares, n_ref, n_origins, usable FROM drift_reference
+WHERE model_version = %(model_version)s
+"""
+UPSERT_REFERENCE = """
+INSERT INTO drift_reference (model_version, feature, edges, shares, n_ref, n_origins, usable,
+                             computed_at)
+VALUES (%(model_version)s, %(feature)s, %(edges)s, %(shares)s, %(n_ref)s, %(n_origins)s,
+        %(usable)s, %(computed_at)s)
+ON CONFLICT (model_version, feature) DO UPDATE SET
+    edges = excluded.edges, shares = excluded.shares, n_ref = excluded.n_ref,
+    n_origins = excluded.n_origins, usable = excluded.usable, computed_at = excluded.computed_at
+"""
+SELECT_PREVIOUS_PSI = """
+SELECT psi FROM drift_checks
+WHERE model_version = %(model_version)s AND feature = %(feature)s
+  AND checked_at < %(day)s AND checked_at >= %(since)s
+ORDER BY checked_at DESC LIMIT 1
+"""
+# Latest run = latest checked_at day (optionally for one model); its age is its newest computed_at.
+SELECT_LATEST_RUN = """
+SELECT max(computed_at) FROM drift_checks
+WHERE checked_at = (SELECT max(checked_at) FROM drift_checks)
+"""
 COUNT_LATEST_ALERTS = """
 SELECT count(*) FROM drift_checks
 WHERE status = 'alert' AND checked_at = (SELECT max(checked_at) FROM drift_checks)
+"""
+SELECT_LATEST_RUN_MODEL = """
+SELECT max(computed_at) FROM drift_checks
+WHERE model_version = %(model_version)s AND checked_at = (
+    SELECT max(checked_at) FROM drift_checks WHERE model_version = %(model_version)s)
+"""
+COUNT_LATEST_ALERTS_MODEL = """
+SELECT count(*) FROM drift_checks
+WHERE status = 'alert' AND model_version = %(model_version)s AND checked_at = (
+    SELECT max(checked_at) FROM drift_checks WHERE model_version = %(model_version)s)
 """
 
 
@@ -107,7 +152,38 @@ def _finite(values: Iterable[Any]) -> list[float]:
     return out
 
 
-def psi(reference: Iterable[Any], recent: Iterable[Any], bins: int = PSI_BINS) -> float:
+def _shares(values: list[float], edges: Sequence[float]) -> list[float]:
+    counts = [0] * (len(edges) + 1)
+    for v in values:
+        counts[bisect_left(edges, v)] += 1  # bins are (e[i-1], e[i]]
+    return [max(c / len(values), PSI_EPSILON) for c in counts]
+
+
+def reference_profile(
+    reference: Iterable[Any], bins: int = PSI_BINS
+) -> tuple[list[float], list[float]]:
+    """Bin edges (interior reference quantiles, ties collapsed) and the reference bin shares."""
+    if bins < 2:
+        raise ValueError("bins must be at least 2")
+    ref = _finite(reference)
+    if not ref:
+        raise ValueError("psi needs at least one finite value on each side")
+    edges = sorted(set(np.quantile(ref, [k / bins for k in range(1, bins)]).tolist()))
+    return edges, _shares(ref, edges)
+
+
+def psi_vs_profile(
+    edges: Sequence[float], ref_shares: Sequence[float], recent: Iterable[Any]
+) -> float:
+    """PSI of ``recent`` against a stored reference profile."""
+    rec = _finite(recent)
+    if not rec:
+        raise ValueError("psi needs at least one finite value on each side")
+    shares = _shares(rec, edges)
+    return sum((r - e) * math.log(r / e) for e, r in zip(ref_shares, shares, strict=True))
+
+
+def psi(reference: Iterable[Any], recent: Iterable[Any], bins: int = 10) -> float:
     """Population Stability Index of ``recent`` against ``reference``.
 
     Bin edges are the reference's interior quantiles (``bins`` equal-share bins; ties collapse
@@ -115,20 +191,8 @@ def psi(reference: Iterable[Any], recent: Iterable[Any], bins: int = PSI_BINS) -
     reference range. A bin share below ``PSI_EPSILON`` (empty bin) is raised to it. Non-finite
     values (None, NaN, inf) are dropped. Raises ValueError if either side has no finite value.
     """
-    if bins < 2:
-        raise ValueError("bins must be at least 2")
-    ref, rec = _finite(reference), _finite(recent)
-    if not ref or not rec:
-        raise ValueError("psi needs at least one finite value on each side")
-    edges = sorted(set(np.quantile(ref, [k / bins for k in range(1, bins)]).tolist()))
-
-    def shares(values: list[float]) -> list[float]:
-        counts = [0] * (len(edges) + 1)
-        for v in values:
-            counts[bisect_left(edges, v)] += 1  # bins are (e[i-1], e[i]]
-        return [max(c / len(values), PSI_EPSILON) for c in counts]
-
-    return sum((r - e) * math.log(r / e) for e, r in zip(shares(ref), shares(rec), strict=True))
+    edges, ref_shares = reference_profile(reference, bins)
+    return psi_vs_profile(edges, ref_shares, recent)
 
 
 def classify(value: float | None, n_ref: int, n_recent: int) -> str:
@@ -150,6 +214,12 @@ class Window(BaseModel):
 class Manifest(BaseModel):
     training_window: Window
     assumed_reporting_lag_hours: float | None = None
+    metrics: dict[str, Any] = {}  # keyed by horizon in hours ("24", or "6", "12", "24")
+
+    @property
+    def horizons(self) -> tuple[int, ...]:
+        found = sorted({int(k) for k in self.metrics if str(k).isdigit() and int(k) > 0})
+        return tuple(found) or DEFAULT_HORIZONS
 
 
 class ObsRow(BaseModel):
@@ -220,16 +290,23 @@ def read_manifest(con: Any, model_version: str) -> Manifest:
 class Inputs:
     """Stored observations and CAMS vintages for a time range, indexed for hourly rebuilds."""
 
-    def __init__(self, con: Any, start: datetime, end: datetime, station_ids: set[str] | None):
+    def __init__(
+        self,
+        con: Any,
+        start: datetime,
+        end: datetime,
+        station_ids: set[str] | None,
+        horizons: Sequence[int] = DEFAULT_HORIZONS,
+    ):
         obs_raw = con.execute(
-            SELECT_OBSERVATIONS, {"since": start - FRESH, "until": end}
+            SELECT_OBSERVATIONS, {"since": start - HISTORY, "until": end}
         ).fetchall()
         cams_raw = con.execute(
             SELECT_CAMS_VINTAGES,
             {
                 "model_version": CAMS_MODEL_VERSION,
-                "since": start + HORIZON,
-                "until": end + HORIZON,
+                "since": start + timedelta(hours=min(horizons)),
+                "until": end + timedelta(hours=max(horizons)),
             },
         ).fetchall()
         obs = _validated(ObsRow, obs_raw, ("station_id", "ts", "pm25"))
@@ -261,10 +338,17 @@ class Inputs:
         return out
 
     def feature_values(
-        self, start: datetime, end: datetime, lag: timedelta
-    ) -> dict[str, list[float]]:
-        """Hourly features for origins in [start, end], through the shared ``build_features``."""
+        self, start: datetime, end: datetime, lag: timedelta, horizons: Sequence[int]
+    ) -> tuple[dict[str, list[float]], int]:
+        """Hourly features for origins in [start, end], through the shared ``build_features``.
+
+        One feature set per station, origin and horizon (as ``predict`` builds them). The history
+        passed is the 24 h up to ``origin - lag``, as in ``train_model``. ``pm25_latest`` does not
+        depend on the horizon and is counted once per origin. Also returns the number of
+        (station, origin, horizon) combinations that had any feature value.
+        """
         out: dict[str, list[float]] = {name: [] for name in FEATURE_NAMES}
+        n_origins = 0
         first = floor_to_hour(start)
         if first < start:
             first += timedelta(hours=1)
@@ -273,65 +357,185 @@ class Inputs:
             values = self.values[station]
             for i in range(max(origin_count, 0)):
                 origin = first + timedelta(hours=i)
-                target = origin + HORIZON
-                lo = bisect_left(times, origin - FRESH)
+                lo = bisect_left(times, origin - HISTORY)
                 hi = bisect_right(times, origin - lag)
-                recent_obs = list(zip(times[lo:hi], values[lo:hi], strict=True))
-                features = build_features(
-                    recent_obs, self.cams.get((station, target), ()), origin, target
-                )
-                if all(features[name] is None for name in FEATURE_NAMES):
-                    continue
-                for name in FEATURE_NAMES:
-                    if features[name] is not None:
-                        out[name].append(features[name])
-        return out
+                history = list(zip(times[lo:hi], values[lo:hi], strict=True))
+                for j, horizon in enumerate(horizons):
+                    target = origin + timedelta(hours=horizon)
+                    features = build_features(
+                        history, self.cams.get((station, target), ()), origin, target
+                    )
+                    if all(features[name] is None for name in FEATURE_NAMES):
+                        continue
+                    n_origins += 1
+                    for name in FEATURE_NAMES:
+                        if features[name] is not None and (j == 0 or name != "pm25_latest"):
+                            out[name].append(features[name])
+        return out, n_origins
+
+
+@dataclass(frozen=True)
+class Reference:
+    """Stored reference distribution of one feature (see ``drift_reference``)."""
+
+    edges: list[float]
+    shares: list[float]
+    n_ref: int
+    n_origins: int
+    usable: bool
+
+
+def make_reference(feature: str, values: list[float], n_origins: int) -> Reference:
+    finite = _finite(values)
+    if len(finite) < MIN_REFERENCE:
+        return Reference([], [], len(finite), n_origins, False)
+    edges, shares = reference_profile(finite, PSI_BINS)
+    usable = len(edges) + 1 >= MIN_BINS
+    if feature == CAMS_FEATURE and len(finite) < CAMS_MIN_COVERAGE * n_origins:
+        usable = False
+    return Reference(edges, shares, len(finite), n_origins, usable)
+
+
+def load_reference(con: Any, model_version: str) -> dict[str, Reference] | None:
+    """The cached reference for every feature and the target, or None if not (fully) cached."""
+    rows = con.execute(SELECT_REFERENCE, {"model_version": model_version}).fetchall()
+    found: dict[str, Reference] = {}
+    for feature, edges, shares, n_ref, n_origins, usable in rows:
+        try:
+            found[feature] = Reference(
+                [float(x) for x in json.loads(edges)],
+                [float(x) for x in json.loads(shares)],
+                int(n_ref),
+                int(n_origins),
+                bool(usable),
+            )
+        except (TypeError, ValueError):
+            return None  # unreadable cache: rebuild it
+    return found if {*FEATURE_NAMES, TARGET_FEATURE} <= found.keys() else None
+
+
+def save_reference(
+    con: Any, model_version: str, reference: dict[str, Reference], now: datetime
+) -> None:
+    rows = [
+        {
+            "model_version": model_version,
+            "feature": feature,
+            "edges": json.dumps(ref.edges),
+            "shares": json.dumps(ref.shares),
+            "n_ref": ref.n_ref,
+            "n_origins": ref.n_origins,
+            "usable": ref.usable,
+            "computed_at": now,
+        }
+        for feature, ref in reference.items()
+    ]
+    sql.write_rows(con, UPSERT_REFERENCE, rows)
+
+
+def build_reference(
+    con: Any, manifest: Manifest, stations: set[str] | None
+) -> dict[str, Reference]:
+    """Rebuild the reference from the training window (once per model_version, then cached)."""
+    window = manifest.training_window
+    lag = timedelta(hours=manifest.assumed_reporting_lag_hours or 0)
+    inputs = Inputs(con, window.start, window.end, stations, manifest.horizons)
+    features, n_origins = inputs.feature_values(window.start, window.end, lag, manifest.horizons)
+    reference = {name: make_reference(name, features[name], n_origins) for name in FEATURE_NAMES}
+    target = inputs.target_values(window.start, window.end)
+    reference[TARGET_FEATURE] = make_reference(TARGET_FEATURE, target, len(target))
+    return reference
+
+
+def previous_psi(con: Any, model_version: str, feature: str, day: datetime) -> float | None:
+    row = con.execute(
+        SELECT_PREVIOUS_PSI,
+        {
+            "model_version": model_version,
+            "feature": feature,
+            "day": day,
+            "since": day - CONSECUTIVE_WITHIN,
+        },
+    ).fetchone()
+    return None if row is None or row[0] is None else float(row[0])
 
 
 def model_checks(
-    model_version: str, manifest: Manifest, con: Any, now: datetime, stations: set[str] | None
+    model_version: str,
+    manifest: Manifest,
+    con: Any,
+    now: datetime,
+    stations: set[str] | None,
+    day: datetime | None = None,
 ) -> list[Check]:
+    day = day or now.replace(hour=0, minute=0, second=0, microsecond=0)
     ref = manifest.training_window
     recent_end = floor_to_hour(now)
     recent = Window(start=recent_end - RECENT_WINDOW, end=recent_end)
     lag = timedelta(hours=manifest.assumed_reporting_lag_hours or 0)
-    ref_inputs = Inputs(con, ref.start, ref.end, stations)
-    recent_inputs = Inputs(con, recent.start, recent.end, stations)
 
-    series: dict[str, tuple[list[float], list[float]]] = {}
-    ref_features = ref_inputs.feature_values(ref.start, ref.end, lag)
-    recent_features = recent_inputs.feature_values(recent.start, recent.end, lag)
-    for name in FEATURE_NAMES:
-        series[name] = (ref_features[name], recent_features[name])
-    series[TARGET_FEATURE] = (
-        ref_inputs.target_values(ref.start, ref.end),
-        recent_inputs.target_values(recent.start, recent.end),
+    reference = load_reference(con, model_version)
+    if reference is None:
+        reference = build_reference(con, manifest, stations)
+        save_reference(con, model_version, reference, now)
+
+    recent_inputs = Inputs(con, recent.start, recent.end, stations, manifest.horizons)
+    recent_features, _ = recent_inputs.feature_values(
+        recent.start, recent.end, lag, manifest.horizons
     )
+    recent_series = {
+        **recent_features,
+        TARGET_FEATURE: recent_inputs.target_values(recent.start, recent.end),
+    }
 
     checks: list[Check] = []
-    for name, (ref_values, recent_values) in series.items():
-        n_ref, n_recent = len(ref_values), len(recent_values)
+    for name, recent_values in recent_series.items():
+        ref_profile = reference[name]
+        n_recent = len(_finite(recent_values))
         value = None
-        if n_ref >= MIN_REFERENCE and n_recent >= MIN_RECENT:
-            value = psi(ref_values, recent_values)
+        if ref_profile.usable and n_recent >= MIN_RECENT:
+            value = psi_vs_profile(ref_profile.edges, ref_profile.shares, recent_values)
+        status = classify(value, ref_profile.n_ref, n_recent)
+        if not ref_profile.usable:
+            status = INSUFFICIENT
+        if status == ALERT:
+            previous = previous_psi(con, model_version, name, day)
+            if previous is None or previous <= PSI_ALERT:
+                status = WARN  # needs two consecutive daily runs above the threshold
         checks.append(
-            Check(
-                model_version,
-                name,
-                value,
-                classify(value, n_ref, n_recent),
-                ref,
-                recent,
-                n_ref,
-                n_recent,
-            )
+            Check(model_version, name, value, status, ref, recent, ref_profile.n_ref, n_recent)
         )
     return checks
 
 
-def latest_drift_alert(con: Any) -> bool:
-    """True if any check of the latest drift run (latest UTC day) is in ``alert`` status."""
-    row = con.execute(COUNT_LATEST_ALERTS, {}).fetchone()
+def _as_utc(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def latest_drift_alert(
+    con: Any, model_version: str | None = None, *, now: datetime | None = None
+) -> bool:
+    """True if the latest drift run (latest UTC day) has a check in ``alert`` status.
+
+    Optionally only for one ``model_version``. A latest run computed more than ``STALE_AFTER``
+    ago counts as no alert, so a stale alert cannot trigger a retrain again. ``now`` is for tests.
+    """
+    now = sql.require_utc(now or datetime.now(UTC))
+    params = {} if model_version is None else {"model_version": model_version}
+    latest = _as_utc(
+        con.execute(
+            SELECT_LATEST_RUN if model_version is None else SELECT_LATEST_RUN_MODEL, params
+        ).fetchone()[0]
+    )
+    if latest is None or now - latest > STALE_AFTER:
+        return False
+    row = con.execute(
+        COUNT_LATEST_ALERTS if model_version is None else COUNT_LATEST_ALERTS_MODEL, params
+    ).fetchone()
     return bool(row and row[0] > 0)
 
 
@@ -376,7 +580,7 @@ def run(
         for model_version in versions:
             try:
                 manifest = read_manifest(con, model_version)
-                result.checks += model_checks(model_version, manifest, con, now, stations)
+                result.checks += model_checks(model_version, manifest, con, now, stations, day)
             except (LookupError, ValueError) as exc:
                 result.failures.append(f"{model_version}: {exc}")
         rows = [
