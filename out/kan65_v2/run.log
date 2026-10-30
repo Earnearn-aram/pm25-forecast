@@ -1,0 +1,28 @@
+[     0s] snapshot matches=True
+[     1s] H-MA verdict: undecided {'ma_vs_old_mean_abs_1h_change': 0.6983039277161441, 'ma_vs_old_diurnal_flatness': 0.09961169583616683, 'raw_vs_old_mean_abs_1h_change': 8.576832361933635, 'old_vs_raw_diurnal_flatness': 0.17077677585835607}
+[     2s] F1 +6: n=4927 pers 2.533 smoother(b=0.0) 2.533 direct 2.076 logr 1.993 ridge 2.175
+[     3s] F1 +12: n=4927 pers 4.289 smoother(b=0.0) 4.289 direct 3.596 logr 3.554 ridge 3.717
+[     3s] F1 +24: n=4922 pers 6.969 smoother(b=0.0) 6.969 direct 6.307 logr 6.025 ridge 6.059
+[     5s] F2 +6: n=4801 pers 1.348 smoother(b=0.0) 1.348 direct 1.213 logr 1.194 ridge 1.172
+[     5s] F2 +12: n=4789 pers 2.163 smoother(b=0.0) 2.163 direct 2.004 logr 1.956 ridge 1.882
+[     6s] F2 +24: n=4765 pers 3.370 smoother(b=0.0) 3.370 direct 3.153 logr 3.125 ridge 2.996
+[     8s] F3 +6: n=3194 pers 0.770 smoother(b=0.0) 0.770 direct 0.776 logr 0.750 ridge 0.770
+[     8s] F3 +12: n=3149 pers 1.151 smoother(b=0.0) 1.151 direct 1.146 logr 1.124 ridge 1.165
+[     9s] F3 +24: n=3089 pers 1.716 smoother(b=0.0) 1.716 direct 1.658 logr 1.672 ridge 1.792
+[    11s] G1 +6: n=2520 pers 3.292 smoother(b=0.8) 2.741 direct 3.073 logr 2.919 ridge 3.656
+[    12s] G1 +12: n=2520 pers 3.651 smoother(b=0.9) 2.894 direct 3.191 logr 3.085 ridge 4.287
+[    13s] G1 +24: n=2520 pers 3.465 smoother(b=0.7) 2.937 direct 3.036 logr 3.141 ridge 3.954
+[    16s] G2 +6: n=2520 pers 3.758 smoother(b=0.7) 3.282 direct 3.455 logr 3.356 ridge 4.004
+[    17s] G2 +12: n=2520 pers 4.166 smoother(b=0.9) 3.632 direct 3.734 logr 3.642 ridge 4.554
+[    18s] G2 +24: n=2520 pers 4.446 smoother(b=0.8) 4.077 direct 3.948 logr 4.014 ridge 4.580
+[    20s] G3 +6: n=2984 pers 5.460 smoother(b=0.5) 5.104 direct 5.061 logr 4.983 ridge 5.444
+[    21s] G3 +12: n=2959 pers 6.284 smoother(b=0.5) 5.794 direct 5.586 logr 5.583 ridge 6.407
+[    22s] G3 +24: n=2914 pers 6.789 smoother(b=0.6) 6.497 direct 5.945 logr 6.059 ridge 6.371
+[    24s] HOLDOUT +6: n=10799 pers 3.908 smoother(b=0.5) 3.473 direct 4.141 logr 4.212 ridge 4.636
+[    25s] HOLDOUT +12: n=10774 pers 4.394 smoother(b=0.5) 3.858 direct 4.444 logr 4.627 ridge 5.542
+[    26s] HOLDOUT +24: n=10729 pers 4.498 smoother(b=0.5) 4.114 direct 4.090 logr 4.331 ridge 5.209
+[    26s] unique counts {'HOLDOUT': {'unique_station_hours_plus24': 10729, 'unique_target_days': 91}, 'REGIME_B': {'unique_station_hours_plus24': 7954, 'unique_target_days': 67}, 'REGIME_A': {'unique_station_hours_plus24': 12776, 'unique_target_days': 115}}
+[    27s] group HOLDOUT done
+[    29s] group REGIME_B done
+[    31s] group REGIME_A done
+[    32s] done

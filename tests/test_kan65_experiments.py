@@ -83,3 +83,21 @@ def test_bootstrap_and_holm():
     assert lo == hi == m == -1.0
     adj = holm(np.array([0.01, 0.04, 0.5]))
     assert adj[0] == 0.03 and adj[2] == 0.5 and np.all(adj <= 1)
+
+
+def test_review_block_bootstrap_and_events():
+    from pm25_forecast.experiments.run_review import boot_draws as bd
+    from pm25_forecast.experiments.run_review import event_block, hp_block
+
+    days = np.repeat(np.arange(14), 4)
+    diff = np.full(len(days), -2.0)
+    dr, nb = bd(diff, days, 7, n_boot=200)
+    assert nb == 2 and np.allclose(dr, -2.0)
+    lat = np.full(len(days), 10.0)
+    y = lat.copy()
+    y[:3] = 40.0  # three onsets
+    p = lat.copy()
+    p[0] = 20.0  # one caught
+    e = event_block(y, p, lat, days)
+    assert e["onsets"] == 3 and abs(e["caught_share"] - 1 / 3) < 1e-9 and not e["testable"]
+    assert hp_block(y, p, lat, days)["status"] == "untestable"  # no latest > 37.5
