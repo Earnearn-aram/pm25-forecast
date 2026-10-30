@@ -611,151 +611,225 @@ def _nice_max(vmax: float) -> float:
     return float(math.ceil(vmax / 400) * 400)
 
 
-def _lines(points: list[dict[str, Any]], key: str, ymax: float, css: str) -> str:
-    h, pad = 220, 8
-    n = max(len(points) - 1, 1)
-    segments: list[list[str]] = [[]]
-    for i, p in enumerate(points):
-        v = p[key]
-        if v is None:
-            segments.append([])
-            continue
-        y = h - pad - min(v, ymax) / ymax * (h - 2 * pad)
-        segments[-1].append(f"{i / n * 400:.1f},{y:.1f}")
-    return "".join(
-        f'<polyline class="ln {css}" vector-effect="non-scaling-stroke" points="{" ".join(s)}"/>'
-        for s in segments
-        if len(s) > 1
-    )
+CHART_TITLE = "PM2.5 \u00b7 last 24 h and next 24 h"
+
+# Chart geometry (viewBox units). The SVG scales with its container and keeps text proportional.
+CH_W, CH_H = 820, 290
+CH_X0, CH_X1, CH_Y0, CH_Y1 = 60, 804, 16, 236
+
+
+def _bkk(dt: datetime) -> str:
+    return f"{dt.astimezone(BANGKOK):%d %b %H:%M}"
+
+
+def _x_ticks(start: datetime, stop: datetime) -> list[datetime]:
+    """Every 6 h on Bangkok-local 00/06/12/18 within [start, stop]."""
+    t = start.astimezone(BANGKOK).replace(minute=0, second=0, microsecond=0)
+    if t < start.astimezone(BANGKOK):
+        t += timedelta(hours=1)
+    while t.hour % 6:
+        t += timedelta(hours=1)
+    ticks = []
+    while t <= stop.astimezone(BANGKOK):
+        ticks.append(t)
+        t += timedelta(hours=6)
+    return ticks
 
 
 def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
-    # Show the latest 24 hours beside the next 24 hours on equal time scales.
+    # Past 24 h of measurements, then forecasts that start at the latest measured point.
     points = st["points"][-25:]
-    keys = ["actual", "persistence"] + (["challenger"] if chart["has_challenger"] else [])
-    values = [p[k] for p in points for k in keys if p[k] is not None]
+    future_keys = (
+        ("future_persistence", "ln-pers", "Persistence"),
+        ("future_challenger", "ln-chal", "Challenger"),
+    )
+    has_future = any(p["value"] is not None for key, _, _ in future_keys for p in st.get(key, []))
+    values = [p["actual"] for p in points if p["actual"] is not None]
     values += [
-        p["value"]
-        for key in ("future_persistence", "future_challenger")
-        for p in st.get(key, [])
-        if p["value"] is not None
+        p["value"] for key, _, _ in future_keys for p in st.get(key, []) if p["value"] is not None
     ]
     if not values:
         body = '<p class="muted small">No hourly data for this station yet.</p>'
-    else:
-        ymax = _nice_max(max(values))
-        grid = "".join(
-            f'<line class="grid-line" x1="0" x2="800" y1="{y:.1f}" y2="{y:.1f}"/>'
-            for y in (8 + i * 204 / 4 for i in range(5))
+        hidden = "" if first else " hidden"
+        return f'<div class="chart" data-station="{e(st["id"])}"{hidden}>{body}</div>'
+
+    end = datetime.fromisoformat(chart["end"])
+    start = end - timedelta(hours=24)
+    stop = end + timedelta(hours=24 if has_future else 0)
+    span = (stop - start).total_seconds()
+    ymax = _nice_max(max(values))
+
+    def px(t: datetime) -> float:
+        return CH_X0 + (t - start).total_seconds() / span * (CH_X1 - CH_X0)
+
+    def py(v: float) -> float:
+        return CH_Y1 - min(v, ymax) / ymax * (CH_Y1 - CH_Y0)
+
+    parts: list[str] = []
+    if has_future:
+        xn = px(end)
+        parts.append(
+            f'<rect class="forecast-region" x="{xn:.1f}" y="{CH_Y0}" '
+            f'width="{CH_X1 - xn:.1f}" height="{CH_Y1 - CH_Y0}"/>'
         )
-        labels = "".join(
-            f'<span class="ylab" style="top:{(8 + i * 204 / 4) / 220 * 100:.2f}%">'
-            f"{int(ymax - i * ymax / 4)}</span>"
-            for i in range(5)
+    for i in range(5):  # y axis: 4 equal steps -> 5 round ticks
+        y = CH_Y1 - i * (CH_Y1 - CH_Y0) / 4
+        parts.append(
+            f'<line class="grid-line" x1="{CH_X0}" x2="{CH_X1}" y1="{y:.1f}" y2="{y:.1f}"/>'
+            f'<text class="ax-text" x="{CH_X0 - 8}" y="{y + 5:.1f}" text-anchor="end">'
+            f"{ymax * i / 4:g}</text>"
         )
-        series = _lines(points, "persistence", ymax, "ln-pers")
-        if chart["has_challenger"]:
-            series += _lines(points, "challenger", ymax, "ln-chal")
-        series += _lines(points, "actual", ymax, "ln-actual")
-        actual_points = [
-            (i, point) for i, point in enumerate(points) if point["actual"] is not None
-        ]
-        if actual_points:
-            i, point = actual_points[-1]
-            x = i / max(len(points) - 1, 1) * 400
-            y = 212 - min(point["actual"], ymax) / ymax * 204
-            description = f"Actual: {point['actual']:g} µg/m³ at {point['t']}"
-            series += (
-                f'<circle class="actual-dot" cx="{x:.1f}" cy="{y:.1f}" r="4">'
+    parts.append(
+        f'<text class="ax-title" transform="translate(14 {(CH_Y0 + CH_Y1) / 2:.0f}) rotate(-90)" '
+        'text-anchor="middle">PM2.5 (µg/m³)</text>'
+    )
+    for t in _x_ticks(start, stop):
+        x = px(t.astimezone(UTC))
+        date = f'<tspan x="{x:.1f}" dy="17">{t:%d %b}</tspan>' if t.hour == 0 else ""
+        parts.append(
+            f'<line class="tick" x1="{x:.1f}" x2="{x:.1f}" y1="{CH_Y1}" y2="{CH_Y1 + 5}"/>'
+            f'<text class="ax-text" x="{x:.1f}" y="{CH_Y1 + 22}" text-anchor="middle">'
+            f"{t:%H}:00{date}</text>"
+        )
+    if has_future:
+        xn = px(end)
+        parts.append(
+            f'<line class="forecast-boundary" x1="{xn:.1f}" x2="{xn:.1f}" y1="{CH_Y0}" '
+            f'y2="{CH_Y1}"/><text class="axis-now" x="{xn + 6:.1f}" y="{CH_Y0 + 14}" '
+            'text-anchor="start">Now</text>'
+        )
+
+    def path(coords: list[tuple[float, float]], css: str) -> str:
+        if len(coords) < 2:
+            return ""
+        d = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in coords)
+        return f'<path class="ln {css}" d="{d}"/>'
+
+    # Past: measured values only; a data gap breaks the line.
+    segments: list[list[tuple[float, float]]] = [[]]
+    hover: list[str] = []
+    for p in points:
+        if p["actual"] is None:
+            segments.append([])
+            continue
+        t = datetime.fromisoformat(p["t"])
+        xy = (px(t), py(p["actual"]))
+        segments[-1].append(xy)
+        hover.append(
+            f'<circle class="hover-pt" cx="{xy[0]:.1f}" cy="{xy[1]:.1f}" r="6">'
+            f"<title>Measured: {p['actual']:g} µg/m³ at {_bkk(t)}</title></circle>"
+        )
+    anchor: tuple[float, float] | None = None
+    actual_pts = [p for p in points if p["actual"] is not None]
+    if actual_pts:
+        last = actual_pts[-1]
+        anchor = (px(datetime.fromisoformat(last["t"])), py(last["actual"]))
+
+    # Future series start at the latest measured point so they connect to the actual line.
+    future_parts: list[str] = []
+    for key, css, _ in future_keys:
+        coords: list[tuple[float, float, dict[str, Any]]] = []
+        for forecast in st.get(key, []):
+            if forecast["value"] is not None:
+                t = datetime.fromisoformat(forecast["valid_time"])
+                coords.append((px(t), py(forecast["value"]), forecast))
+        if not coords:
+            continue
+        start_xy = [anchor] if anchor else []
+        future_parts.append(path(start_xy + [(x, y) for x, y, _ in coords], css + " future-line"))
+    parts.extend(future_parts)
+    for seg in segments:
+        parts.append(path(seg, "ln-actual"))
+    if anchor and actual_pts:
+        last = actual_pts[-1]
+        t = datetime.fromisoformat(last["t"])
+        parts.append(
+            f'<circle class="actual-dot" cx="{anchor[0]:.1f}" cy="{anchor[1]:.1f}" r="5">'
+            f"<title>Measured: {last['actual']:g} µg/m³ at {_bkk(t)}</title></circle>"
+            f'<text class="pt-label latest" x="{anchor[0] - 9:.1f}" '
+            f'y="{max(anchor[1] - 10, CH_Y0 + 10):.1f}" text-anchor="end">'
+            f"Latest {last['actual']:g}</text>"
+        )
+    for key, css, _ in future_keys:
+        for forecast in st.get(key, []):
+            if forecast["value"] is None:
+                continue
+            valid = datetime.fromisoformat(forecast["valid_time"])
+            issue = datetime.fromisoformat(forecast["issue_time"])
+            ahead = int((valid - issue) / timedelta(hours=1))
+            x, y = px(valid), py(forecast["value"])
+            description = (
+                f"{key.replace('future_', '').capitalize()} forecast: "
+                f"{forecast['value']:g} µg/m³, valid {_bkk(valid)}; issued {_bkk(issue)}"
+            )
+            circle = (
+                f'<circle class="forecast-dot {css}" cx="{x:.1f}" cy="{y:.1f}" r="4.5">'
                 f"<title>{e(description)}</title></circle>"
             )
-        forecast_origin = datetime.fromisoformat(chart["end"])
-        for key, css in (("future_persistence", "ln-pers"), ("future_challenger", "ln-chal")):
-            coords = []
-            for forecast in st.get(key, []):
-                if forecast["value"] is None:
-                    continue
-                t = datetime.fromisoformat(forecast["valid_time"])
-                x = 400 + (t - forecast_origin).total_seconds() / 86400 * 400
-                y = 212 - min(forecast["value"], ymax) / ymax * 204
-                coords.append((x, y, forecast))
-            if len(coords) > 1:
-                pairs = " ".join(f"{x:.1f},{y:.1f}" for x, y, _ in coords)
-                series += (
-                    f'<polyline class="ln {css} future-line" '
-                    f'vector-effect="non-scaling-stroke" points="{pairs}"/>'
+            label = ""
+            if css == "ln-chal":  # only the model carries value labels
+                edge = x > CH_X1 - 40
+                lx = x - 4 if edge else x
+                ly = min(max(y - 11, CH_Y0 + 10), CH_Y1 - 4)
+                label = (
+                    f'<text class="pt-label chal" x="{lx:.1f}" y="{ly:.1f}" '
+                    f'text-anchor="{"end" if edge else "middle"}">'
+                    f"+{ahead}h {forecast['value']:g}</text>"
                 )
-            for x, y, forecast in coords:
-                description = (
-                    f"{key.replace('future_', '').capitalize()} forecast: "
-                    f"{forecast['value']:g} µg/m³, "
-                    f"valid {forecast['valid_time']}; issued {forecast['issue_time']}"
-                )
-                series += (
-                    f'<circle class="forecast-dot {css}" cx="{x:.1f}" cy="{y:.1f}" '
-                    f'r="4"><title>{e(description)}</title></circle>'
-                )
-        aria = (
-            f"Station {st['label']}, last 24 hours in UTC: actual PM2.5 in \u00b5g/m\u00b3 against "
-            "persistence and challenger forecasts made 24 h earlier"
-        )
-        end = datetime.fromisoformat(chart["end"])
-        start = end - timedelta(hours=24)
-        future_html = []
-        for key, name in (
-            ("future_persistence", "Persistence forecast"),
-            ("future_challenger", "Challenger forecast"),
-        ):
-            for forecast in st.get(key, []):
-                if forecast["value"] is None:
-                    continue
-                issue = datetime.fromisoformat(forecast["issue_time"])
-                valid = datetime.fromisoformat(forecast["valid_time"])
-                hours_ahead = int((valid - issue) / timedelta(hours=1))
-                future_html.append(
-                    f'<span class="forecast-point"><b>{e(name)}</b> +{hours_ahead} h · '
-                    f"{forecast['value']:g} µg/m³ <small>({valid:%d %b %H:%M} UTC)</small></span>"
-                )
-        future_block = (
-            '<div class="future-forecasts"><strong>Upcoming forecasts</strong>'
-            + (
-                "".join(future_html)
-                if future_html
-                else "<span>Waiting for future forecasts.</span>"
+            parts.append(circle + label)
+    parts.extend(hover)
+
+    aria = (
+        f"Station {st['label']}: PM2.5 in µg/m³, measured over the last 24 hours and "
+        "forecast for the next 24 hours, Bangkok time"
+    )
+    future_html = []
+    for key, _, label in future_keys:
+        for forecast in st.get(key, []):
+            if forecast["value"] is None:
+                continue
+            issue = datetime.fromisoformat(forecast["issue_time"])
+            valid = datetime.fromisoformat(forecast["valid_time"])
+            hours_ahead = int((valid - issue) / timedelta(hours=1))
+            future_html.append(
+                f'<span class="forecast-point"><b>{label} forecast</b> +{hours_ahead} h · '
+                f"{forecast['value']:g} µg/m³ <small>({_bkk(valid)})</small></span>"
             )
-            + "</div>"
+    future_block = (
+        '<div class="future-forecasts"><strong>Upcoming forecasts</strong>'
+        + (
+            "".join(future_html)
+            if future_html
+            else '<span class="forecast-empty">Waiting for future forecasts.</span>'
         )
-        body = (
-            '<div class="plotwrap"><div class="ytitle">\u00b5g/m\u00b3</div><div class="plot">'
-            f'{labels}<svg viewBox="-8 0 816 220" preserveAspectRatio="none" role="img" '
-            f'aria-label="{e(aria)}">{grid}{series}</svg></div>'
-            f'<div class="xlabs"><span>{start:%d %b %H:%M} UTC</span>'
-            f'<span class="axis-now" title="{end:%d %b %H:%M} UTC">Now</span>'
-            "<span>+24 h</span></div></div>" + future_block
-        )
+        + "</div>"
+    )
+    body = (
+        f'<div class="plot"><svg viewBox="0 0 {CH_W} {CH_H}" role="img" '
+        f'aria-label="{e(aria)}">{"".join(parts)}</svg></div>' + future_block
+    )
     hidden = "" if first else " hidden"
     return f'<div class="chart" data-station="{e(st["id"])}"{hidden}>{body}</div>'
 
 
 def _section_chart(data: dict[str, Any]) -> str:
     chart = data["chart"]
-    chal = "Challenger" if (chart or {}).get("has_challenger") else "Challenger (not scored yet)"
     legend = (
-        '<div class="legend"><span><i class="sw actual"></i>Actual</span>'
-        f'<span><i class="sw chal"></i>{chal}</span>'
-        '<span><i class="sw pers"></i>Persistence (latest reading)</span></div>'
+        '<div class="legend"><span><i class="sw actual"></i>Measured</span>'
+        '<span><i class="sw pers"></i>Baseline forecast (tomorrow = today)</span>'
+        '<span><i class="sw chal"></i>Model forecast</span></div>'
     )
     if chart is None:
         inner = _unavailable("The chart")
         pills = ""
-        title = "Forecast vs actual \u00b7 +24 h"
+        title = CHART_TITLE
     elif not chart["stations"]:
         inner = '<p class="muted small">Waiting for the first observations.</p>'
         pills = ""
-        title = "Forecast vs actual \u00b7 +24 h"
+        title = CHART_TITLE
     else:
         sts = chart["stations"]
-        title = f"Forecast vs actual \u00b7 +24 h \u00b7 {sts[0]['label']}"
+        title = f"{CHART_TITLE} \u00b7 {sts[0]['label']}"
         pills = "".join(
             f'<button type="button" class="pill" data-station="{e(s["id"])}" '
             f'data-label="{e(s["label"])}" aria-label="{e(s["label"])}" '
@@ -768,9 +842,11 @@ def _section_chart(data: dict[str, Any]) -> str:
         f'<h2 id="chart-title">{e(title)}</h2>'
         f'<div class="pills" role="group" aria-label="Station">{pills}</div></div>'
         f"{legend}{inner}"
-        '<figcaption class="muted small">Each point: the forecast made 24 h before that hour. '
-        "Last 24 hours, hourly, UTC. Future dots are forecasts; dashed lines connect available "
-        "points and do not imply intermediate predictions.</figcaption></figure>"
+        '<p class="chart-note muted small">Accuracy of past forecasts: see Typical error and '
+        "Skill by horizon above.</p>"
+        '<figcaption class="muted small">Times in Bangkok time (UTC+7). Forecast lines start at '
+        "the latest measured value and join only the horizons available."
+        "</figcaption></figure>"
     )
 
 
@@ -883,10 +959,10 @@ def _section_pipeline(data: dict[str, Any]) -> str:
             )
         body = f'<div class="pipe">{"".join(rows)}</div>'
     legend = (
-        '<p class="legend"><span><i class="sq" style="background:#2dd4bf"></i>checks OK</span>'
-        '<span><i class="sq" style="background:#f5a524"></i>warning</span>'
-        '<span><i class="sq" style="background:#f87171"></i>failed</span>'
-        '<span><i class="sq" style="background:#6b7480;height:5px"></i>no check recorded '
+        '<p class="legend"><span><i class="sq" style="background:#0f766e"></i>checks OK</span>'
+        '<span><i class="sq" style="background:#b45309"></i>warning</span>'
+        '<span><i class="sq" style="background:#b91c1c"></i>failed</span>'
+        '<span><i class="sq" style="background:#6b7280;height:5px"></i>no check recorded '
         "(half height)</span></p>"
     )
     return (
@@ -1156,8 +1232,8 @@ def render_html(data: dict[str, Any]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
-<link rel="stylesheet" href="dashboard.css?v=kan73-layout-story">
-<script src="dashboard.js?v=kan73-layout-story" defer></script>
+<link rel="stylesheet" href="dashboard.css?v=kan73-chart-v2">
+<script src="dashboard.js?v=kan73-chart-v2" defer></script>
 </head>
 <body>
 <main>

@@ -28,7 +28,6 @@
     "Previous": "ก่อนหน้า",
     "Next": "ถัดไป",
     "Warning": "คำเตือน",
-    "Each point: the forecast made 24 h before that hour. Last 24 hours, hourly, UTC. Future dots are forecasts; dashed lines connect available points and do not imply intermediate predictions.": "แต่ละจุดคือค่าพยากรณ์ล่วงหน้า 24 ชั่วโมง แสดงย้อนหลัง 24 ชั่วโมงตามเวลา UTC จุดในอนาคตคือค่าพยากรณ์ เส้นประเชื่อมเฉพาะจุดที่มีโดยไม่ได้แสดงค่าพยากรณ์ระหว่างจุด",
     "PSI measures how far recent inputs have moved from what the model was trained on. The threshold is 0.2; an alert requires two consecutive daily breaches.": "PSI วัดความเปลี่ยนแปลงของข้อมูลเทียบกับข้อมูลที่ใช้ฝึก เกณฑ์คือ 0.2 และจะแจ้งเตือนเมื่อเกินเกณฑ์สองวันติดกัน",
     "Air4Thai quality checks; Python and Neon Postgres. These checks do not prove workflow completion.": "ผลตรวจคุณภาพ Air4Thai; Python และ Neon Postgres ผลตรวจไม่ได้ยืนยันว่า workflow ทำงานสำเร็จ",
     "Persistence prediction quality checks; Python and Neon Postgres. These checks do not prove workflow completion.": "ผลตรวจคุณภาพค่าพยากรณ์วิธีค่าคงเดิม; Python และ Neon Postgres ผลตรวจไม่ได้ยืนยันว่า workflow ทำงานสำเร็จ",
@@ -52,10 +51,12 @@
     "Input drift (PSI)": "การเปลี่ยนแปลงของข้อมูล (PSI)",
     "alert above 0.2": "แจ้งเตือนเมื่อเกิน 0.2",
     "waiting": "รอข้อมูล",
-    "Actual": "ค่าจริง",
+    "Measured": "ค่าที่วัดได้",
+    "Baseline forecast (tomorrow = today)": "พยากรณ์พื้นฐาน (พรุ่งนี้ = วันนี้)",
+    "Model forecast": "พยากรณ์จากโมเดล",
+    "Accuracy of past forecasts: see Typical error and Skill by horizon above.": "ความแม่นยำของค่าพยากรณ์ในอดีต: ดู ความคลาดเคลื่อนเฉลี่ย และ ความแม่นยำตามระยะพยากรณ์ ด้านบน",
+    "Times in Bangkok time (UTC+7). Forecast lines start at the latest measured value and join only the horizons available.": "เวลาเป็นเวลากรุงเทพฯ (UTC+7) เส้นพยากรณ์เริ่มจากค่าที่วัดได้ล่าสุดและเชื่อมเฉพาะระยะพยากรณ์ที่มี",
     "Challenger": "โมเดลท้าชิง",
-    "Challenger (not scored yet)": "โมเดลท้าชิง (ยังไม่มีผลประเมิน)",
-    "Persistence (latest reading)": "ค่าคงเดิม (ค่าล่าสุด)",
     "Station": "สถานี",
     "UTC, hourly": "รายชั่วโมง (UTC)",
     "No hourly data for this station yet.": "ยังไม่มีข้อมูลรายชั่วโมงของสถานีนี้",
@@ -149,7 +150,7 @@
     [/^([\d.]+) Warning$/, function (m) { return m[1] + " เตือน"; }],
     [/^Yes, by (.+)$/, function (m) { return "แม่นกว่า " + m[1]; }],
     [/^Not yet \((.+)\)$/, function (m) { return "ยังไม่แม่นกว่า (" + m[1] + ")"; }],
-    [/^Forecast vs actual · \+24 h(.*)$/, function (m) { return "ค่าพยากรณ์เทียบค่าจริง · +24 ชม." + m[1]; }],
+    [/^PM2\.5 · last 24 h and next 24 h(.*)$/, function (m) { return "PM2.5 · 24 ชม.ที่ผ่านมาและ 24 ชม.ข้างหน้า" + m[1]; }],
     [/^(Healthy|Degraded|Failing|Waiting for data) · updated (.+) Bangkok$/, function (m) { return statuses[m[1]] + " · อัปเดต " + m[2] + " กรุงเทพฯ"; }],
     [/^challenger · persistence (.+)$/, function (m) { return "โมเดลท้าชิง · ค่าคงเดิม " + m[1]; }],
     [/^newest reading · (\d+) of (\d+) stations reporting$/, function (m) { return "ค่าล่าสุด · รายงาน " + m[1] + " จาก " + m[2] + " สถานี"; }],
@@ -161,7 +162,10 @@
     [/^(.+) unavailable right now\.$/, function (m) { return (sections[m[1]] || m[1]) + "ไม่พร้อมใช้งานในขณะนี้"; }],
     [/^Some data is unavailable right now: (.+)\.$/, function (m) { return "ข้อมูลบางส่วนไม่พร้อมใช้งาน: " + m[1].split(", ").map(function (s) { return sections[s] || s; }).join(", "); }],
     [/^from$/, function () { return "ตั้งแต่"; }],
-    [/^Station (.+), last 24 hours in UTC: actual PM2.5 in µg\/m³ against persistence and challenger forecasts made 24 h earlier$/, function (m) { return "สถานี " + m[1] + " ย้อนหลัง 24 ชั่วโมง (UTC): PM2.5 จริง หน่วย µg/m³ เทียบกับวิธีค่าคงเดิมและโมเดลท้าชิงที่พยากรณ์ล่วงหน้า 24 ชั่วโมง"; }],
+    [/^Station (.+): PM2\.5 in µg\/m³, measured over the last 24 hours and forecast for the next 24 hours, Bangkok time$/, function (m) { return "สถานี " + m[1] + ": PM2.5 หน่วย µg/m³ ค่าที่วัดได้ 24 ชั่วโมงที่ผ่านมาและค่าพยากรณ์ 24 ชั่วโมงข้างหน้า เวลากรุงเทพฯ"; }],
+    [/^Latest ([\d.]+)$/, function (m) { return "ล่าสุด " + m[1]; }],
+    [/^\+(\d+)h ([\d.]+)$/, function (m) { return "+" + m[1] + " ชม. " + m[2]; }],
+    [/^Measured: (.+) µg\/m³ at (.+)$/, function (m) { return "วัดได้: " + m[1] + " µg/m³ เวลา " + m[2]; }],
     [/^(Collect|Predict|Quality): (\d+) of 24 hours ok, (\d+) warning, (\d+) failed, (\d+) missed$/, function (m) { return (thai[m[1]] || "คุณภาพ") + ": สำเร็จ " + m[2] + " จาก 24 ชั่วโมง เตือน " + m[3] + " ล้มเหลว " + m[4] + " ไม่พบการทำงาน " + m[5]; }]
   ];
   thai.Quality = "คุณภาพ";
@@ -280,7 +284,7 @@
     var selectedPin = Array.prototype.find.call(mapPins, function (p) { return selected && p.dataset.station === selected.dataset.station; });
     var selectedReading = document.getElementById("selected-map-reading");
     if (selectedReading) selectedReading.textContent = selectedPin ? selectedPin.getAttribute("aria-label") : "";
-    if (title && selected) title.textContent = translate("Forecast vs actual · +24 h") + " · " + translate(selected.getAttribute("data-label"));
+    if (title && selected) title.textContent = translate("PM2.5 · last 24 h and next 24 h") + " · " + translate(selected.getAttribute("data-label"));
     pills.forEach(function (pill) { pill.textContent = translate(pill.getAttribute("data-label")); });
     checkLabels.forEach(function (el) { el.title = translate(el.dataset.englishTitle); });
     if (pause) pause.textContent = translate(pause.getAttribute("aria-pressed") === "true" ? "Resume animation" : "Pause animation");
