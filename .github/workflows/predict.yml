@@ -104,3 +104,15 @@ jobs:
           printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
             -H 'Content-Type: application/json' \
             --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -
+      # KAN-30: dead-man switch ping. Last step, only when every step above succeeded. The URL is a
+      # secret: it comes in through env only (no set -x, no echo) and all curl output is discarded.
+      # Secret unset = silent no-op. A failed ping never fails the pipeline (|| true), it only
+      # prints a fixed line without the URL.
+      - name: Ping healthchecks.io
+        if: success()
+        timeout-minutes: 2
+        env:
+          HEALTHCHECK_PING_URL: ${{ secrets.HEALTHCHECK_PING_URL }}
+        run: |
+          [ -n "$HEALTHCHECK_PING_URL" ] || exit 0
+          curl -fsS -m 10 --retry 3 "$HEALTHCHECK_PING_URL" >/dev/null 2>&1 || echo "healthcheck ping failed (ignored)"
