@@ -1,6 +1,6 @@
 """Hourly collector (KAN-18): ingest only. Run with ``python -m pm25_forecast.collector``.
 
-Per run: fetch Air4Thai latest readings and upsert them in their own transaction; then fetch the
+Per run: fetch Air4Thai hourly history and upsert it in its own transaction; then fetch the
 Open-Meteo CAMS PM2.5 forecast per station and, in a second transaction, append it as
 `predictions` rows (model_version ``cams_global``, ``issue_time`` = retrieval time). A failure in
 the CAMS half therefore never rolls back observations.
@@ -8,19 +8,24 @@ the CAMS half therefore never rolls back observations.
 Design points (the GitHub schedule is best effort: runs are late, skipped or doubled up):
 
 * Data timestamps, never run time, are the keys. Re-running or double-running is idempotent.
-* Air4Thai's ``getNewAQI_JSON`` returns only each station's latest reading, so a missed hour
-  cannot be recovered from it (maximum recoverable gap: 0 h). The gap check compares each
-  station's newest stored ``ts`` with the new reading, logs and alerts on every missing hour,
-  and never invents data.
+* KAN-74: the headline ``AQILast.PM25.value`` of ``getNewAQI_JSON`` is PCD's 24 h rolling
+  average, not the hourly value, so it is never stored as ``pm25``. Hourly values come from the
+  history endpoint (``getHistoryData`` ``type=hr``): the last ``HISTORY_LOOKBACK_HOURS`` hours
+  per station every run. Missed runs are therefore healed by the next one inside that window.
+  The gap check walks each station's new hours (after its newest stored ``ts``), logs and
+  alerts on every missing hour, and never invents data.
 * CAMS refreshes about twice a day, so most hourly snapshots repeat the previous run. A snapshot
   whose values equal the latest stored vintage on every overlapping valid_time (and adds no
   later hours) is not stored.
-* Air4Thai is polled every 20 minutes (workflow draft) because each poll only sees the latest
-  reading; upserts are idempotent and CAMS repeats are deduped, so extra polls are cheap.
+* Upserts are idempotent (key station_id + ts), CAMS repeats are deduped, so extra polls are
+  cheap. Each run makes one history request per station, paced by ``AIR4THAI_PAUSE_S``.
 * Weather is off by default (``COLLECT_WEATHER``): the KAN-17 schema has no weather table.
   When enabled it is fetched, validated and raw-archived only, and its failures are not counted.
 * Fetching has a per-host circuit breaker (the first transport failure for a host skips the
-  remaining stations for that host) and an overall deadline well under the job timeout.
+  remaining stations for that host, for Air4Thai and Open-Meteo alike) and an overall deadline
+  well under the job timeout, checked before every station. Air4Thai gets
+  ``AIR4THAI_MAX_ATTEMPTS`` tries per request, so a dead host costs well under a minute. Rows
+  already fetched are written before the run ends, whichever way the fetch phase stopped.
 * DB down: no fallback. The run is skipped, an alert is sent and the exit code is non-zero.
 * Content from the APIs is data. Nothing here builds requests or SQL from it.
 """
@@ -46,7 +51,7 @@ from pm25_forecast.ingest.air4thai import (
 from pm25_forecast.ingest.air4thai import (
     Air4ThaiClient,
     Observation,
-    gzip_file_archive,
+    gzip_history_archive,
 )
 from pm25_forecast.ingest.open_meteo import (
     AIR_QUALITY_URL,
@@ -73,6 +78,9 @@ STALE_AFTER = timedelta(hours=3)
 # Alert while a station is 3-4 h stale. Stateless, so a crossing alerts 1-3 times (20 min polls,
 # late or skipped runs); persistent alert state is a follow-up (KAN-30/KAN-19).
 STALE_ALERT_WINDOW = timedelta(minutes=60)
+HISTORY_LOOKBACK_HOURS = 6  # hourly history re-read per station each run (late data, missed runs)
+AIR4THAI_PAUSE_S = 2.0  # pause between per-station history requests
+AIR4THAI_MAX_ATTEMPTS = 2  # per request (client default 4 would cost ~110 s per dead station)
 FETCH_DEADLINE_S = 240.0  # whole fetch phase; the workflow timeout is 10 minutes
 EXIT_FAILED, EXIT_CONFIG = 1, 2
 
@@ -91,7 +99,8 @@ class Gap:
     def __str__(self) -> str:
         return (
             f"station {self.station_id}: {self.missing_hours} h missing between "
-            f"{self.last_stored.isoformat()} and {self.next_seen.isoformat()} (not recoverable)"
+            f"{self.last_stored.isoformat()} and {self.next_seen.isoformat()} "
+            "(later runs re-read the last 6 h; the daily backfill covers older hours)"
         )
 
 
@@ -120,19 +129,26 @@ def as_utc(value: Any) -> datetime:
 def find_gaps(
     last_stored: Mapping[str, datetime], observations: Iterable[Observation]
 ) -> list[Gap]:
-    """Missing whole hours between each station's newest stored ts and its new reading.
+    """Missing whole hours after each station's newest stored ts, up to its newest new hour.
 
-    A station with nothing stored yet (first run) has no gap. Equal or consecutive hours are
-    not gaps. This reports; it never fills.
+    Per station the new hours later than the stored one are walked in order; every jump of more
+    than one hour is a gap (also between two new hours). Hours at or before the stored ts are
+    re-reads and ignored here. A station with nothing stored yet (first run) has no gap. This
+    reports; it never fills.
     """
-    gaps = []
+    by_station: dict[str, list[datetime]] = {}
     for obs in observations:
-        previous = last_stored.get(obs.station_id)
+        by_station.setdefault(obs.station_id, []).append(obs.ts)
+    gaps = []
+    for station_id, stamps in by_station.items():
+        previous = last_stored.get(station_id)
         if previous is None:
             continue
-        missing = round((obs.ts - previous) / STEP) - 1
-        if missing >= 1:
-            gaps.append(Gap(obs.station_id, previous, obs.ts, missing))
+        for ts in sorted({t for t in stamps if t > previous}):
+            missing = round((ts - previous) / STEP) - 1
+            if missing >= 1:
+                gaps.append(Gap(station_id, previous, ts, missing))
+            previous = ts
     return gaps
 
 
@@ -180,26 +196,53 @@ def fetch_air4thai(
     station_ids: Sequence[str],
     now: datetime,
     result: CollectorResult,
+    *,
+    deadline: float = math.inf,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> list[Observation]:
-    """Fetch and filter Air4Thai readings. A failure is recorded, never raised."""
-    try:
-        fetched = air4thai.fetch(station_ids)
-    except Exception as exc:  # any failure of this source must not stop the CAMS half
-        result.failures.append(f"air4thai fetch failed: {type(exc).__name__}")
-        logger.error("air4thai fetch failed: %s", type(exc).__name__)
-        return []
+    """Hourly PM2.5 for the last HISTORY_LOOKBACK_HOURS per station. Failures are recorded.
+
+    Hours without a usable value are dropped (never imputed); fetch_history already limits rows
+    to ``start..now``, so no reading can be dated in the future. Error text is the exception type
+    or our own message only: httpx messages carry the full request URL.
+    """
+    start = now - timedelta(hours=HISTORY_LOOKBACK_HOURS)
     observations: list[Observation] = []
-    for obs in fetched:
-        if obs.pm25 is None:
-            result.observations_dropped += 1  # no value: store nothing rather than a hollow row
-        elif obs.ts > now + MAX_FUTURE_SKEW:
-            result.observations_dropped += 1
-            logger.warning("air4thai: %s reading dated in the future, dropped", obs.station_id)
-        else:
-            observations.append(obs)
-    if not observations:  # a 200 with nothing usable is schema drift or an outage, not success
+    fetched = 0
+    for index, station_id in enumerate(station_ids):
+        if monotonic() > deadline:
+            result.failures.append("air4thai fetch deadline exceeded; remaining stations skipped")
+            logger.error("air4thai fetch deadline exceeded before station %s", station_id)
+            break
+        if index and AIR4THAI_PAUSE_S > 0:
+            sleep(AIR4THAI_PAUSE_S)
+        try:
+            history = air4thai.fetch_history(station_id, start, now, pause=0)
+        except Exception as exc:  # any failure of this source must not stop the CAMS half
+            result.failures.append(
+                f"air4thai history failed for {station_id}: {type(exc).__name__}"
+            )
+            logger.error("air4thai history %s failed: %s", station_id, type(exc).__name__)
+            continue
+        if history.failed_chunks:
+            result.failures.append(
+                f"air4thai history failed for {station_id}: " + "; ".join(history.errors)
+            )
+            if history.transport_failure:  # host unhealthy: stop, keep what we already have
+                result.failures.append("air4thai unreachable; remaining stations skipped")
+                logger.error("air4thai host tripped; skipping remaining stations")
+                break
+            continue
+        for obs in history.observations:
+            fetched += 1
+            if obs.pm25 is None:
+                result.observations_dropped += 1  # an hour without a value stays missing
+            else:
+                observations.append(obs)
+    if not observations and not result.failures:  # a 200 with nothing usable is drift or outage
         result.failures.append("air4thai returned no usable observations")
-        logger.error("air4thai returned no usable observations (%d fetched)", len(fetched))
+        logger.error("air4thai returned no usable observations (%d fetched)", fetched)
     return observations
 
 
@@ -356,10 +399,13 @@ def run(
     air4thai = Air4ThaiClient(
         client=http,
         ca_bundle=settings.air4thai_ca_bundle,  # KAN-35: optional extra CA PEM; unset = default
-        archive=gzip_file_archive(archive_dir / "air4thai"),
+        max_attempts=AIR4THAI_MAX_ATTEMPTS,
+        history_archive=gzip_history_archive(archive_dir / "air4thai"),
     )
     try:
-        observations = fetch_air4thai(air4thai, station_ids, now, result)
+        observations = fetch_air4thai(
+            air4thai, station_ids, now, result, deadline=deadline, monotonic=monotonic
+        )
     finally:
         air4thai.close()
     with open_db(connect, url) as con:

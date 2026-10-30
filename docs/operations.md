@@ -29,6 +29,120 @@ Backfill (KAN-12 part 1, KAN-34): `uv run python -m pm25_forecast.backfill [--lo
 about 3 months) into `observations`. Same settings as the collector; idempotent, so it runs daily
 as gap recovery. Workflow: `.github/workflows/backfill.yml`.
 
+Collector stores hourly PM2.5, not the 24 h average (KAN-74). Until KAN-74 the collector stored
+`AQILast.PM25.value` from `getNewAQI_JSON` as `pm25`. On 2026-10-30 15:00 Bangkok that value equalled
+the mean of the last 24 hourly history values for stations 02t, 59t and 61t (while the latest hours
+were 15.5, 4.3 and 12.1), and PCD documents the headline as a 24 h average. The live `AQILast` block
+has no separate 1 h field (only `color_id`, `aqi` and `value` per pollutant), so the collector now
+reads the history endpoint (`getHistoryData`, `type=hr`) through the existing client (TLS bundle,
+retries): the last 6 hours per station each run, one request per station, 2 s apart. Hours with no
+value stay missing (no imputation); missing hours after the newest stored hour are logged and
+alerted as gaps. A history failure for any station is a run failure (exit 1, alert) with only the
+exception type in the message (no URL or secrets); CAMS is still collected. The 24 h headline is
+not stored anywhere (it would need a new column or table, which this change does not add).
+
+Why it matters: `UPSERT_OBSERVATION` lets the later same-source write win, so rows written by the
+old collector are 24 h averages until the hourly backfill overwrites them, and every
+`scores.pm25_obs` computed from them is skewed.
+
+Fix-forward notes in the section above: a collector run that cannot reach Air4Thai stops at the
+first transport failure (2 tries per request, then the remaining stations are skipped), writes the
+stations it already has and fails the run; the deadline is checked before every station. Raw
+history bodies are archived under `<RAW_ARCHIVE_DIR>/air4thai/air4thai-history-<station>-<UTC>.json.gz`
+(git-ignored, public data only). Gap messages now say the next runs re-read the last 6 h and the
+daily backfill covers older hours.
+
+One-off repair (owner; needs `DATABASE_URL`, `STATION_LOCATIONS`, `AIR4THAI_CA_BUNDLE`). Order
+matters: an upsert sets `ingested_at` to now, which is how the old rows are told apart.
+
+1. Before anything: run the two queries in "Identify" below and keep the output.
+2. Merge the KAN-74 PR and note the time `T` (UTC) from which the new collector is live (the
+   first `RUN_SUMMARY` of the new code, or the merge time; the later one is safe).
+3. Overwrite recent hours with hourly values by running the existing backfill over the whole
+   retention window: GitHub, Actions, "Backfill", "Run workflow", `lookback_days` = `120`
+   (draft: `docs/backfill-workflow.yml.txt`), or locally
+   `AIR4THAI_CA_BUNDLE=certs/air4thai-ca.pem uv run python -m pm25_forecast.backfill --lookback-days 120`.
+   Read the per-station log lines (rows upserted, empty or failed chunks).
+4. Remove what the backfill could not overwrite ("Delete" below; only if step 3 had 0 failed chunks).
+5. Re-score from 2026-10-27 (exact command below), then re-run drift and retrain only after 1-4.
+
+Identify (read-only; run before the repair). Rows written by the old collector have `ingested_at`
+within a few minutes (at most about 3 h with a late cron and PCD lag) of `ts`; the backfill writes
+them hours or days later:
+
+```sql
+-- observations written at collection time since 2026-10-27 (likely 24 h averages)
+SELECT station_id, count(*) AS rows, min(ts) AS first_ts, max(ts) AS last_ts
+FROM observations
+WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
+  AND ingested_at - ts < interval '3 hours'
+GROUP BY station_id ORDER BY station_id;
+
+-- scores computed in that period (re-score after the repair)
+SELECT model_version, count(*) AS scores, min(valid_time) AS first_valid, max(valid_time) AS last_valid
+FROM scores
+WHERE valid_time >= '2026-10-27T00:00:00+07:00'
+GROUP BY model_version ORDER BY model_version;
+```
+
+Delete (owner runs after step 3; replace `<T>` with the time from step 2, in UTC, e.g.
+`2026-11-01T03:00:00+00:00`). HARD GATE: run it only if every station's step-3 backfill log line
+shows 0 failed chunks; otherwise re-run step 3 first, because good hourly rows that a failed chunk
+did not overwrite would match the filter and be deleted. Every row the backfill rewrote has
+`ingested_at` after `<T>`, so what is still older than `<T>` and was written within 3 h of its
+`ts` is an old collector row the backfill had no hourly value for.
+
+1. Run the SELECT and compare its total with the "Identify" output.
+2. Run the transaction below. Compare the observations `DELETE n` count with the SELECT total.
+   `COMMIT` only if equal; otherwise `ROLLBACK` and investigate.
+
+```sql
+SELECT station_id, count(*), min(ts), max(ts) FROM observations
+WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
+  AND ingested_at < '<T>' AND ingested_at - ts < interval '3 hours'
+GROUP BY station_id;
+
+BEGIN;
+DELETE FROM observations
+WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
+  AND ingested_at < '<T>' AND ingested_at - ts < interval '3 hours';
+-- compare "DELETE n" with the SELECT total above, then decide:
+-- scores whose actual no longer exists (the scorer never deletes a score on its own)
+DELETE FROM scores s
+WHERE s.valid_time >= '2026-10-27T00:00:00+07:00'
+  AND NOT EXISTS (SELECT 1 FROM observations o
+                  WHERE o.station_id = s.station_id AND o.ts = s.valid_time
+                    AND o.pm25 IS NOT NULL);
+-- equal counts: COMMIT;   otherwise: ROLLBACK;
+```
+
+Why delete and not impute or keep: a 24 h average is a different quantity (smoothed, lagged),
+so a row holding it is wrong, not merely noisy; features, the persistence baseline, scores and
+drift would all treat it as an hourly truth. A missing hour is handled everywhere (gaps are
+reported, missing actuals are "waiting", features tolerate gaps) and imputing would invent data.
+Deleted hours are not refetched because Air4Thai has none for them. A source-`openaq` row for the
+same hour, if any, is untouched.
+
+Re-score (after steps 3-4; reads and writes the database only, idempotent):
+
+```sh
+uv run python -m pm25_forecast.score --since 2026-10-27T00:00:00Z
+```
+
+`--since` takes an ISO datetime with a UTC offset and replaces the default 72 h rescore start for
+that run (the metrics window is unchanged). The hourly predict workflow's own score step keeps the
+default; run this once by hand.
+
+Downstream effects while the 24 h values were in `observations` (2026-10-27 until the repair):
+- Retrain: the first scheduled retrain is Mon 2026-11-02 03:17 UTC and has not run yet. Finish
+  steps 1-4 before then (or disable it for the weekend) so it does not train on 24 h values.
+- Drift: it runs daily on the last 7 days of observations, so since 2026-10-27 it has read some
+  24 h-average rows; its results for those days may be false alarms or hide real shifts. Re-run it
+  after the repair; treat `drift_checks` rows from 2026-10-27 until then as suspect.
+- Scores: `persistence-24h` (and challenger) scores for valid_time from 2026-10-27 until the repair
+  are suspect. The Identify query lists them; the re-score above recomputes the ones whose
+  actual still exists, and the DELETE above removes the ones whose actual was deleted.
+
 Predict (KAN-28): `uv run python -m pm25_forecast.predict` reads stored observations and CAMS rows
 and appends `persistence-24h` forecasts (plus a `cams` pass-through of stored CAMS rows, not scored) for +6, +12 and +24 h per station to
 `predictions` (idempotent per issue hour). Same settings as the collector; DB down means skip,

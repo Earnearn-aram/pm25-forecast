@@ -407,6 +407,6 @@ def test_collector_run_logs_a_structured_summary(tmp_path, fake_db, caplog):
     assert summary["job"] == "collector"
     assert summary["status"] == "ok"
     assert summary["started_at"] == NOW.isoformat()
-    assert summary["observations_upserted"] == 1
+    assert summary["observations_upserted"] == 3
     assert summary["failures"] == []
     assert DB_PASSWORD not in caplog.text
