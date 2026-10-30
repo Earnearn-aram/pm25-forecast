@@ -1,45 +1,75 @@
-# KAN-65 report: can a +24 h model beat persistence? EDA, features, walk-forward backtest
+# KAN-65 report v2: can a +24 h model beat persistence? EDA, features, walk-forward backtest
 
-`[Data Scientist - Sonnet 5.5]` - branch `kan-65/ds-eda-features` - DRAFT, offline analysis only.
+`[Data Scientist - Sonnet 5.5]` - branch `kan-65/ds-eda-features` - DRAFT, offline analysis only. This is v2 after independent review; v1 numbers are kept in the appendix for transparency.
 
 ## สรุปสำหรับ Boss (ภาษาไทย)
 
-ข้อมูลชุดนี้มีรอยต่อสำคัญที่ KAN-15/64 มองข้าม: ตั้งแต่ 2026-07-31 17:00 UTC แหล่งข้อมูลเปลี่ยนจาก openaq (เรียบเหมือนค่าเฉลี่ยเคลื่อนที่ ไม่มีวัฏจักรรายวัน ค่าเฉลี่ย 24 µg/m³) เป็น air4thai (รายชั่วโมงจริง ค่าแกว่งมากกว่า 4 เท่า ค่าเฉลี่ย 13 µg/m³) ดังนั้น test span ของ KAN-15 เกือบทั้งหมดคือการทดสอบข้ามแหล่งข้อมูล (train บน openaq, test บน air4thai) และโมเดลที่มีแต่ `pm25_latest` จึงเสมอกับ persistence เป็นเรื่องที่คาดได้ เมื่อเพิ่มฟีเจอร์ (rolling mean/max/std, lag 24/48/72/168 ชม., ปฏิทิน, สถานีข้างเคียง) และจูนบน validation slice ภายในช่วง train เท่านั้น ผู้สมัครที่เลือกด้วย validation (val-selected) ดีกว่า persistence บน holdout ของ KAN-15 ที่ +24 ชม.: MAE ต่างกัน -0.151 µg/m³ (CI 95% day-block [-0.217, -0.089], หลังแก้ Bonferroni 99 การเปรียบเทียบ [-0.272, -0.044]) และดีกว่าใน 4 จาก 4 fold ที่ทดสอบบนข้อมูล air4thai (รวม -0.436, [-0.713, -0.173]) แต่กฎ promote ที่ตั้งไว้ล่วงหน้า **ไม่ผ่าน** 2 ข้อ: (b) CI หลังแก้ Bonferroni ของ fold รวมคร่อมศูนย์เล็กน้อย (+0.015) และ (d) ในชั่วโมงมลพิษสูง (>37.5) ที่เลือกตาม target จริง โมเดลแย่กว่า persistence (+5.15 µg/m³, n=76 ชั่วโมง คือช่วงเริ่มต้นของ episode ที่โมเดลทำนายต่ำเกินไป) แม้เมื่อเลือกตามค่า latest >37.5 จะดีกว่ามาก (-13.5) ข้อสรุป: **ยังไม่ promote** แนวโน้มการได้เปรียบเป็นจริงและสม่ำเสมอ แต่ข้อมูล air4thai มีเพียง ~90 วัน ไม่มีฤดูฝุ่นสูง จึงต้องใช้ข้อมูลมากขึ้น (โดยเฉพาะ backfill air4thai รายชั่วโมงย้อนหลัง) และรัน challenger แบบ shadow ก่อน
+หลังรีวิว ผมแก้การออกแบบ (Amendment 5, เขียนหลังเห็นผล v1 และระบุไว้ตรง ๆ): fold ของ regime B ไม่ซ้อนกันแล้ว (G1-G3, ทดสอบ 7,954 station-hour ไม่ซ้ำ, 67 วัน), ใช้ bootstrap แบบ block 7 วันควบคู่ block 1 วัน, ใช้โมเดลคอนฟิกคงที่ (ไม่จูน) และให้ smoother พารามิเตอร์เดียว (latest + beta x (mean24 - latest)) เป็นตัวหลัก ผล +24 ชม.: smoother ดีกว่า persistence บน holdout KAN-15 -0.383 µg/m³ (CI 7 วัน [-0.465, -0.297], หลัง Bonferroni 30 การเปรียบเทียบ [-0.507, -0.243]) และบน fold regime B ที่ไม่ซ้อนกัน -0.391 ([-0.557, -0.195], Bonferroni [-0.629, -0.057], ดีกว่าใน 3/3 fold) LightGBM direct ที่ตั้งคอนฟิกคงที่ได้ -0.408 และ -0.603 ใกล้เคียงกัน แต่ไม่ดีกว่า persistence ที่ +6/+12 บน holdout (train บน regime A เท่านั้น) กฎความปลอดภัยชั่วโมงมลพิษสูงแบบใหม่ (ใช้ค่า latest >37.5 ที่รู้ ณ เวลาพยากรณ์) **ทดสอบไม่ได้** ใน regime B (มีเพียง 74 station-hour, 18 วัน; เกณฑ์ขั้นต่ำ 200 และ 10 วัน) จึงไม่ถือว่าผ่านหรือไม่ผ่าน และการจับ spike (เพิ่ม >=15 µg/m³ ใน 24 ชม.) ทำได้น้อยมาก (จับได้ <=10% ของ 199 เหตุการณ์) ข้อสรุป: **แนะนำ shadow-run (ยังไม่ promote)** smoother ก่อน แล้ว LightGBM direct เป็น challenger ตัวที่สอง ส่วนข้อสงสัย regime break: ระดับต่างกัน (24 vs 13) เป็นผลของฤดูกาล (openaq ส.ค.-ต.ค. 2025 เฉลี่ย 13.85 เทียบ air4thai ส.ค.-ต.ค. 2026 เฉลี่ย 13.61) แต่ความเรียบต่างกัน 8.6 เท่า (|Δ1ชม.| 0.27 เทียบ 2.29) สมมติฐาน H-MA (openaq = ค่าเฉลี่ย 24 ชม.ย้อนหลัง) **ยังสรุปไม่ได้** (ใกล้เคียงบางสถิติแต่ไม่ตรงทั้งหมด) แต่หมายความว่า regime A ทำนายปริมาณที่เรียบกว่า ค่ารายชั่วโมงจริง
 
-**โมเดล global (horizon เป็นฟีเจอร์ ใช้ร่วมทุกสถานี):** แย่กว่า persistence บน holdout ทุก horizon (+6: +0.17, +12: +0.16, +24: +0.05 และเมื่อเพิ่ม station id: +0.20, +0.18, +0.09 µg/m³ โดย CI ของ +24 ไม่คร่อมศูนย์: [+0.018, +0.087] และ [+0.050, +0.133]) แต่ดีกว่าโมเดล per-horizon ปัจจุบันบนข้อมูล air4thai ที่ทุก horizon (+6: -0.147, +12: -0.385, +24: -0.310 µg/m³) เทียบกับตัวที่จูนแล้ว (val-selected, per-horizon) global ไม่ชนะ การนำไปใช้ต้องแก้ serving loader (ปัจจุบันรับเฉพาะ bundle แบบหนึ่ง booster ต่อ horizon หรือ single-horizon และ feature_list ต้องมาจาก feature builder ซึ่งไม่มี `horizon`)
+**โมเดล global (horizon เป็นฟีเจอร์):** ที่คอนฟิกคงที่ ไม่ต่างจาก persistence บน holdout ที่ +24 (-0.022, CI 7 วัน [-0.080, +0.035]) และดีกว่า persistence บน regime B (-0.49 ที่ +24) แต่ไม่ดีกว่า LightGBM direct ต่อ horizon (-0.60) การนำไปใช้ต้องแก้ serving loader
+
+## What changed after review, and why
+
+An independent reviewer reproduced every v1 number and found design problems. All changes are in `docs/kan-65-ds-plan.md` Amendment 5 / 5b, **written after seeing v1 results** (flagged in the amendment where a choice was informed by v1).
+
+| Review finding | v1 | v2 fix |
+|---|---|---|
+| Overlapping test windows (F4 and R1 overlapped; folds inside the holdout span called independent) | F4, R1-R3 pooled | Consecutive non-overlapping regime-B folds G1-G3 (2026-08-22..09-11, 09-12..10-02, 10-03..10-27); the script asserts no (station, origin) is tested twice in a pool. Unique counts below. HOLDOUT still overlaps G1-G3 in time and is **not independent** of the regime-B pool |
+| 7-day-block bootstrap promised but not run | 1-day blocks only | 1-day and 7-day blocks for every headline CI; decisions use 7-day |
+| Rule (d) conditioned on the realised target | withdrawn | Forecast-time subset (latest reading > 37.5), a testability threshold (>= 200 station-hours and >= 10 days), and a separate onset-event metric |
+| Selection on validation data from another regime | A-heavy validation for B tests | ML models use fixed pre-declared configurations (no tuning); only the smoother beta is selected, on same-regime validation; for the holdout no regime-B validation exists before its start, so beta is fixed at 0.5 |
+| Large search, noisy selector | 3,344 configs, 99 claims | 5 candidates, fixed config, 30-claim family (5 candidates x 3 horizons x 2 headline groups), Holm and Bonferroni |
+| Smoother under-exposed | one candidate among many | Headline candidate named in advance; beta procedure, stability and curve reported |
+| Source of rows 07-29..07-31 | ambiguous | See below |
+
+**Source of the rows between the gap and the switch.** The 664 h hole is 2026-07-02 01:00..07-29 18:00. The rows from 2026-07-29 18:00 to 2026-07-31 16:00 carry source `openaq` (regime A by label); `air4thai` starts at 2026-07-31 17:00. The regime boundary used everywhere is the **source label of the target row** (validation and B-only training use `source == air4thai`); the G folds start on 08-22 so every G test target is air4thai, and the holdout contains 100 openaq-labelled and 10,629 air4thai-labelled +24 h targets.
 
 ## Verdict
 
-**More data needed; do not promote now.** Pre-registered rule (docs/kan-65-ds-plan.md, Amendment 3 item 6 and Amendment 4) for the single primary candidate (`val_best`) at +24 h:
+**Shadow-run, do not promote.** Pre-registered v2 rule (Amendment 5 item 7), headline candidate the one-parameter smoother (named a priori), +24 h:
 
-| Condition | Result |
-|---|---|
-| (a) KAN-15 holdout, Bonferroni (99 claims) CI entirely below zero | PASS: -0.151, CI [-0.272, -0.044] |
-| (b) pooled regime-B folds, Bonferroni CI entirely below zero | FAIL by 0.015: -0.436, CI [-0.953, +0.015] (95% CI [-0.713, -0.173]; Holm p 0.034) |
-| (c) beats persistence on point MAE in >= 3 of 4 regime-B folds | PASS: 4/4 |
-| (d) no deterioration in high-pollution hours (point diff <= 0), target > 37.5 and latest > 37.5 | FAIL in regime-B pool by target: +5.15 [+3.2, +7.0], n = 76 h. Passes by latest (-13.5), in holdout (-0.43 / -1.76) and in regime-A pool (-1.31 / -1.66) |
+| Condition | Smoother | LightGBM direct (fixed config) |
+|---|---|---|
+| (a) HOLDOUT 7-day-block Bonferroni(30) CI entirely < 0 | PASS: -0.383, [-0.507, -0.243] | PASS: -0.408, [-0.652, -0.208] |
+| (b) unique regime-B pool, same | PASS (borderline: with 1-day blocks the Bonferroni CI is [-0.760, +0.016]): -0.391, [-0.629, -0.057] | PASS: -0.603, [-0.868, -0.317] |
+| (c) point MAE below persistence in >= 2 of 3 regime-B folds | PASS 3/3 | PASS 3/3 |
+| (d) safeguard (latest > 37.5), regime A pool | PASS (identical to persistence: beta = 0 chosen in every A fold) | PASS: -1.44 [-2.44, -0.41] |
+| (d) safeguard, regime B pool | **untestable** (74 station-hours, 18 days) | **untestable** |
+| Verdict | SHADOW | SHADOW (+24 h only) |
 
-The verdict is not rescued by post hoc candidate picking: LightGBM direct (not val-selected) and the one-parameter smoother pass (a)-(c) but also fail (d) by target. Point of honesty on (d): conditioning on the realised target > 37.5 mechanically favours persistence at episode onsets (persistence bias there is already -23 ug/m3), so some of this is unavoidable; but the primary also under-predicts those onsets more (bias -28 vs -23 in regime B), and alerting is exactly the use case, so I do not treat (d) as an artifact. It is only 76 hours, a handful of episodes.
+Rule text: PROMOTE needs a-d with a testable regime-B safeguard; a-c passing with an untestable regime-B safeguard means SHADOW. The safeguard cannot be verified on the live feed's regime because it contains almost no high-pollution hours (74 station-hours above 37.5, 18 days, 0.9% of the pool), no haze season. Not passing and not failing is the honest status.
 
 ## 1. Data, quality, exclusions
 
-- File `data/history.duckdb`, SHA-256 `fdd9b90ba6b96a1de512175f638808efe34fc8ae80c35b3e89bf440e71553a09`: **identical to the KAN-15 snapshot**. Tables `observations` (64,986 rows) and `forecast_vintages` (1,032, unused). Five stations, 2024-10-28 00:00 to 2026-10-28 21:00 UTC, no negative or non-finite values, all timestamps on the hour.
-- Grid coverage per station is only 74-75% of hours: gaps >= 48 h: 2025-04-25..05-07, 2025-06-30..08-25 (1,331 h), 2025-10-10..11-18 (939 h), **2026-07-02..07-29 (664 h, all stations)**, bkp100t/bkp101t 2026-05-08..06-09 (744 h; contains the known 05-19..21 gap), a few shorter ones. Gaps are never imputed; a sample needs a target and a latest reading in [origin-3h, origin-1h] (KAN-15/64 rule). The harness asserts that no sample targets the known gap.
-- **Regime break (new finding):** `source` is `openaq` until 2026-07-31 16:00 UTC and `air4thai` from 17:00 at all five stations.
+- File `data/history.duckdb`, SHA-256 `fdd9b90ba6b96a1de512175f638808efe34fc8ae80c35b3e89bf440e71553a09`: **identical to the KAN-15 snapshot** (64,986 observation rows, 1,032 unused vintages, five stations, 2024-10-28 00:00..2026-10-28 21:00 UTC; no negative or non-finite values).
+- Grid coverage is 74-75% of hours per station. Gaps >= 48 h: 2025-04-25..05-07, 2025-06-30..08-25 (1,331 h), 2025-10-10..11-18 (939 h), 2026-07-02..07-29 (664 h, all stations), bkp100t/bkp101t 2026-05-08..06-09 (744 h, contains the known 05-19..21 gap) and a few shorter ones. Gaps are never imputed; a sample needs a target and a latest reading in [origin-3h, origin-1h]; the harness asserts the known gap is never sampled.
+- Pair counts (+24 h, unique station-hours / unique target days): HOLDOUT 10,729 / 91 (persistence MAE 4.4976, reproduces KAN-64); unique regime-B pool G1-G3 7,954 / 67; regime-A pool F1-F3 12,776 / 115. At +12 h and +6 h the regime-B pool has 7,999 and 8,024 station-hours.
+- Regime table (by source label): openaq 2024-10-28..2026-07-31 16:00, air4thai from 2026-07-31 17:00.
 
-| | openaq (regime A) | air4thai (regime B) |
+| | openaq | air4thai |
 |---|---|---|
-| Span | 2024-10-28 .. 2026-07-02 | 2026-07-29 .. 2026-10-28 |
-| Mean PM2.5 (5 stations) | 19-31 (24 at 02t) | 12-17 (13 at 02t) |
-| Mean absolute 1 h change | 0.27-0.41 | 1.3 (02t, 59t, 61t), 3.2-4.3 (bkp stations) |
+| Mean PM2.5 across stations (all period) | 19-31 | 12-17 |
+| Mean abs 1 h change | 0.27-0.41 | 1.3 (02t, 59t, 61t), 3.2-4.3 (bkp stations) |
 | Identical consecutive values | 10-15% | 0-1.4% |
-| Hour-of-day profile (5-station mean, local) | flat 24.1-25.0 | real cycle (12-16 by UTC hour) |
 | Share of hours > 37.5 | 6-26% by station | 0.05-2.3% |
 
-  Regime A behaves like a moving-average product, not raw hourly readings (hypothesis; not verified, the export does not say). Consequence: KAN-15 trains on regime A (52,563 rows) and tests on regime B (all but ~100 pairs). It is a cross-source transfer test.
-- Test set (KAN-15 rule, lag 1 h): 10,729 pairs at +24 h, 91 target days; persistence MAE 4.4976 reproduces KAN-64 exactly.
+### H-MA: is the openaq series a trailing 24 h average? (Amendment 5b, rule declared before the run)
+
+| Series (pooled stations) | mean | mean abs 1 h change | identical consecutive (0.1) | ACF lag 1 | ACF lag 24 | diurnal flatness |
+|---|---:|---:|---:|---:|---:|---:|
+| air4thai raw hourly (Aug-Oct 2026) | 13.61 | 2.292 | 0.005 | 0.872 | 0.464 | 0.287 |
+| air4thai trailing 24 h mean (computed) | 13.61 | 0.187 | 0.208 | 0.998 | 0.684 | 0.005 |
+| openaq, Aug-Oct 2025 (season control) | 13.85 | 0.267 | 0.169 | 0.956 | 0.350 | 0.049 |
+| openaq, all | 24.68 | 0.358 | 0.128 | 0.997 | 0.860 | 0.067 |
+
+- **Level:** season-matched, the openaq level (13.85) equals the air4thai level (13.61). The "24 vs 13" gap is seasonal (the air4thai era is Aug-Oct only), **not** a source effect.
+- **Smoothness:** the openaq series is 8.6 times smoother than raw hourly values in mean |1 h change| (0.267 vs 2.292) and close to a computed trailing 24 h mean (0.187; ratio 0.70). But its lag-1 ACF (0.956) is below that of an exact trailing mean (0.998), its diurnal flatness is 10 times larger (0.049 vs 0.005) and the lag-24 ACF is 0.35 vs 0.68. By the declared rule (supported needs flatness within 1.5x and both ACF1 > 0.99; rejected needs |1 h change| ratio outside 0.5-2 or a raw-like diurnal amplitude) the verdict is **undecided**: heavily smoothed, plausibly a moving average of some other window or definition, not exactly a trailing 24 h mean of the hourly values.
+- Supporting indirect evidence: in the openaq-era folds any shrinkage toward the 24 h mean makes things worse (beta = 0.5: +0.222 [+0.094, +0.356]), as expected if the series is already a smoothed quantity; in the air4thai era the same operation gains 8%.
+- The source-switch hour equals the earliest hour the Air4Thai history endpoint served (docs/kan-9-history-findings.md), which fits an assembly artifact (source precedence) but does not by itself show the openaq values are averages.
+- **Meaning for the target:** regime A is a smoother quantity than the live hourly value (8.6x less 1 h variability). Models trained on it predict a different target from the live feed; the training target for production should be the regime-B definition (a backfill of raw hourly Air4Thai history would make the full two years usable).
 
 ## 2. EDA findings
+
 
 Design decisions used only data with target before the holdout (A-heavy); holdout shown for description.
 
@@ -68,93 +98,92 @@ Regime B is far less predictable from its own past; that is where a better level
 - **Cross-station:** concurrent correlation 0.91-0.97; lead-lag correlation is symmetric around lag 0 (0.939 at 0, 0.936 at +/-3 h). No neighbour leads another; a neighbour's latest reading is a noise-reducing duplicate, not an early warning. Simple probe (train, +24 h MAE): latest 4.85, mean24 5.68, 0.5 latest + 0.5 mean24 5.14, neighbour mean 6.41, t-48 6.76, t-168 8.36.
 - Weekday means 23.6-25.7 (Mon..Sun), no strong weekly effect.
 
-## 3. Method (pre-registered; see plan and Amendments 1-4)
 
-- Walk-forward, chronological, expanding window, always training on targets strictly before the boundary (gap = one horizon). Runs: F1-F3 (regime A to A), F4 (A to B), R1-R3 (regime-B-native expanding folds, training variant chosen on validation: B-only or A+B with source flag), HOLDOUT (KAN-15 split, reported separately). F4/R1-R3 test windows lie inside the holdout span, so folds and holdout are not independent.
-- Features (all as-of origin-1 h, `src/pm25_forecast/experiments/dataset.py`): latest; cyclic target hour/day-of-week/month, station id; readings at target-24 h (NaN at +24 by rule), -48, -72, -168 h; rolling mean/max/std over 3/6/24 h; trend (latest minus reading 3/6 h before); neighbours' mean latest and mean 24 h average. Weather, wind, boundary layer: **needs data**, not used.
-- Targets: direct, residual over persistence, log-ratio. Models: LightGBM (objective l2/l1 x leaves 7/31, early stopping on a validation slice inside the training period: last 45 days, last 10 days for regime-B folds), ridge (closed form, alpha 0.1-100), one-parameter smoothers, ensemble (ridge + LGBM-residual), shrink toward persistence, and the global multi-horizon LightGBM (horizon as feature; with and without station id).
-- Primary candidate `val_best`: family with the lowest validation MAE among LightGBM direct / LightGBM residual / ridge, per run and horizon.
-- Statistics: paired MAE difference vs persistence on identical station-hours, day-block bootstrap on target UTC date (seed 20261030; 10k draws per run, 50k for pooled groups). 99 claims (11 candidates x 3 horizons x 3 groups: holdout, pooled regime B, pooled regime A): Bonferroni CIs and Holm p-values. 231 further per-run comparisons are descriptive.
-- Variants tried (from script counters): **3,344 tuned configurations**: 1,760 early-stopped LightGBM fits (1,584 per-horizon + 176 global) and 1,584 ridge fits (8 runs x 3 horizons x 4 feature sets x 3 targets x 4 alphas, doubled training-data variants for the 3 regime-B folds, etc.), plus 13 smoother variants and 113 refits of selected models (89 LightGBM, 24 ridge; the counters in `results.json` are 1,760 / 1,608 / 89). Total comparisons vs persistence 330 (99 corrected claims). This is more than the 1,536 estimate in Amendment 2, which was superseded by Amendment 3; selection used validation MAE only.
+## 3. Method (v2; see plan Amendments 1-5b)
+
+- Chronological; training targets strictly before each boundary (gap = one horizon). Runs: F1-F3 (regime A to A, descriptive, used for the safeguard), G1-G3 (regime-B-native, non-overlapping, headline pool), HOLDOUT (KAN-15 split, second headline group; trained on regime A only, no regime-B validation exists).
+- Features (`experiments/dataset.py`, as-of origin-1 h): latest, cyclic target hour/day-of-week/month, station id, readings at target-24 (NaN at +24 by rule), -48, -72, -168 h, rolling mean/max/std over 3/6/24 h, trend 3/6 h. Weather and wind: **needs data**, not used. Set D (no neighbour features) in the fixed ML models.
+- Candidates (fixed, no search): persistence; smoother latest + beta*(mean24 - latest), beta in {0, 0.1, ..., 0.9} chosen on same-regime validation (last 10 days of regime-B training for G folds, last 45 days for F folds), fixed 0.5 for the HOLDOUT; LightGBM direct and log-ratio (l1, 7 leaves, lr 0.05, 150 rounds, seed 20261029; informed by v1 which favoured small trees and l1); ridge on the residual (alpha 10); current KAN-64 boosters. For G folds ML rows are regime A+B with a `src_air4thai` flag (flag = 1 as live); B-only rows are a descriptive sensitivity. Descriptive extras outside the claim family: smoother with beta fixed 0.5, the beta curve, global multi-horizon LightGBM with and without station id.
+- Statistics: paired MAE difference vs persistence on identical station-hours; bootstrap over target days with 1-day and 7-day blocks (seed 20261030, 40,000 draws). Family = 5 candidates x 3 horizons x 2 headline groups = 30 claims, Holm and Bonferroni (0.05/30) separately for the two block sizes. Per-run CIs (3-6 weeks) use 1-day blocks and are descriptive.
+- Fits: no hyper-parameter search; in total 74 LightGBM refits and 30 ridge fits (counters in `results.json`), plus 10 beta values per run and horizon. The v1 search (3,344 configurations) is superseded.
 
 ## 4. Results
 
-### 4a. KAN-15 holdout, +24 h (persistence MAE 4.498, n = 10,729, 91 days)
+### 4a. Headline, +24 h (paired MAE difference vs persistence, 95% CI)
 
-| Candidate | MAE | Paired diff vs persistence [95% CI] | Bonferroni CI (99 claims) |
-|---|---:|---|---|
-| **val-selected best (primary; LightGBM log-ratio, set E)** | 4.347 | -0.151 [-0.217, -0.089] | [-0.272, -0.044] |
-| current LightGBM (latest + t-24h), KAN-64 | 4.503 | +0.005 [-0.096, +0.103] | [-0.173, +0.175] |
-| seasonal naive (t-48 h, the servable form) | 5.033 | +0.518 [+0.144, +0.939] | [-0.106, +1.332] |
-| smoother (shrink toward 24 h mean, beta 0.3) | 4.212 | -0.285 [-0.368, -0.200] | [-0.435, -0.137] |
-| ridge | 4.551 | +0.053 [-0.064, +0.161] | [-0.160, +0.235] |
-| LightGBM direct (not the val-selected one) | 4.036 | -0.462 [-0.615, -0.318] | [-0.748, -0.215] |
-| LightGBM residual / log-ratio | 4.347 | -0.151 [-0.217, -0.089] | [-0.272, -0.044] |
-| ensemble ridge + LGBM-residual | 4.402 | -0.096 [-0.184, -0.018] | [-0.262, +0.031] |
-| shrink LGBM-residual toward persistence | 4.376 | -0.121 [-0.171, -0.075] | [-0.213, -0.041] |
-| global LightGBM (no id) | 4.551 | +0.053 [+0.018, +0.087] | [-0.013, +0.109] |
-| global LightGBM (+ station id) | 4.590 | +0.092 [+0.050, +0.133] | [+0.016, +0.162] |
+| Group (persistence MAE, n unique) | Candidate | MAE | 1-day blocks | 7-day blocks | Bonferroni(30), 7-day | Holm p (1d / 7d) | folds beating |
+|---|---|---:|---|---|---|---|---:|
+| HOLDOUT (4.498, 10,729; 91 days) | smoother (beta 0.5) | 4.114 | -0.383 [-0.526, -0.235] | [-0.465, -0.297] | [-0.507, -0.243] | 0.001 / 0.001 | n/a |
+| | LightGBM direct | 4.090 | -0.408 [-0.542, -0.280] | [-0.556, -0.271] | [-0.652, -0.208] | 0.001 / 0.001 | n/a |
+| | LightGBM log-ratio | 4.331 | -0.167 [-0.276, -0.065] | [-0.296, -0.053] | [-0.380, -0.000] | 0.007 / 0.012 | n/a |
+| | ridge | 5.209 | +0.711 [+0.552, +0.867] | [+0.544, +0.865] | [+0.443, +0.946] | 0.001 / 0.001 | n/a |
+| | current (KAN-64) | 4.503 | +0.005 [-0.096, +0.104] | [-0.060, +0.079] | [-0.089, +0.127] | 1.000 / 1.000 | n/a |
+| Regime-B pool G1-G3 (4.993, 7,954; 67 days) | smoother (val beta) | 4.602 | -0.391 [-0.633, -0.139] | [-0.557, -0.195] | [-0.629, -0.057] | 0.015 / 0.005 | 3/3 |
+| | LightGBM direct | 4.391 | -0.603 [-0.815, -0.400] | [-0.778, -0.421] | [-0.868, -0.317] | 0.001 / 0.001 | 3/3 |
+| | LightGBM log-ratio | 4.487 | -0.507 [-0.680, -0.341] | [-0.659, -0.348] | [-0.741, -0.251] | 0.001 / 0.001 | 3/3 |
+| | ridge | 5.038 | +0.044 [-0.145, +0.221] | [-0.227, +0.304] | [-0.389, +0.434] | 1.000 / 1.000 | 1/3 |
+| | current (KAN-64) | 4.922 | -0.072 [-0.177, +0.033] | [-0.154, +0.005] | [-0.205, +0.049] | 0.532 / 0.208 | 3/3 |
 
-Same candidates at +6 h and +12 h on the holdout: nothing beats persistence (primary +0.156 [+0.094, +0.214] at +6 h; +0.056 [-0.067, +0.159] at +12 h). Full tables for every horizon and group: `out/kan65/tables.md`.
+Block size matters less than expected: 7-day-block CIs are not systematically wider than 1-day ones (13 blocks in the holdout, 10 in the regime-B pool; the percentile bootstrap is itself approximate with so few blocks). **Fragile point:** the smoother's Bonferroni(30) CI in the regime-B pool at +24 h is [-0.629, -0.057] with 7-day blocks (the decision block, pass) but [-0.760, +0.016] with 1-day blocks, which crosses zero (Holm p 0.015 / 0.005 is below 0.05 in both). So condition (b) is borderline for the smoother and robust for LightGBM direct (Bonferroni upper -0.286 / -0.317 for 1-day / 7-day). HOLDOUT and the pool are two views of the same ~90 days (the holdout trains on regime A only; the G folds train on A+B), so agreement between them is reassurance about transfer, not independent replication.
 
-### 4b. Walk-forward, +24 h
+Other horizons (7-day-block Bonferroni(30) upper bound in brackets):
 
-Persistence MAE and paired difference of the primary candidate per run (95% day-block CI):
+| Horizon | Group | smoother | LightGBM direct | LightGBM log-ratio |
+|---|---|---|---|---|
+| +12 h | HOLDOUT | -0.535 [-0.334] | +0.051 [+0.136] (not better) | +0.233 [+0.344] (worse) |
+| +12 h | Regime-B pool | -0.588 [-0.257] | -0.539 [-0.378] | -0.603 [-0.425] |
+| +6 h | HOLDOUT | -0.435 [-0.219] | +0.233 [+0.351] (worse) | +0.304 [+0.416] (worse) |
+| +6 h | Regime-B pool | -0.455 [-0.146] | -0.313 [-0.213] | -0.421 [-0.324] |
 
-| Run | Test span | Persistence MAE | Primary diff [95% CI] |
-|---|---|---:|---|
-| F1 (A, haze) | Jan-Feb 2026 | 6.97 | -0.649 [-1.538, +0.258] |
-| F2 (A) | Apr-May 2026 | 3.37 | -0.236 [-0.627, +0.176] |
-| F3 (A) | Jun 2026 | 1.72 | -0.013 [-0.196, +0.164] |
-| F4 (A to B) | Aug-Sep 11 2026 | 3.28 | -0.162 [-0.264, -0.066] |
-| R1 (B native) | Sep 1-21 | 3.94 | -0.434 [-1.045, +0.161] |
-| R2 (B native) | Sep 22-Oct 12 | 6.26 | -0.534 [-1.236, +0.200] |
-| R3 (B native) | Oct 13-27 | 6.20 | -1.103 [-2.226, -0.162] |
-| HOLDOUT | Jul 10-Oct 27 | 4.50 | -0.151 [-0.216, -0.090] |
+ML models trained on regime A only do not beat persistence at +6/+12 on the holdout (they are worse); the smoother does at every horizon, and ML trained with regime-B rows (G folds) does too. Per run (+24 h, 1-day blocks, descriptive): smoother G1 -0.528 [-0.803, -0.303], G2 -0.369 [-0.764, +0.045], G3 -0.292 [-0.804, +0.250]; LightGBM direct G1 -0.429, G2 -0.498, G3 -0.844 (all CIs below zero). Persistence MAE by fold: G1 3.46, G2 4.45, G3 6.79 (October is the worst month).
 
-Pooled (primary / LightGBM direct / one-parameter smoother, difference vs persistence with 95% CI and Bonferroni CI):
+### 4b. The one-parameter smoother (prominent evaluation)
 
-| Group, +24 h | Primary | LightGBM direct | Smoother |
+- Form: forecast = latest + beta*(mean of the last 24 h - latest). It uses only the 24 h trailing mean (as-of origin-1 h), no fitted model, and beta = 0 is persistence.
+- Beta procedure: grid {0, 0.1, ..., 0.9}, minimum validation MAE on same-regime data (ties to the smaller beta). Chosen beta (+24 h): G1 0.7, G2 0.8, G3 0.6; test-optimal (descriptive) 0.8, 0.6, 0.5. At +6/+12 chosen 0.5-0.9 vs oracle 0.4-0.9. HOLDOUT: fixed 0.5 (oracle 0.7). Regime-A folds choose 0 in all 9 fold-horizon cases (the series is already smooth).
+- Beta curve, +24 h, difference vs persistence (7-day CI): flat optimum. Holdout: beta 0.3 -0.285, 0.5 -0.383, 0.6 -0.403, 0.7 -0.404 [-0.513, -0.282], 0.9 -0.349. Regime-B pool: 0.3 -0.287, 0.5 -0.377 [-0.505, -0.227], 0.6 -0.392, 0.7 -0.386, 0.9 -0.316 [-0.542, -0.041]. Any beta in 0.3-0.9 beats persistence in both groups; beta 0.5-0.7 is within 0.03 of the best. The loss from using a mis-set beta is small, which is why a fixed beta is low-risk.
+- Stability: 3/3 regime-B folds, 1/1 holdout, all horizons. Beta fixed at 0.5 versus the validated beta: pool -0.377 vs -0.391.
+- Where it does not help: regime A (any beta > 0 is worse: beta 0.5 +0.222 [+0.094, +0.356]); it is a statement about the live air4thai-type series, so beta must be estimated from air4thai-era data only.
+- Safeguard and onsets: see 4c.
+
+### 4c. High pollution (forecast-time) and spike onsets
+
+Subset: hours whose latest reading (= persistence forecast) exceeds 37.5, +24 h (paired MAE diff vs persistence, 7-day 95% CI; PASS/FAIL/untestable as pre-declared):
+
+| Candidate | HOLDOUT | Regime-B pool | Regime-A pool |
 |---|---|---|---|
-| Regime B folds (n = 11,794) | -0.436 [-0.713, -0.173], B [-0.953, +0.015], 4/4 folds | -0.566 [-0.828, -0.320], B [-1.060, -0.132], 4/4 | -0.398 [-0.560, -0.235], B [-0.689, -0.105], 4/4 |
-| Regime A folds (n = 12,776) | -0.341 [-0.733, +0.038], 3/3 | -0.225 [-0.637, +0.182], 2/3 | 0.000 (always chooses latest) |
+| smoother | untestable: -7.18 [-9.14, -5.17], n=75, 19 d | untestable: -8.62 [-12.42, -5.87], n=74, 18 d | PASS: 0.00 (beta = 0), n=1,633, 38 d |
+| LightGBM direct | untestable: -7.29 [-9.42, -4.92] | untestable: -8.25 [-10.46, -6.34] | PASS: -1.44 [-2.44, -0.41] |
+| LightGBM log-ratio | untestable: -6.88 [-8.52, -4.81] | untestable: -8.63 [-10.92, -6.91] | PASS: -1.20 [-2.04, -0.36] |
+| ridge | untestable: -0.19 [-2.08, +1.97] | untestable: -3.51 [-4.17, -2.72] | PASS: -1.24 [-2.69, -0.00] |
+| smoother, beta 0.5 in regime A | | | PASS: +0.20 [-0.53, +0.63] |
 
-Regime A (smoothed history) ridge and ensemble also gain (-0.52 / -0.51, 3/3 folds), mostly in the haze-season fold F1. Horizons +6 / +12 in regime B pooled: primary -0.230 [-0.347, -0.113] / -0.314 [-0.521, -0.118]; stability 3/4 at both.
+Where persistence forecasts a high level, the candidates are on point much better in regime B (as expected: a 24 h-later fall is common after a high reading), but with n = 74 hours in 18 days the day criterion (>= 10) is met but the hour criterion (>= 200) is not, so the pre-declared rule says **untestable**; the point estimates are shown, not used for pass or fail. The safeguard is therefore passed only where testable (regime A) and unverified for the live regime.
 
-### 4c. Global multi-horizon model (Boss question)
+Spike onsets: target >= latest + 15 µg/m³ (defined in advance); a forecast catches an onset if it is >= latest + 7.5. +24 h:
 
-Per-horizon difference, global minus current per-horizon boosters (paired, 95% CI):
+| Group | n onsets (days) | Candidate | caught share [7-day CI] | false alarms among non-onsets | mean error at onset | onset MAE (persistence 21.0) | onset MAE diff [7-day CI] |
+|---|---|---|---|---|---|---|---|
+| HOLDOUT | 204 (35) | smoother | 0.039 [0.000, 0.086] | 0.002 | -19.2 | 19.2 | -1.79 [-2.34, -0.96] |
+| | | LightGBM direct | 0.010 [0.000, 0.015] | 0.001 | -19.3 | 19.3 | -1.71 [-2.11, -1.17] |
+| | | LightGBM log-ratio | 0.000 | 0.000 | -20.6 | 20.6 | -0.40 [-0.81, +0.23] |
+| Regime-B pool | 199 (31) | smoother | 0.101 [0.039, 0.192] | 0.010 | -18.7 | 18.7 | -2.37 [-3.37, -1.20] |
+| | | LightGBM direct | 0.040 [0.012, 0.073] | 0.003 | -18.7 | 18.7 | -2.32 [-2.83, -1.63] |
+| | | LightGBM log-ratio | 0.000 | 0.000 | -20.2 | 20.2 | -0.86 [-1.23, -0.29] |
 
-| Group | +6 h | +12 h | +24 h |
-|---|---|---|---|
-| Holdout, global (no id) | -0.012 [-0.061, +0.034] | -0.232 [-0.304, -0.160] | +0.048 [-0.042, +0.139] |
-| Holdout, global (+ id) | +0.018 [-0.032, +0.068] | -0.206 [-0.278, -0.135] | +0.087 [-0.000, +0.175] |
-| Regime B pooled, global (no id) | -0.147 [-0.266, -0.025] | -0.385 [-0.539, -0.234] | -0.310 [-0.523, -0.105] |
-| Regime B pooled, global (+ id) | -0.161 [-0.278, -0.042] | -0.381 [-0.532, -0.234] | -0.338 [-0.563, -0.121] |
+The onset metric is testable (>= 30 onsets) and the result is clear: **no candidate anticipates spikes** (at best 10% caught; persistence 0%). The mean error at onset stays near -19 to -21 µg/m³; candidates shave 2 µg/m³ off the onset MAE by moving slightly upward, at almost no false alarms. Spikes need information the series does not contain (weather, fires); see data proposals.
 
-Against persistence the global models are worse on the holdout at every horizon (+6 h +0.17 / +0.20; +12 h +0.16 / +0.18; +24 h +0.05 / +0.09, no id / with id) and better in regime B pooled (+24: -0.334 / -0.362, 3/4 folds) but never better than the tuned per-horizon `val_best` (-0.436). Hypothesis check: structure sharing helps relative to the untuned current boosters (they are weak), the penalty against persistence appears on the holdout at all horizons (largest at +6 h) but not in regime A (+6 h: -0.20). Station id adds nothing consistent (holdout +0.04 worse, regime B -0.03 better).
+### 4d. Global multi-horizon model (Boss question, descriptive, fixed config)
+
+Difference vs persistence (7-day-block 95% CI), global LightGBM with horizon as a feature, trained on stacked +6/+12/+24 rows, l1, 7 leaves, 150 rounds: HOLDOUT +24 h -0.022 [-0.080, +0.035] (no station id) and -0.021 [-0.079, +0.033] (+ id); regime-B pool +24 h -0.492 [-0.619, -0.361] and -0.490 [-0.612, -0.357], versus -0.603 for the per-horizon LightGBM direct. Station id adds nothing. Hypothesis check: sharing across horizons and stations costs a little relative to per-horizon boosters in regime B, and does not beat persistence when trained only on regime A. v1 comparison with the untuned current boosters (global better in regime B at all horizons) is in the appendix.
 
 **Serving constraint (not changed):** `models/serving.py` accepts a multi-horizon bundle with one booster per horizon or a single-horizon bundle (`_parse_bundle`; exactly one of `horizons` or `horizon_hours`+`booster`). `ServingModel.predict(horizon, features)` indexes a booster by horizon and builds the input row from `feature_list` only; every booster's `feature_name()` must equal the manifest `feature_list`, and every name must exist in `features.FEATURE_NAMES` (currently `pm25_latest`, `pm25_same_hour_24h`, `cams_pm25`). A global model therefore **would need a loader change**: a bundle shape with one booster plus injection of a `horizon` value (and, if used, a station id) into the row. Independently, any of the new features (rolling windows, lags beyond 24 h, calendar, neighbours) requires extending `features/build_features` (shared with training) and the live as-of query for 7 days of history and all five stations; and a residual or log-ratio target needs the loader/predict path to add back persistence (it returns the booster output directly). A direct-target per-horizon LightGBM with the new features needs only the feature-builder extension, no loader change.
 
-### 4d. Bias, bands, high pollution (+24 h, primary vs persistence)
 
-| Group | Band | n | Persistence MAE / bias | Primary MAE / bias |
-|---|---|---:|---|---|
-| Holdout | <= 15 | 7,285 | 3.48 / +1.49 | 3.40 / +1.70 |
-| Holdout | 15-37.5 | 3,369 | 6.28 / -2.82 | 6.00 / -2.83 |
-| Holdout | > 37.5 | 75 | 22.9 / -22.8 | 22.5 / -22.5 |
-| Regime B pooled | <= 15 | 7,999 | 3.52 / +1.50 | 2.86 / +1.03 |
-| Regime B pooled | 15-37.5 | 3,719 | 6.18 / -2.94 | 6.11 / -5.29 |
-| Regime B pooled | > 37.5 | 76 | 23.1 / -23.0 | 28.2 / -28.2 |
-| Regime A pooled | > 37.5 | 1,621 | 8.8 / -4.0 | 7.5 / -3.2 |
+### 4e. Leakage audit
 
-Overall pooled bias of the primary is -1.15 in regime B (under-prediction when the series rises) and +0.11 on the holdout. Where PM2.5 is low, it gains (-0.66 in the <= 15 band, regime B); where PM2.5 is rising from moderate to high it does not. A quantile or asymmetric loss check beyond the l1 objective (the l1 fits are conditional-median) was not run (see Skipped).
+The audit and the leaky control were produced by the v1 harness (`run_all.py`, outputs in `out/kan65/`); v2 reuses the identical feature table (`dataset.py`), so they apply unchanged.
 
-### 4e. Breakdowns, +24 h (MAE persistence / primary), holdout
-
-By station: 02t 3.65/3.49, 59t 3.44/3.29, 61t 3.60/3.44, bkp100t 5.95/5.80, bkp101t 5.85/5.71 (the two stations with the noisiest regime-B series gain most with LightGBM direct: 5.26 and 5.15). By local hour group 00-05 / 06-11 / 12-17 / 18-23: 4.64/4.52, 4.68/4.50, 4.14/3.99, 4.53/4.38 (no hour-specific story). By source of the target: air4thai targets (n = 10,629) 4.51/4.36; openaq targets (n = 100) 2.92/3.04. By month in regime B: Aug 3.00/2.90, Sep 3.97/3.60, Oct 6.85/5.94 (gains grow as the level and volatility rise in October). All in `out/kan65/tables.md`.
-
-### 4f. Leakage audit
 
 | Feature | As-of rule (reference time r = origin - 1 h) |
 |---|---|
@@ -171,56 +200,55 @@ By station: 02t 3.65/3.49, 59t 3.44/3.29, 61t 3.60/3.44, bkp100t 5.95/5.80, bkp1
 - Deliberately leaky control (set D plus the neighbours' reading at the target hour, never a candidate): MAE 3.008 vs persistence 4.498, paired difference -1.490 [-1.854, -1.154]. The harness would expose leakage.
 - Training rows have targets strictly before each boundary; validation slices are inside training; the test span is never used for tuning or early stopping.
 
+
 ## 5. Hypotheses
 
-- H1 (hour-of-day lowers MAE): not supported as a standalone effect; no hour-specific pattern of gain. The selected models mostly use level features (rolling, lags, neighbours); in regime B the mean-reversion structure matters more than the diurnal cycle.
-- H2 (residual target better than direct): mixed. Validation preferred residual / log-ratio in 5 of 8 runs at +24 h, but on the test spans direct LightGBM often scored lower MAE (holdout -0.462 vs -0.151). I would not claim either.
-- H3 (neighbours help): weak and not isolated. The val-selected primary used set E (with neighbours) in 4 of 8 runs; no ablation was run, and lead-lag EDA says the neighbour acts as a noise reducer.
-- H4 (smoothing is a better level estimate): supported in regime B. A single parameter (shrink latest toward the 24 h mean) gives -0.285 on the holdout and -0.398 in regime B folds (4/4) without machine learning, and it chooses plain latest in regime A.
+- H1 (hour-of-day lowers MAE): not supported as a standalone effect. v2 uses calendar features inside fixed models; the gain is already available from a calendar-free smoother.
+- H2 (residual target better than direct): no. At +24 h direct beats log-ratio in both headline groups (-0.408 vs -0.167 holdout, -0.603 vs -0.507 pool); at +12 h log-ratio is better in the pool.
+- H3 (neighbours help): not isolated in v2 (set D has no neighbour features and still beats persistence); EDA says neighbours are a noise-reducing duplicate.
+- H4 (smoothing is a better level estimate): supported in the live regime; this is the main finding of the study (-0.38 µg/m³ at +24 h with one parameter).
+- H-MA: undecided (section 1).
 
-## 6. Limitations and caveats
+## 6. Limitations
 
-- Regime B has about 90 days: no haze season, only ~76 high hours, ~3 months of training for the B-native folds, validation slices of 10 days. Day-block bootstrap does not model multi-day dependence; the 7-day-block sensitivity promised in the plan was **not run**.
-- Folds F4, R1-R3 lie within the holdout span; holdout and regime-B pool are one evidence source seen twice.
-- A first full run was completed and inspected before Amendment 4 added the `val_best` candidate (seed-deterministic; the rerun reproduces the same model numbers). Disclosed in the plan.
-- Whether regime A is a moving-average product is a hypothesis from its statistics; the provenance of the `openaq` series should be confirmed with the owner.
-- The persistence reference uses the KAN-15 rule (latest within 3 h). Seasonal naive is evaluated on its own non-missing subset. The pair set is "target and persistence present", not the strict all-model intersection of `backtest.py`.
-- Calendar features use Bangkok time (UTC+7).
+- The regime-B evidence is ~67 test days from one season (Aug-Oct 2026); no haze season, 74 hours above 37.5; the safeguard is untestable there.
+- HOLDOUT and the regime-B pool are not independent; the folds G1-G3 are consecutive windows of the same period.
+- Fixed ML configurations were chosen with knowledge of v1 results (small trees, l1, set D); beta fixed 0.5 for the holdout was also informed by v1. The smoother being the a-priori headline candidate is informed by v1 as well. None of this used a test span for tuning in v2, but the garden of forking paths includes v1.
+- Seasonal naive and the v1 val-selected family are dropped from v2; they are in the appendix numbers.
+- 7-day blocks give 9-13 blocks per group; CIs are approximate for that reason.
+- Calendar features use Bangkok time (UTC+7). Weather, wind and boundary-layer data were not used (needs data).
 
 ## 7. What surprised me
 
-1. The openaq/air4thai break: the headline history is a different measurement product, so most of the "2 years of data" does not describe the live feed.
-2. On the smoothed regime-A series the one-parameter smoother always keeps plain `latest`, yet on the real hourly feed (regime B) a single shrink-toward-the-24-h-mean parameter beats persistence by 6-9% at +24 h.
-3. Models trained only on the smoothed history still transfer a gain to the real hourly feed (holdout -0.15 to -0.46), i.e. the structure (mean reversion, rolling level) is shared.
-4. The gain concentrates where persistence is worst by level (low levels, noisy bkp stations) and is absent at episode onsets.
+1. A single parameter and no model gives most of the gain; the regime-A history, 80% of the data, teaches nothing about it (the optimal beta there is 0).
+2. The "24 vs 13 µg/m³" regime difference is seasonal; the real difference is smoothness (8.6x), and the openaq series is not exactly a trailing 24 h mean either.
+3. ML models trained only on the smooth history transfer at +24 h (direct, -0.41) but not at +6/+12 (worse than persistence), while the smoother transfers at all horizons.
+4. Spikes are essentially unforecastable from the series itself (<= 10% caught).
 
 ## 8. What I would do with two more weeks
 
-1. Backfill raw hourly Air4Thai history (regime B definition) for the five stations to remove the break; rerun this harness unchanged.
-2. Collect weather features (data proposal below) and test them; wind and boundary-layer height are the strongest candidate drivers of onsets, which is where the model fails.
-3. Add a 7-day-block bootstrap, a pinball-loss / quantile (q 0.5, 0.9) check, a station-neighbour ablation, per-station residual models, and conformal intervals for alerting.
-4. Run the 1-parameter smoother and the direct LightGBM as shadow challengers in `predict` (needs the feature builder extension) and score live.
-5. Define the onset metric formally (recall of hours > 37.5 24 h ahead) since MAE and rule (d) disagree about what matters.
+1. Backfill raw hourly Air4Thai history (or confirm the openaq definition) to put all of the two years in one definition; rerun this harness unchanged.
+2. Weather features (wind, boundary-layer height, rain; hourly archive keyed on station coordinates), fire hotspots (FIRMS) for the dry season, CAMS previous-run archive; they are the only plausible route to onset skill. Each needs ingestion with `available_at`.
+3. Shadow-run the challengers below and score them live for 4-8 weeks, including a dry-season check as soon as it arrives.
+4. Pinball-loss quantile models (q 0.5/0.9) for alerting, per-station beta, neighbour ablation, conformal intervals.
 
-**Data proposals (not fetched):** (i) hourly weather: wind speed/direction, boundary-layer height, rain, temperature (Open-Meteo or ERA5, hourly archive, keyed on station lat/lon; expected value: highest for onsets and washout); (ii) fire hotspots (NASA FIRMS) for the dry season; (iii) CAMS previous-run archive (the vintages table has 1,032 rows only); (iv) traffic proxies are low-value/high-cost. Each needs ingestion into the observation store with `available_at` stamps to respect the as-of rule.
+## 9. Recommendation and confidence
 
-## 9. Skipped, and why
-
-Per-station and per-hour-bucket models, ExtraTrees/CatBoost/XGBoost (not installed except LightGBM; stations have ~2k regime-B pairs each), seasonal decomposition, pinball-loss quantile models, 7-day-block bootstrap, neighbour ablation. All were lower expected information than the regime-break and walk-forward questions.
-
-## 10. Recommendation and confidence
-
-- **More data needed; do not promote.** No model registration, no loader or feature-builder change in this PR.
-- Next step with the best expected value: fix the data break (backfill) and rerun; then add a shadow challenger with the smoothing and rolling-level features.
-- Confidence: high that the KAN-64 tie is explained by near-univariate inputs plus the regime mismatch; moderate-high that a real gain of roughly 0.15-0.45 ug/m3 (3-10%) exists in regime B at +24 h; low on production readiness because of the onset-hour deterioration and 90 days of regime-B data.
+- **Shadow-run now, do not promote.** (1) Smoother (beta about 0.5-0.7, to be re-estimated on live air4thai-era data; the whole curve is flat within 0.03 over that range) at +6, +12 and +24 h, as a new baseline-style predictor next to persistence; it needs a `mean24` input from the feature builder (shared module), no loader or model change. (2) LightGBM direct at +24 h with set D features, trained on regime A+B rows with the source flag (flag = 1 live), as the second challenger; it needs the feature-builder extension (calendar, 48/72/168 h lags, rolling windows) and no loader change; the global model and the log-ratio target would need loader changes. Nothing is implemented in this PR.
+- Promotion criterion for a later ticket: re-evaluate once >= 200 regime-B hours above 37.5 over >= 10 days exist (safeguard testable) and the live shadow scores confirm the sign.
+- Confidence: high that persistence is beatable on the live-type feed by roughly 0.3-0.6 µg/m³ MAE at +24 h (8-12%) during Aug-Oct; moderate that this holds in the dry season; low for onset detection.
 
 ## Reproduce
 
 ```sh
-PYTHONPATH=src python -m pm25_forecast.experiments.run_all \
-  --database data/history.duckdb --out out/kan65      # about 13 minutes, 8 cores
-PYTHONPATH=src python -m pm25_forecast.experiments.make_tables \
-  out/kan65/results.json out/kan65/tables.md
+PYTHONPATH=src python -m pm25_forecast.experiments.run_review \
+  --database data/history.duckdb --out out/kan65_v2          # about 35 seconds
+PYTHONPATH=src python -m pm25_forecast.experiments.make_tables_v2 \
+  out/kan65_v2/results.json out/kan65_v2/tables.md
 ```
 
-Seeds: model 20261029, bootstrap 20261030. Library versions, snapshot SHA-256 and runtime are in `out/kan65/results.json` and `tables.md`. Code: `src/pm25_forecast/experiments/` (common, dataset, fitters, eda, run_all, make_tables), tests `tests/test_kan65_experiments.py`. Nothing under `src/pm25_forecast/` outside `experiments/`, no dashboard file and no production module was touched.
+Seeds: model 20261029, bootstrap 20261030; versions, snapshot SHA-256 and runtime are in `out/kan65_v2/results.json`. Code: `src/pm25_forecast/experiments/` (`run_review.py`, `make_tables_v2.py`, shared `dataset.py`, `fitters.py`, `common.py`), tests `tests/test_kan65_experiments.py`. Full tables: `out/kan65_v2/tables.md`. v1 (superseded) harness `run_all.py`, `out/kan65/`. No production module, dashboard file, model registry or workflow was touched.
+
+## Appendix: v1 headline numbers (superseded, kept for transparency)
+
+v1 (overlapping folds, selection on cross-regime validation, 3,344 configurations, 99 claims, 1-day blocks): val-selected best at +24 h: HOLDOUT -0.151 [-0.217, -0.089] (Bonferroni [-0.272, -0.044]); regime-B pool (F4, R1-R3, overlapping) -0.436 [-0.713, -0.173] (Bonferroni [-0.953, +0.015]); v1 rule failed on (b) and on a target-conditioned (d) (+5.15 in 76 hours). v1 global vs the untuned current boosters: regime-B pooled -0.147 (+6), -0.385 (+12), -0.310 (+24). The v1 target-conditioned high-pollution result is withdrawn as a rule because it conditions on the outcome; v1 numbers are reproducible with `run_all.py`.
