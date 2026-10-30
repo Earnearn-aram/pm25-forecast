@@ -274,7 +274,7 @@ def test_changed_cams_content_is_stored_as_new_vintage(tmp_path, fake_db):
 
 def test_raw_responses_are_archived_gzip(tmp_path, fake_db):
     do_run(tmp_path, fake_db)
-    assert not (tmp_path / "raw" / "air4thai").exists()  # history bodies are not archived
+    assert list((tmp_path / "raw" / "air4thai").glob("air4thai-history-*.json.gz"))
     meteo = list((tmp_path / "raw" / "open_meteo").glob("*.json.gz"))
     assert len(meteo) == 1  # cams only: weather is off by default
     assert json.loads(gzip.decompress(meteo[0].read_bytes()))["source"] in {
@@ -405,6 +405,54 @@ def test_air4thai_failure_is_reported_but_cams_still_stored(tmp_path, fake_db, c
     leaked = " ".join(ours + result.failures + alerts)
     assert "air4thai.com" not in leaked and "stationID" not in leaked
     assert DB_PASSWORD not in leaked
+
+
+def test_dead_air4thai_host_trips_breaker_and_other_data_is_still_written(tmp_path, fake_db):
+    # TST01 answers; TST02 times out at transport level: the breaker stops TST03 and keeps TST01.
+    calls: list[str] = []
+    base = make_http()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "air4thai.com":
+            sid = request.url.params["stationID"]
+            calls.append(sid)
+            if sid != "TST01":
+                raise httpx.ConnectTimeout("slow", request=request)
+        return base._transport.handle_request(request)  # type: ignore[attr-defined]
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    result = do_run(
+        tmp_path,
+        fake_db,
+        http=http,
+        station_locations="TST01=13.75,100.5;TST02=14,101;TST03=15,101",
+    )
+    assert calls.count("TST03") == 0  # breaker: never asked
+    assert 1 <= calls.count("TST02") <= collector.AIR4THAI_MAX_ATTEMPTS
+    assert "air4thai unreachable; remaining stations skipped" in result.failures
+    assert [r[2] for r in fake_db.rows("observations")] == [11.0, 12.0, 13.0]  # TST01 stored
+    assert result.predictions_written > 0  # CAMS still collected
+
+
+def test_deadline_inside_the_air4thai_loop_stops_it_and_keeps_fetched_rows(tmp_path, fake_db):
+    ticks = iter([0.0, 0.0, 10_000.0])  # deadline set, station 1 ok, station 2 too late
+    result = run(
+        settings(tmp_path, station_locations="TST01=13.75,100.5;TST02=14,101"),
+        connect=fake_db,
+        clock=lambda: NOW,
+        monotonic=lambda: next(ticks, 10_000.0),
+        http=make_http(),
+    )
+    assert "air4thai fetch deadline exceeded; remaining stations skipped" in result.failures
+    assert {r[0] for r in fake_db.rows("observations")} == {"TST01"}  # written before stopping
+
+
+def test_history_bodies_are_archived_raw(tmp_path, fake_db):
+    do_run(tmp_path, fake_db)
+    files = sorted((tmp_path / "raw" / "air4thai").glob("air4thai-history-TST01-*.json.gz"))
+    assert len(files) == 1
+    body = json.loads(gzip.decompress(files[0].read_bytes()))
+    assert body["stations"][0]["stationID"] == "TST01"
 
 
 def test_open_meteo_failure_is_reported_but_observations_still_stored(tmp_path, fake_db):

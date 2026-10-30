@@ -17,6 +17,7 @@ from __future__ import annotations
 import gzip
 import logging
 import math
+import re
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -304,6 +305,9 @@ class HistoryResult:
     empty_chunks: list[tuple[date, date]] = field(default_factory=list)
     failed_chunks: list[tuple[date, date]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # True if a chunk failed with a retryable transport error (timeout, connection, 429/5xx)
+    # after the client's own retries: the host is unhealthy, callers should stop asking it.
+    transport_failure: bool = False
 
     @property
     def total_failure(self) -> bool:
@@ -316,6 +320,8 @@ class HistoryResult:
 RawArchive = Callable[[bytes, datetime], None]
 # Storage hook: the collector (KAN-18) supplies an upsert on (station_id, ts); see KAN-17.
 ObservationSink = Callable[[Sequence[Observation]], None]
+# History archive hook (KAN-74): raw body, UTC fetch time and the station id it was asked for.
+HistoryArchive = Callable[[bytes, datetime, str], None]
 
 
 def gzip_file_archive(directory: Path) -> RawArchive:
@@ -325,6 +331,20 @@ def gzip_file_archive(directory: Path) -> RawArchive:
         directory.mkdir(parents=True, exist_ok=True)
         stamp = fetched_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
         path = directory / f"air4thai-{stamp}.json.gz"
+        path.write_bytes(gzip.compress(body))
+
+    return archive
+
+
+def gzip_history_archive(directory: Path) -> HistoryArchive:
+    """Archive hook writing each raw history body as
+    ``<dir>/air4thai-history-<station>-<UTC stamp>.json.gz`` (public data, no request URL)."""
+
+    def archive(body: bytes, fetched_at: datetime, station_id: str) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = fetched_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", station_id)[:40]
+        path = directory / f"air4thai-history-{safe}-{stamp}.json.gz"
         path.write_bytes(gzip.compress(body))
 
     return archive
@@ -371,6 +391,7 @@ class Air4ThaiClient:
         max_attempts: int = MAX_ATTEMPTS,
         wait_max: float = 30.0,
         history_url: str = AIR4THAI_HISTORY_URL,
+        history_archive: HistoryArchive | None = None,
     ) -> None:
         if client is not None and ca_bundle:
             raise ValueError("ca_bundle applies only to a client created by Air4ThaiClient")
@@ -381,6 +402,7 @@ class Air4ThaiClient:
         self._url = url
         self._history_url = history_url
         self._archive = archive
+        self._history_archive = history_archive
         self._fetch = retry(
             retry=retry_if_exception(_is_retryable),
             stop=stop_after_attempt(max_attempts),
@@ -444,7 +466,8 @@ class Air4ThaiClient:
         requests. Each chunk gets the client's retries; a chunk that still fails is recorded in
         ``failed_chunks`` and the remaining chunks are still fetched. Returned observations are
         deduplicated on ``ts``, limited to ``start..end`` and sorted; ``pm25`` may be ``None``.
-        Raw history bodies are not archived (the archive hook is for the latest-reading feed).
+        Raw bodies go to ``history_archive`` when one is set (the ``archive`` hook is for the
+        latest-reading feed).
         """
         if start.tzinfo is None or end.tzinfo is None:
             raise ValueError("start and end must be timezone-aware")
@@ -467,6 +490,11 @@ class Air4ThaiClient:
             }
             try:
                 body = self._fetch(self._history_url, params)
+                if self._history_archive is not None:
+                    try:
+                        self._history_archive(body, datetime.now(UTC), station_id)
+                    except Exception:  # an archive problem must never lose the observations
+                        logger.exception("air4thai: history archive failed; continuing")
                 try:
                     payload = httpx.Response(200, content=body).json()
                 except ValueError as exc:
@@ -476,6 +504,8 @@ class Air4ThaiClient:
                 # Type and our own message only: httpx messages carry the full request URL.
                 detail = str(exc) if isinstance(exc, Air4ThaiError) else type(exc).__name__
                 result.failed_chunks.append((sdate, edate))
+                if _is_retryable(exc):
+                    result.transport_failure = True
                 result.errors.append(f"{sdate}..{edate}: {detail}")
                 logger.error(
                     "air4thai history %s %s..%s failed: %s", station_id, sdate, edate, detail

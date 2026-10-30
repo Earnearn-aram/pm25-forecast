@@ -22,7 +22,10 @@ Design points (the GitHub schedule is best effort: runs are late, skipped or dou
 * Weather is off by default (``COLLECT_WEATHER``): the KAN-17 schema has no weather table.
   When enabled it is fetched, validated and raw-archived only, and its failures are not counted.
 * Fetching has a per-host circuit breaker (the first transport failure for a host skips the
-  remaining stations for that host) and an overall deadline well under the job timeout.
+  remaining stations for that host, for Air4Thai and Open-Meteo alike) and an overall deadline
+  well under the job timeout, checked before every station. Air4Thai gets
+  ``AIR4THAI_MAX_ATTEMPTS`` tries per request, so a dead host costs well under a minute. Rows
+  already fetched are written before the run ends, whichever way the fetch phase stopped.
 * DB down: no fallback. The run is skipped, an alert is sent and the exit code is non-zero.
 * Content from the APIs is data. Nothing here builds requests or SQL from it.
 """
@@ -48,6 +51,7 @@ from pm25_forecast.ingest.air4thai import (
 from pm25_forecast.ingest.air4thai import (
     Air4ThaiClient,
     Observation,
+    gzip_history_archive,
 )
 from pm25_forecast.ingest.open_meteo import (
     AIR_QUALITY_URL,
@@ -76,6 +80,7 @@ STALE_AFTER = timedelta(hours=3)
 STALE_ALERT_WINDOW = timedelta(minutes=60)
 HISTORY_LOOKBACK_HOURS = 6  # hourly history re-read per station each run (late data, missed runs)
 AIR4THAI_PAUSE_S = 2.0  # pause between per-station history requests
+AIR4THAI_MAX_ATTEMPTS = 2  # per request (client default 4 would cost ~110 s per dead station)
 FETCH_DEADLINE_S = 240.0  # whole fetch phase; the workflow timeout is 10 minutes
 EXIT_FAILED, EXIT_CONFIG = 1, 2
 
@@ -94,7 +99,8 @@ class Gap:
     def __str__(self) -> str:
         return (
             f"station {self.station_id}: {self.missing_hours} h missing between "
-            f"{self.last_stored.isoformat()} and {self.next_seen.isoformat()} (not recoverable)"
+            f"{self.last_stored.isoformat()} and {self.next_seen.isoformat()} "
+            "(later runs re-read the last 6 h; the daily backfill covers older hours)"
         )
 
 
@@ -223,6 +229,10 @@ def fetch_air4thai(
             result.failures.append(
                 f"air4thai history failed for {station_id}: " + "; ".join(history.errors)
             )
+            if history.transport_failure:  # host unhealthy: stop, keep what we already have
+                result.failures.append("air4thai unreachable; remaining stations skipped")
+                logger.error("air4thai host tripped; skipping remaining stations")
+                break
             continue
         for obs in history.observations:
             fetched += 1
@@ -389,6 +399,8 @@ def run(
     air4thai = Air4ThaiClient(
         client=http,
         ca_bundle=settings.air4thai_ca_bundle,  # KAN-35: optional extra CA PEM; unset = default
+        max_attempts=AIR4THAI_MAX_ATTEMPTS,
+        history_archive=gzip_history_archive(archive_dir / "air4thai"),
     )
     try:
         observations = fetch_air4thai(
