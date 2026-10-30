@@ -1,0 +1,11 @@
+db sha256 fdd9b90ba6b96a1de512175f638808efe34fc8ae80c35b3e89bf440e71553a09
+grid 2026-07-31 17:00:00+00:00 .. 2026-10-25 23:00:00+00:00 (2071 h)
+[previous_day1] G1: train=3630 test=2520 beta=0.7
+[previous_day1] G2: train=6150 test=2520 beta=0.7
+[previous_day1] G3: train=8670 test=1440 beta=0.6
+[previous_day1_posthoc_no_month] G1: train=3630 test=2520 beta=0.7
+[previous_day1_posthoc_no_month] G2: train=6150 test=2520 beta=0.7
+[previous_day1_posthoc_no_month] G3: train=8670 test=1440 beta=0.6
+[previous_day2] G1: train=3630 test=2520 beta=0.7
+[previous_day2] G2: train=6150 test=2520 beta=0.7
+[previous_day2] G3: train=8670 test=1440 beta=0.6
