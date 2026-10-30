@@ -63,18 +63,19 @@ matters: an upsert sets `ingested_at` to now, which is how the old rows are told
    (draft: `docs/backfill-workflow.yml.txt`), or locally
    `AIR4THAI_CA_BUNDLE=certs/air4thai-ca.pem uv run python -m pm25_forecast.backfill --lookback-days 120`.
    Read the per-station log lines (rows upserted, empty or failed chunks).
-4. Remove what the backfill could not overwrite ("Delete" below).
+4. Remove what the backfill could not overwrite ("Delete" below; only if step 3 had 0 failed chunks).
 5. Re-score from 2026-10-27 (exact command below), then re-run drift and retrain only after 1-4.
 
 Identify (read-only; run before the repair). Rows written by the old collector have `ingested_at`
-within a few minutes of `ts`; the backfill writes them hours or days later:
+within a few minutes (at most about 3 h with a late cron and PCD lag) of `ts`; the backfill writes
+them hours or days later:
 
 ```sql
 -- observations written at collection time since 2026-10-27 (likely 24 h averages)
 SELECT station_id, count(*) AS rows, min(ts) AS first_ts, max(ts) AS last_ts
 FROM observations
 WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
-  AND ingested_at - ts < interval '2 hours'
+  AND ingested_at - ts < interval '3 hours'
 GROUP BY station_id ORDER BY station_id;
 
 -- scores computed in that period (re-score after the repair)
@@ -85,28 +86,34 @@ GROUP BY model_version ORDER BY model_version;
 ```
 
 Delete (owner runs after step 3; replace `<T>` with the time from step 2, in UTC, e.g.
-`2026-11-01T03:00:00+00:00`). Every row the backfill rewrote has `ingested_at` after `<T>`, so
-what is still older than `<T>` and was written within 2 h of its `ts` is an old collector row
-the backfill had no hourly value for. Run the SELECT first and check the count against the
-"Identify" output; then run the DELETEs in one transaction:
+`2026-11-01T03:00:00+00:00`). HARD GATE: run it only if every station's step-3 backfill log line
+shows 0 failed chunks; otherwise re-run step 3 first, because good hourly rows that a failed chunk
+did not overwrite would match the filter and be deleted. Every row the backfill rewrote has
+`ingested_at` after `<T>`, so what is still older than `<T>` and was written within 3 h of its
+`ts` is an old collector row the backfill had no hourly value for.
+
+1. Run the SELECT and compare its total with the "Identify" output.
+2. Run the transaction below. Compare the observations `DELETE n` count with the SELECT total.
+   `COMMIT` only if equal; otherwise `ROLLBACK` and investigate.
 
 ```sql
 SELECT station_id, count(*), min(ts), max(ts) FROM observations
 WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
-  AND ingested_at < '<T>' AND ingested_at - ts < interval '2 hours'
+  AND ingested_at < '<T>' AND ingested_at - ts < interval '3 hours'
 GROUP BY station_id;
 
 BEGIN;
 DELETE FROM observations
 WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
-  AND ingested_at < '<T>' AND ingested_at - ts < interval '2 hours';
+  AND ingested_at < '<T>' AND ingested_at - ts < interval '3 hours';
+-- compare "DELETE n" with the SELECT total above, then decide:
 -- scores whose actual no longer exists (the scorer never deletes a score on its own)
 DELETE FROM scores s
 WHERE s.valid_time >= '2026-10-27T00:00:00+07:00'
   AND NOT EXISTS (SELECT 1 FROM observations o
                   WHERE o.station_id = s.station_id AND o.ts = s.valid_time
                     AND o.pm25 IS NOT NULL);
-COMMIT;
+-- equal counts: COMMIT;   otherwise: ROLLBACK;
 ```
 
 Why delete and not impute or keep: a 24 h average is a different quantity (smoothed, lagged),
