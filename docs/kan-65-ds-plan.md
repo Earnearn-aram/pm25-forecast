@@ -371,3 +371,26 @@ stay in the repository (`run_all.py`, `out/kan65/`) for transparency; v2 is a se
    Verdict states: PROMOTE only if a-d pass AND the safeguard is testable in regime B; "SHADOW"
    if a-c pass but the regime-B safeguard is untestable; otherwise no gain / more data. This rule is
    shadow-or-promote advice only: nothing is implemented in this PR.
+
+## Amendment 5b: regime-break hypothesis H-MA (added before the v2 run; coordinator request)
+
+Facts noted: the source switch (2026-07-31 17:00 UTC) equals the earliest hour that the Air4Thai
+history endpoint served when probed (docs/kan-9-history-findings.md, rolling window), so the break
+may be an artifact of data assembly (source precedence), and OpenAQ's provider for these stations is
+Air4Thai itself, whose public app displays 24 h averages. **H-MA:** the openaq-era series is
+Air4Thai's trailing 24 h average, not hourly values. Test (EDA only, no model):
+- Series S_raw = air4thai-era hourly values; S_ma = trailing 24 h mean of S_raw per station
+  (window of the 24 hours ending at t, needs >= 18 present values); S_old = openaq-era values.
+- Statistics per series, pooled over stations: mean |1 h change|, share of identical consecutive
+  values after rounding to 0.1, lag-1 and lag-24 autocorrelation, diurnal flatness
+  (max minus min of the mean by local hour, divided by the mean).
+- Season control: compare S_old restricted to Aug-Oct 2025 against S_raw and S_ma (Aug-Oct 2026),
+  both on mean level and on the statistics above.
+- Decision declared now: H-MA **supported** if S_ma matches S_old(Aug-Oct 2025) within a factor of 1.5
+  on mean |1 h change| and diurnal flatness and both have lag-1 ACF > 0.99, while S_raw differs from
+  S_old by more than a factor of 2 on mean |1 h change|; **rejected** if S_ma differs from S_old by
+  more than a factor of 2 on mean |1 h change| or S_old shows a diurnal amplitude clearly like S_raw;
+  otherwise **undecided**. Also reported: whether the level difference (about 24 vs 13 ug/m3) shrinks
+  under the season control. Implication for the target (stated in the report): if H-MA holds, regime
+  A predicts a different quantity (a daily average) from the live hourly value, so models trained on it
+  are not trained on the live target.
