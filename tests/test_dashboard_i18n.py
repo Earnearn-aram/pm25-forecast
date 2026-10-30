@@ -110,3 +110,20 @@ def test_thai_dictionary_covers_future_forecast_labels(tmp_path):
         assert match and THAI.search(match[1]), english
         if "forecast" in english.lower():
             assert "พยากรณ์" in match[1], english
+
+
+def test_chart_v2_legend_caption_and_labels_have_thai(tmp_path):
+    js = (ASSETS / "dashboard.js").read_text()
+    for english in (
+        "Measured",
+        "Baseline forecast (tomorrow = today)",
+        "Model forecast",
+        "Accuracy of past forecasts: see Typical error and Skill by horizon above.",
+    ):
+        match = re.search(rf'"{re.escape(english)}": "([^"]+)"', js)
+        assert match and THAI.search(match[1]), english
+    assert "PM2\\.5 \u00b7 last 24 h and next 24 h" in js
+    build(Fake(), tmp_path)
+    page = (tmp_path / "index.html").read_text()
+    for english in ("Measured", "Baseline forecast (tomorrow = today)", "Model forecast"):
+        assert f"</i>{english}</span>" in page

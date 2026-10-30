@@ -198,7 +198,7 @@ def test_stylesheet_is_light_theme(tmp_path):
     build(Fake(), tmp_path)
     css = (tmp_path / "dashboard.css").read_text()
     assert "--bg: #f6f8fa;" in css
-    assert "kan73-chart-light" in (tmp_path / "index.html").read_text()
+    assert "kan73-chart-v2" in (tmp_path / "index.html").read_text()
     for dark in ("#0e1116", "#141b22", "#10201d"):
         assert dark not in css
 
@@ -214,7 +214,7 @@ def test_empty_db_renders_waiting(tmp_path):
     assert data["chart"]["stations"] == []
     page = (tmp_path / "index.html").read_text()
     assert "Not scored yet" in page
-    assert "Challenger (not scored yet)" in page
+    assert "Model forecast" in page
     assert "first +24 h forecasts are scored" in page
     assert 'class="val waiting"' in page
 
@@ -418,7 +418,7 @@ SECTION_MARKERS = (
     "Explore the map",
     'id="station-map"',
     'class="map-credit"',
-    "Forecast vs actual",
+    "PM2.5 \u00b7 last 24 h and next 24 h",
     "Skill by horizon",
     "Quality checks",
     "Data quality by station",
@@ -560,8 +560,6 @@ def test_chart_gives_equal_space_to_recent_history_and_future(tmp_path):
     assert 'class="forecast-dot ln-pers" cx="525.0"' in page  # +6 h
     assert 'class="forecast-dot ln-pers" cx="618.0"' in page  # +12 h
     assert 'class="forecast-dot ln-pers" cx="804.0"' in page  # +24 h
-    for label in ("+6h", "+12h", "+24h"):
-        assert f">{label}</text>" in page
     assert "Times in Bangkok time (UTC+7)" in page
 
 
@@ -594,11 +592,85 @@ def test_chart_axes_legend_and_series_markup(tmp_path):
     assert ticks and {int(t) % 6 for t in ticks} == {0}
     assert re.search(r'<tspan x="[\d.]+" dy="17">\d\d [A-Z][a-z]{2}</tspan>', page)  # date at 00:00
     assert page.count('class="legend"') >= 1
-    for swatch in ("sw actual", "sw pers", "sw chal", "sw dot"):
+    for swatch in ("sw actual", "sw pers", "sw chal"):
         assert f'<i class="{swatch}">' in page
+    for text in ("Measured", "Baseline forecast (tomorrow = today)", "Model forecast"):
+        assert f"</i>{text}</span>" in page
     assert 'class="forecast-boundary"' in page
-    hover = r'<circle class="hover-pt"[^>]*><title>Actual: [\d.]+ \u00b5g/m\u00b3 at '
+    hover = r'<circle class="hover-pt"[^>]*><title>Measured: [\d.]+ \u00b5g/m\u00b3 at '
     assert re.search(hover, page)
     assert "stroke-linecap: round" in (tmp_path / "dashboard.css").read_text()
-    assert "kan73-chart-light" in page
+    assert "kan73-chart-v2" in page
     assert "Times in Bangkok time (UTC+7)" in (tmp_path / "dashboard.js").read_text()
+
+
+def _chart_svg(page: str) -> str:
+    return re.search(r"<svg viewBox=\"0 0 820[^>]*>.*?</svg>", page, re.S)[0]
+
+
+def _first_point(path_tag: str) -> str:
+    return re.search(r'd="M([\d.]+,[\d.]+)', path_tag)[1]
+
+
+def test_chart_v2_forecasts_start_at_latest_actual_and_use_no_dashes(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0)
+    for model, value in ((P, 25.0), (CHALLENGER, 31.0)):
+        for horizon in (6, 12, 24):
+            fake.con.execute(
+                "INSERT INTO predictions (station_id, issue_time, valid_time, model_version,"
+                " run_id, pm25_pred) VALUES ('59t', ?, ?, ?, 'f', ?)",
+                (issue.isoformat(), (issue + horizon * H).isoformat(), model, value),
+            )
+    fake.con.commit()
+    assert build(fake, tmp_path) == 0
+    page = (tmp_path / "index.html").read_text()
+    svg = _chart_svg(page)
+    paths = re.findall(r"<path class=\"ln [^>]*>", svg)
+    assert paths and not any("stroke-dasharray" in p for p in paths)
+    css = (tmp_path / "dashboard.css").read_text()
+    for rule in re.findall(r"\.(?:ln|sw)[^{]*\{[^}]*\}", css):
+        assert "dasharray" not in rule and "dashed" not in rule
+    dot = re.search(r'<circle class="actual-dot" cx="([\d.]+)" cy="([\d.]+)"', svg)
+    latest = f"{dot[1]},{dot[2]}"
+    assert dot[1] == "432.0"
+    for css_class in ("ln-pers", "ln-chal"):
+        tag = next(p for p in paths if css_class in p)
+        assert _first_point(tag) == latest
+        assert tag.count(" L") == 3  # +6, +12, +24 h
+    actual = next(p for p in paths if "ln-actual" in p)
+    assert actual.rstrip('"/>').endswith(latest)
+    assert re.search(r">Latest [\d.]+</text>", svg)
+    assert ">+24h 31</text>" in svg
+    assert 'class="forecast-region"' in svg
+
+
+def test_chart_v2_has_no_past_forecast_overlay_and_draws_nothing_without_future(tmp_path):
+    fake = Fake()
+    seed(fake)
+    assert build(fake, tmp_path) == 0
+    page = (tmp_path / "index.html").read_text()
+    svg = _chart_svg(page)
+    assert "ln-pers" not in svg and "ln-chal" not in svg  # no overlay lines at all
+    assert 'class="ln ln-actual"' in svg
+    assert "forecast made 24 h earlier" not in page
+    assert "Waiting for future forecasts." in page
+    assert "Accuracy of past forecasts: see Typical error and Skill by horizon above." in page
+    assert "last 24 h and next 24 h" in page
+
+
+def test_chart_v2_model_only_future_draws_only_model_path(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0)
+    fake.con.execute(
+        "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id,"
+        " pm25_pred) VALUES ('59t', ?, ?, ?, 'f', 30.0)",
+        (issue.isoformat(), (issue + 6 * H).isoformat(), CHALLENGER),
+    )
+    fake.con.commit()
+    build(fake, tmp_path)
+    svg = _chart_svg((tmp_path / "index.html").read_text())
+    assert svg.count('<path class="ln ln-chal') == 1
+    assert '<path class="ln ln-pers' not in svg
