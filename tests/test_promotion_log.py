@@ -90,7 +90,7 @@ def test_model_events_sql_round_trips_in_the_real_schema():
         fake, "recommend", "c", previous_version="b", actor="retrain", now=t0 + 2 * day
     )
     assert registry.previous_champion(fake) == "a"  # a recommend never counts as a change
-    with pytest.raises(Exception, match="CHECK|constraint"):
+    with pytest.raises(Exception, match=r"CHECK|constraint"):
         fake.con.execute(
             "INSERT INTO model_events (at, action, model_version, actor) "
             "VALUES ('x', 'delete', 'z', 'cli')"

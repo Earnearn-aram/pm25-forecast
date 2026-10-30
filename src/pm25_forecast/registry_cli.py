@@ -135,7 +135,9 @@ def run(
                 out("refused: promote changes production; re-run with --confirm")
                 return EXIT_FAILED
             load_registered_model(con, args.version)  # never promote an unservable model
-            previous = registry.promote_model(con, args.version, actor="cli", reason="manual promote")
+            previous = registry.promote_model(
+                con, args.version, actor="cli", reason="manual promote"
+            )
         out(f"production champion: {previous or 'none'} -> {args.version}")
         return 0
     except (ModelLoadError, LookupError, ValueError, OSError) as exc:
