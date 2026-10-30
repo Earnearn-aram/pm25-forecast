@@ -7,7 +7,7 @@
     "Bangkok PM2.5 forecast · live MLOps dashboard": "พยากรณ์ PM2.5 กรุงเทพฯ · แดชบอร์ด MLOps",
     "Bangkok PM2.5 · 24 h forecast": "PM2.5 กรุงเทพฯ · พยากรณ์ล่วงหน้า 24 ชั่วโมง",
     "A live MLOps loop on free tiers: collect → predict → score → monitor → retrain": "ระบบ MLOps ที่ทำงานจริงบนบริการฟรี: เก็บข้อมูล → พยากรณ์ → ประเมินผล → เฝ้าระวัง → ฝึกใหม่",
-    "Is it beating the naive guess “tomorrow = today”?": "โมเดลแม่นกว่าการเดาว่า “พรุ่งนี้ = วันนี้” หรือยัง?",
+    "Is it beating the baseline of keeping the latest reading?": "โมเดลแม่นกว่าวิธีใช้ค่าล่าสุดหรือยัง?",
     "Not scored yet": "ยังไม่มีผลประเมิน",
     "Source on GitHub": "ดูโค้ดบน GitHub",
     "Key numbers": "ตัวเลขสำคัญ",
@@ -19,20 +19,50 @@
     "persistence only · challenger not scored yet": "ใช้ค่าคงเดิมเท่านั้น · โมเดลท้าชิงยังไม่มีผลประเมิน",
     "Data freshness": "ความใหม่ของข้อมูล",
     "no readings yet": "ยังไม่มีค่าที่ตรวจวัด",
+    "Stations": "สถานีทั้งหมด",
+    "Now": "ตอนนี้",
+    "Search stations": "ค้นหาสถานี",
+    "Status": "สถานะ",
+    "Needs attention": "ต้องตรวจสอบ",
+    "All": "ทั้งหมด",
+    "Previous": "ก่อนหน้า",
+    "Next": "ถัดไป",
+    "Warning": "คำเตือน",
+    "Each point: the forecast made 24 h before that hour. Last 7 days, hourly, UTC. Future dots are forecasts; dashed lines connect available points and do not imply intermediate predictions.": "แต่ละจุดคือค่าพยากรณ์ล่วงหน้า 24 ชั่วโมง แสดงย้อนหลัง 7 วันตามเวลา UTC จุดในอนาคตคือค่าพยากรณ์ เส้นประเชื่อมเฉพาะจุดที่มีโดยไม่ได้แสดงค่าพยากรณ์ระหว่างจุด",
+    "PSI measures how far recent inputs have moved from what the model was trained on. The threshold is 0.2; an alert requires two consecutive daily breaches.": "PSI วัดความเปลี่ยนแปลงของข้อมูลเทียบกับข้อมูลที่ใช้ฝึก เกณฑ์คือ 0.2 และจะแจ้งเตือนเมื่อเกินเกณฑ์สองวันติดกัน",
+    "Air4Thai quality checks; Python and Neon Postgres. These checks do not prove workflow completion.": "ผลตรวจคุณภาพ Air4Thai; Python และ Neon Postgres ผลตรวจไม่ได้ยืนยันว่า workflow ทำงานสำเร็จ",
+    "Persistence prediction quality checks; Python and Neon Postgres. These checks do not prove workflow completion.": "ผลตรวจคุณภาพค่าพยากรณ์วิธีค่าคงเดิม; Python และ Neon Postgres ผลตรวจไม่ได้ยืนยันว่า workflow ทำงานสำเร็จ",
+    "Worst recorded quality-check status across sources; Python and Neon Postgres.": "สถานะผลตรวจคุณภาพที่แย่ที่สุดจากทุกแหล่งข้อมูล; Python และ Neon Postgres",
+    "Explore the map": "สำรวจบนแผนที่",
+    "Select a station · latest PM2.5 (µg/m³)": "เลือกสถานี · PM2.5 ล่าสุด (µg/m³)",
+    "Numbers are PM2.5 concentrations, not AQI. Use the station list if the map is unavailable.": "ตัวเลขคือความเข้มข้น PM2.5 ไม่ใช่ AQI เลือกสถานีจากรายการหากแผนที่ไม่พร้อมใช้งาน",
+    "Upcoming forecasts": "ค่าพยากรณ์ล่วงหน้า",
+    "Waiting for future forecasts.": "กำลังรอค่าพยากรณ์ล่วงหน้า",
+    "Persistence": "วิธีค่าคงเดิม",
+    "Persistence forecast": "พยากรณ์วิธีค่าคงเดิม",
+    "Challenger forecast": "พยากรณ์โมเดลท้าชิง",
+    "Quality checks · last 24 hours": "ผลตรวจคุณภาพ · 24 ชั่วโมงล่าสุด",
+    "checks OK": "ผลตรวจปกติ",
+    "no check recorded (half height)": "ไม่พบผลตรวจ (ช่องครึ่งความสูง)",
+    "Registered champion": "โมเดลหลักในทะเบียน",
+    "Configured challenger (shadow)": "โมเดลท้าชิงที่กำหนด (ทดลองคู่ขนาน)",
+    "Air4Thai and CAMS; OpenAQ backfill is manual": "Air4Thai และ CAMS; เติมข้อมูลย้อนหลัง OpenAQ ด้วยตนเอง",
+    "A candidate is served only after configuration and review": "โมเดลใหม่จะใช้งานหลังพิจารณาและกำหนดค่า",
+    "warning above 0.2": "เตือนเมื่อเกิน 0.2",
     "Input drift (PSI)": "การเปลี่ยนแปลงของข้อมูล (PSI)",
     "alert above 0.2": "แจ้งเตือนเมื่อเกิน 0.2",
     "waiting": "รอข้อมูล",
     "Actual": "ค่าจริง",
     "Challenger": "โมเดลท้าชิง",
     "Challenger (not scored yet)": "โมเดลท้าชิง (ยังไม่มีผลประเมิน)",
-    "Persistence (tomorrow = today)": "ค่าคงเดิม (พรุ่งนี้ = วันนี้)",
+    "Persistence (latest reading)": "ค่าคงเดิม (ค่าล่าสุด)",
     "Station": "สถานี",
     "UTC, hourly": "รายชั่วโมง (UTC)",
     "No hourly data for this station yet.": "ยังไม่มีข้อมูลรายชั่วโมงของสถานีนี้",
     "Waiting for the first observations.": "กำลังรอข้อมูลตรวจวัดชุดแรก",
     "Each point: the forecast made 24 h before that hour. Last 7 days, hourly, UTC.": "แต่ละจุดคือค่าพยากรณ์ที่ทำไว้ล่วงหน้า 24 ชั่วโมง แสดงข้อมูลรายชั่วโมงย้อนหลัง 7 วัน ตามเวลา UTC",
     "Skill by horizon": "ความแม่นยำตามระยะพยากรณ์",
-    "1 − MAE challenger ÷ MAE persistence, on the same station-hours. Above 0 means the model beats “tomorrow = today”.": "1 − MAE ของโมเดลท้าชิง ÷ MAE ของวิธีค่าคงเดิม โดยเทียบสถานีและชั่วโมงเดียวกัน ค่ามากกว่า 0 หมายถึงแม่นกว่า “พรุ่งนี้ = วันนี้”",
+    "1 − MAE challenger ÷ MAE persistence, on the same station-hours. Above 0 means the model beats the latest-reading baseline.": "1 − MAE โมเดลท้าชิง ÷ MAE วิธีค่าคงเดิม เทียบสถานีและเวลาเดียวกัน ค่ามากกว่า 0 หมายถึงแม่นกว่าวิธีใช้ค่าล่าสุด",
     "Pipeline · last 24 hours": "การทำงานของระบบ · 24 ชั่วโมงล่าสุด",
     "one cell per UTC hour · newest on the right": "หนึ่งช่องต่อชั่วโมง UTC · ล่าสุดอยู่ด้านขวา",
     "Waiting for the first hourly quality run.": "กำลังรอการตรวจคุณภาพรายชั่วโมงครั้งแรก",
@@ -61,8 +91,9 @@
     "Last retrain": "ฝึกใหม่ล่าสุด",
     "Promotion": "การเลื่อนเป็นโมเดลหลัก",
     "none yet": "ยังไม่มี",
+    "none registered": "ยังไม่มีโมเดลหลักในทะเบียน",
     "none configured": "ยังไม่ได้กำหนด",
-    "Manual, after 1–2 weeks of scores": "อนุมัติด้วยตนเอง หลังเก็บผลประเมิน 1–2 สัปดาห์",
+    "Review unless auto-promotion is enabled": "พิจารณาก่อนเลื่อน เว้นแต่เปิดการเลื่อนอัตโนมัติ",
     "How it works": "ระบบทำงานอย่างไร",
     "every 20 minutes, unattended · $0/month": "อัตโนมัติทุก 20 นาที · $0/เดือน",
     "Pause animation": "หยุดภาพเคลื่อนไหว",
@@ -78,7 +109,7 @@
     "Monitor": "เฝ้าระวัง",
     "data quality, drift (PSI), alerts": "คุณภาพข้อมูล การเปลี่ยนแปลง (PSI) และการแจ้งเตือน",
     "Retrain": "ฝึกใหม่",
-    "weekly; promote only if it beats the champion": "ทุกสัปดาห์ เลื่อนเป็นโมเดลหลักเมื่อแม่นกว่าตัวเดิมเท่านั้น",
+    "weekly; evaluate candidate before promotion": "ฝึกทุกสัปดาห์และประเมินก่อนเลื่อนโมเดล",
     "Storage: Neon Postgres (observations, predictions, scores, models)": "จัดเก็บ: Neon Postgres (ค่าตรวจวัด ค่าพยากรณ์ ผลประเมิน และโมเดล)",
     "Alerts: Discord · daily heartbeat": "แจ้งเตือน: Discord · รายงานสถานะรายวัน",
     "Weekly retrain feeds a new challenger back into Predict": "การฝึกใหม่รายสัปดาห์ส่งโมเดลท้าชิงตัวใหม่กลับไปพยากรณ์",
@@ -101,7 +132,21 @@
     "Healthy": "ปกติ", "Degraded": "ทำงานได้บางส่วน",
     "Failing": "มีข้อผิดพลาด", "Waiting for data": "รอข้อมูล"
   };
+  var stationThai = {
+    "Government Public Relations Department": "กรมประชาสัมพันธ์",
+    "Bodindecha School": "โรงเรียนบดินทรเดชา",
+    "Bueng Kum District Office": "สำนักงานเขตบึงกุ่ม",
+    "Khlong Sam Wa District Office": "สำนักงานเขตคลองสามวา",
+    "Bansomdejchaopraya Rajabhat University": "มหาวิทยาลัยราชภัฏบ้านสมเด็จเจ้าพระยา"
+  };
+  Object.keys(stationThai).forEach(function (name) { thai[name] = stationThai[name]; });
   var patterns = [
+    [/^(Persistence|Challenger) forecast: (.+) µg\/m³, valid (.+); issued (.+)$/, function (m) { return (m[1] === "Persistence" ? "พยากรณ์วิธีค่าคงเดิม" : "พยากรณ์โมเดลท้าชิง") + ": " + m[2] + " µg/m³ ใช้ได้ " + m[3] + " ออกเมื่อ " + m[4]; }],
+    [/^\+(\d+) h · (.+) µg\/m³$/, function (m) { return "+" + m[1] + " ชม. · " + m[2] + " µg/m³"; }],
+    [/^Now: (.+) UTC$/, function (m) { return "ตอนนี้: " + m[1] + " UTC"; }],
+    [/^\+24 h: (.+) UTC$/, function (m) { return "+24 ชม.: " + m[1] + " UTC"; }],
+    [/^worst: (.+) · warning above 0.2$/, function (m) { return "สูงสุด: " + m[1] + " · เตือนเมื่อเกิน 0.2"; }],
+    [/^([\d.]+) Warning$/, function (m) { return m[1] + " เตือน"; }],
     [/^Yes, by (.+)$/, function (m) { return "แม่นกว่า " + m[1]; }],
     [/^Not yet \((.+)\)$/, function (m) { return "ยังไม่แม่นกว่า (" + m[1] + ")"; }],
     [/^Forecast vs actual · \+24 h(.*)$/, function (m) { return "ค่าพยากรณ์เทียบค่าจริง · +24 ชม." + m[1]; }],
@@ -139,7 +184,7 @@
   var walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
     var node = walker.currentNode;
-    if (!node.parentElement.closest("script, style, [data-language], .pill, .drow .name") && node.textContent.trim()) {
+    if (!node.parentElement.closest("script, style, [data-language], [data-en][data-th], .pill, .drow .name") && node.textContent.trim()) {
       texts.push({ node: node, english: node.textContent });
     }
   }
@@ -147,22 +192,106 @@
   document.querySelectorAll("[aria-label]").forEach(function (el) {
     if (!el.matches(".pill")) labels.push({ node: el, english: el.getAttribute("aria-label") });
   });
+  var checkLabels = document.querySelectorAll(".pipe abbr[title]");
+  checkLabels.forEach(function (el) { el.dataset.englishTitle = el.title; });
   var buttons = document.querySelectorAll("[data-language]");
   var pills = document.querySelectorAll(".pill[data-station]");
   var charts = document.querySelectorAll(".chart[data-station]");
+  var mapPins = document.querySelectorAll(".map-pin");
+  var map = document.getElementById("station-map");
+  function mercator(lat, lon, zoom) {
+    var scale = 256 * Math.pow(2, zoom), sin = Math.sin(lat * Math.PI / 180);
+    return { x: (lon + 180) / 360 * scale,
+      y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale };
+  }
+  function renderMap() {
+    if (!map) return;
+    var zoom = 11, w = map.clientWidth, h = map.clientHeight;
+    var centerLat = 13.79, centerLon = 100.59;
+    if (mapPins.length) {
+      var lats = Array.prototype.map.call(mapPins, function (p) { return Number(p.dataset.lat); });
+      var lons = Array.prototype.map.call(mapPins, function (p) { return Number(p.dataset.lon); });
+      centerLat = (Math.min.apply(null, lats) + Math.max.apply(null, lats)) / 2;
+      centerLon = (Math.min.apply(null, lons) + Math.max.apply(null, lons)) / 2;
+      while (zoom > 8) {
+        var nw = mercator(Math.max.apply(null, lats), Math.min.apply(null, lons), zoom);
+        var se = mercator(Math.min.apply(null, lats), Math.max.apply(null, lons), zoom);
+        if (se.x - nw.x <= w - 60 && se.y - nw.y <= h - 60) break;
+        zoom--;
+      }
+    }
+    var center = mercator(centerLat, centerLon, zoom);
+    var tiles = map.querySelector(".map-tiles"); tiles.replaceChildren();
+    var note = map.querySelector(".map-fallback");
+    map.classList.remove("tiles-failed"); if (note) note.hidden = true;
+    var left = center.x - w / 2, top = center.y - h / 2;
+    // OSM tile policy: one zoom level, a handful of tiles (at most 4 x 3), no API key.
+    var x0 = Math.floor(left / 256), x1 = Math.floor((left + w) / 256);
+    var y0 = Math.floor(top / 256), y1 = Math.floor((top + h) / 256);
+    if (x1 - x0 > 3) { x0 += Math.floor((x1 - x0 - 3) / 2); x1 = x0 + 3; }
+    if (y1 - y0 > 2) { y0 += Math.floor((y1 - y0 - 2) / 2); y1 = y0 + 2; }
+    var total = (x1 - x0 + 1) * (y1 - y0 + 1), failed = 0;
+    function tileFailed(event) {
+      // A failed tile never leaves a blank map: drop it; with every tile gone, show the plain
+      // background and a note. Pins and the station list keep working either way.
+      if (event.target.parentNode) event.target.remove();
+      failed++;
+      if (failed >= total) { map.classList.add("tiles-failed"); if (note) note.hidden = false; }
+    }
+    for (var x = x0; x <= x1; x++) {
+      for (var y = y0; y <= y1; y++) {
+        var img = document.createElement("img"); img.alt = ""; img.loading = "lazy";
+        img.referrerPolicy = "strict-origin-when-cross-origin";
+        img.onerror = tileFailed;
+        img.src = "https://tile.openstreetmap.org/" + zoom + "/" + x + "/" + y + ".png";
+        img.style.left = (x * 256 - left) + "px"; img.style.top = (y * 256 - top) + "px";
+        tiles.appendChild(img);
+      }
+    }
+    mapPins.forEach(function (pin) {
+      var xy = mercator(Number(pin.dataset.lat), Number(pin.dataset.lon), zoom);
+      pin.style.left = (xy.x - left) + "px"; pin.style.top = (xy.y - top) + "px";
+    });
+  }
+  mapPins.forEach(function (pin) { pin.addEventListener("click", function () {
+    var target = Array.prototype.find.call(pills, function (p) { return p.dataset.station === pin.dataset.station; });
+    if (target) target.click();
+  }); });
+  window.addEventListener("resize", renderMap);
+  renderMap();
   var title = document.getElementById("chart-title");
   var pause = document.getElementById("pause");
   var arch = document.getElementById("arch");
 
   function updateControls() {
     var selected = document.querySelector('.pill[aria-pressed="true"]');
-    if (title && selected) title.textContent = translate("Forecast vs actual · +24 h · " + selected.getAttribute("data-label"));
+    mapPins.forEach(function (pin) {
+      pin.setAttribute("aria-pressed", selected && pin.dataset.station === selected.dataset.station ? "true" : "false");
+      var timestamp = Date.parse(pin.dataset.time);
+      if (Number.isFinite(timestamp)) {
+        var currentAge = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+        pin.dataset.age = String(currentAge); pin.dataset.stale = currentAge > 180 ? "true" : "false";
+        pin.classList.toggle("stale", currentAge > 180);
+      }
+      var sourcePill = Array.prototype.find.call(pills, function (p) { return p.dataset.station === pin.dataset.station; });
+      if (sourcePill) { var age = pin.dataset.age, isStale = pin.dataset.stale === "true";
+        var label = translate(sourcePill.dataset.label) + ": " + pin.textContent + " µg/m³ · " + age + (language === "th" ? " นาที" : " min") + (isStale ? (language === "th" ? " · ข้อมูลเก่า" : " · stale") : ""); pin.setAttribute("aria-label", label); pin.title = label; }
+    });
+    var selectedPin = Array.prototype.find.call(mapPins, function (p) { return selected && p.dataset.station === selected.dataset.station; });
+    var selectedReading = document.getElementById("selected-map-reading");
+    if (selectedReading) selectedReading.textContent = selectedPin ? selectedPin.getAttribute("aria-label") : "";
+    if (title && selected) title.textContent = translate("Forecast vs actual · +24 h") + " · " + translate(selected.getAttribute("data-label"));
+    pills.forEach(function (pill) { pill.textContent = translate(pill.getAttribute("data-label")); });
+    checkLabels.forEach(function (el) { el.title = translate(el.dataset.englishTitle); });
     if (pause) pause.textContent = translate(pause.getAttribute("aria-pressed") === "true" ? "Resume animation" : "Pause animation");
   }
   function setLanguage(next) {
     language = next === "th" ? "th" : "en";
     document.documentElement.lang = language;
-    texts.forEach(function (entry) { entry.node.textContent = translate(entry.english); });
+    document.querySelectorAll("[data-en][data-th]").forEach(function (el) {
+      el.textContent = el.getAttribute(language === "th" ? "data-th" : "data-en");
+    });
+    texts.forEach(function (entry) { if (entry.node.parentElement && !entry.node.parentElement.closest("[data-en][data-th]")) entry.node.textContent = translate(entry.english); });
     labels.forEach(function (entry) { entry.node.setAttribute("aria-label", translate(entry.english)); });
     buttons.forEach(function (button) { button.setAttribute("aria-pressed", button.getAttribute("data-language") === language ? "true" : "false"); });
     updateControls();
@@ -189,6 +318,70 @@
       updateControls();
     });
   }
+  var qualityTools = document.querySelector(".quality-tools"), qualityPagination = document.querySelector(".quality-pagination");
+  if (qualityTools && qualityPagination) {
+    var search = document.getElementById("quality-search"), filter = document.getElementById("quality-filter");
+    var qualityRows = Array.prototype.slice.call(document.querySelectorAll("tbody tr[data-quality-status]"));
+    var page = 0, pageSize = 10;
+    var previous = document.getElementById("quality-prev"), next = document.getElementById("quality-next");
+    function showQuality() {
+      var term = search.value.trim().toLowerCase(), chosen = filter.value;
+      var matches = qualityRows.filter(function (row) {
+        var status = row.dataset.qualityStatus;
+        return row.textContent.toLowerCase().indexOf(term) !== -1 &&
+          (chosen === "all" || (chosen === "attention" ? status === "warn" || status === "fail" : status === chosen));
+      });
+      page = Math.max(0, Math.min(page, Math.ceil(matches.length / pageSize) - 1));
+      qualityRows.forEach(function (row) { row.hidden = true; });
+      matches.slice(page * pageSize, (page + 1) * pageSize).forEach(function (row) { row.hidden = false; });
+      document.getElementById("quality-count").textContent = matches.length ?
+        (page * pageSize + 1) + "–" + Math.min((page + 1) * pageSize, matches.length) + " / " + matches.length : "0 / 0";
+      previous.disabled = page === 0; next.disabled = (page + 1) * pageSize >= matches.length;
+    }
+    search.addEventListener("input", function () { page = 0; showQuality(); });
+    filter.addEventListener("change", function () { page = 0; showQuality(); });
+    previous.addEventListener("click", function () { page--; showQuality(); });
+    next.addEventListener("click", function () { page++; showQuality(); });
+    qualityTools.hidden = false; qualityPagination.hidden = false; showQuality();
+  }
+  var stepTooltip = document.getElementById("step-tooltip");
+  var stepInfo = [
+    {en: ["Trigger", "cron-job.org dispatches collection at :07, :27 and :47; GitHub cron is the backup."], th: ["เริ่มทำงาน", "cron-job.org เริ่มเก็บข้อมูลที่นาที :07, :27 และ :47 โดยมี GitHub cron สำรอง"]},
+    {en: ["Collect", "Python collects Air4Thai and CAMS to Neon Postgres. OpenAQ backfill is manual."], th: ["เก็บข้อมูล", "Python เก็บข้อมูล Air4Thai และ CAMS ลง Neon Postgres ส่วน OpenAQ เติมย้อนหลังด้วยตนเอง"]},
+    {en: ["Predict", "After collection, Python runs persistence and the configured LightGBM challenger. Issue times are hourly."], th: ["พยากรณ์", "หลังเก็บข้อมูล Python ใช้วิธีค่าคงเดิมและโมเดล LightGBM ที่กำหนด เวลาออกพยากรณ์เป็นรายชั่วโมง"]},
+    {en: ["Score", "Python compares matured forecasts with observations; MAE and skill use matched station-hours."], th: ["ประเมินผล", "Python เทียบค่าพยากรณ์ที่ถึงเวลากับค่าจริง โดย MAE และ skill ใช้ข้อมูลสถานีและเวลาเดียวกัน"]},
+    {en: ["Monitor", "Quality checks run with prediction; PSI drift is checked daily; Discord sends alerts."], th: ["เฝ้าระวัง", "ตรวจคุณภาพพร้อมการพยากรณ์ ตรวจ drift แบบ PSI ทุกวัน และแจ้งเตือนผ่าน Discord"]},
+    {en: ["Retrain", "Weekly LightGBM candidate training and evaluation; promotion and serving depend on configuration."], th: ["ฝึกใหม่", "ฝึกและประเมิน LightGBM รายสัปดาห์ การเลื่อนโมเดลและการใช้งานขึ้นอยู่กับการกำหนดค่า"]}
+  ];
+  if (stepTooltip && arch) {
+    var stepPinned = null;
+    function placeStep(x, y) {
+      var width = stepTooltip.offsetWidth, height = stepTooltip.offsetHeight;
+      stepTooltip.style.left = Math.max(12, Math.min(x + 12, innerWidth - width - 12)) + "px";
+      stepTooltip.style.top = Math.max(12, Math.min(y + 14, innerHeight - height - 12)) + "px";
+    }
+    function showStep(button, x, y) {
+      var info = stepInfo[Number(button.dataset.step)][language];
+      stepTooltip.replaceChildren();
+      var titleNode = document.createElement("strong"), body = document.createElement("p");
+      titleNode.textContent = info[0]; body.textContent = info[1];
+      stepTooltip.appendChild(titleNode); stepTooltip.appendChild(body); stepTooltip.hidden = false;
+      var rect = button.getBoundingClientRect(); placeStep(x == null ? rect.left : x, y == null ? rect.bottom : y);
+      arch.querySelectorAll(".arch-node").forEach(function (b) { b.setAttribute("aria-expanded", b === button ? "true" : "false"); });
+    }
+    function hideStep() { stepTooltip.hidden = true; arch.querySelectorAll(".arch-node").forEach(function (b) { b.setAttribute("aria-expanded", "false"); }); }
+    arch.querySelectorAll(".arch-node").forEach(function (button) {
+      button.addEventListener("mouseenter", function (event) { if (!stepPinned) showStep(button, event.clientX, event.clientY); });
+      button.addEventListener("mousemove", function (event) { if (!stepPinned && !stepTooltip.hidden) placeStep(event.clientX, event.clientY); });
+      button.addEventListener("mouseleave", function () { if (!stepPinned && document.activeElement !== button) hideStep(); });
+      button.addEventListener("focus", function () { if (!stepPinned) showStep(button); });
+      button.addEventListener("blur", function () { if (!stepPinned) hideStep(); });
+      button.addEventListener("click", function () { stepPinned = stepPinned === button ? null : button; if (stepPinned) showStep(button); else hideStep(); });
+    });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") { stepPinned = null; hideStep(); } });
+    document.addEventListener("click", function (e) { if (!e.target.closest(".arch-node")) { stepPinned = null; hideStep(); } });
+  }
+  window.setInterval(updateControls, 60000);
   var saved;
   try { saved = localStorage.getItem(storageKey); } catch (_) { /* Keep English if blocked. */ }
   setLanguage(saved);

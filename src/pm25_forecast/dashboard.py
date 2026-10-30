@@ -53,7 +53,20 @@ PSI_BAR_MAX = 2 * PSI_ALERT  # the alert tick sits in the middle of the track
 SKILL_BAR_MAX = 0.5
 AIR4THAI = "air4thai"
 # Optional display names, "id": "Name". Left empty rather than guessed; the page then shows the id.
-STATION_NAMES: dict[str, str] = {}
+STATION_NAMES: dict[str, str] = {
+    "59t": "Government Public Relations Department",
+    "61t": "Bodindecha School",
+    "bkp100t": "Bueng Kum District Office",
+    "bkp101t": "Khlong Sam Wa District Office",
+    "02t": "Bansomdejchaopraya Rajabhat University",
+}
+STATION_MAP: dict[str, tuple[float, float]] = {
+    "59t": (13.783185, 100.540489),
+    "61t": (13.769634, 100.614567),
+    "bkp100t": (13.785212, 100.669183),
+    "bkp101t": (13.859911, 100.704002),
+    "02t": (13.732846, 100.487662),
+}
 SECTIONS = ("scores", "observations", "chart", "quality", "drift", "models")
 
 Status = Literal["ok", "warn", "fail"]
@@ -108,6 +121,11 @@ WHERE ts >= %(since)s AND ts <= %(now)s AND pm25 IS NOT NULL AND pm25 >= 0
 SELECT_PREDS = """
 SELECT station_id, issue_time, valid_time, model_version, pm25_pred FROM predictions
 WHERE model_version IN (%(m1)s, %(m2)s) AND valid_time >= %(since)s AND valid_time <= %(now)s
+"""
+SELECT_FUTURE = """
+SELECT station_id, issue_time, valid_time, model_version, pm25_pred FROM predictions
+WHERE model_version IN (%(m1)s, %(m2)s) AND issue_time <= %(now)s
+AND issue_time >= %(since)s AND valid_time > %(now)s AND valid_time <= %(until)s
 """
 SELECT_DQ = """
 SELECT checked_at, source, station_id, check_name, status, value FROM data_quality_checks
@@ -203,7 +221,7 @@ def _hour(value: datetime) -> datetime:
 
 def _station_label(station_id: str) -> str:
     name = STATION_NAMES.get(station_id)
-    return f"{name} ({station_id})" if name else station_id
+    return name if name else station_id
 
 
 # --- headline ------------------------------------------------------------------------------------
@@ -290,9 +308,49 @@ def _chart(rd: Reader, obs: list[ObsRow], challenger: str | None, now: datetime)
         {"m1": PERSISTENCE_MODEL_VERSION, "m2": challenger or PERSISTENCE_MODEL_VERSION}
         | {"since": since, "now": now},
     )
+    future_raw = rd.query(
+        SELECT_FUTURE,
+        {
+            "m1": PERSISTENCE_MODEL_VERSION,
+            "m2": challenger or PERSISTENCE_MODEL_VERSION,
+            "since": now - timedelta(hours=3),
+            "now": now,
+            "until": _hour(now) + timedelta(hours=24),
+        },
+    )
+    future_rows = _rows(PredRow, future_raw)
+    latest_issue: dict[tuple[str, str], datetime] = {}
+    for prediction in future_rows:
+        if prediction.valid_time - prediction.issue_time not in [
+            timedelta(hours=h) for h in HORIZONS_H
+        ]:
+            continue
+        key = (prediction.station_id, prediction.model_version)
+        latest_issue[key] = max(latest_issue.get(key, prediction.issue_time), prediction.issue_time)
+    future: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for prediction in future_rows:
+        key = (prediction.station_id, prediction.model_version)
+        if prediction.issue_time == latest_issue.get(key):
+            future.setdefault(key, []).append(
+                {
+                    "issue_time": _iso(prediction.issue_time),
+                    "valid_time": _iso(prediction.valid_time),
+                    "value": _num(prediction.pm25_pred, 1),
+                }
+            )
     actual: dict[str, dict[datetime, float]] = {}
+    newest_observations: dict[str, ObsRow] = {}
+    hourly_observations: dict[tuple[str, datetime], ObsRow] = {}
     for o in obs:
-        actual.setdefault(o.station_id, {})[_hour(o.ts)] = o.pm25
+        if not math.isfinite(o.pm25):
+            continue
+        bucket = (o.station_id, _hour(o.ts))
+        if bucket not in hourly_observations or o.ts > hourly_observations[bucket].ts:
+            hourly_observations[bucket] = o
+        if o.station_id not in newest_observations or o.ts > newest_observations[o.station_id].ts:
+            newest_observations[o.station_id] = o
+    for (sid, hour), observation in hourly_observations.items():
+        actual.setdefault(sid, {})[hour] = observation.pm25
     series: dict[tuple[str, str], dict[datetime, float]] = {}
     for p in _rows(PredRow, raw):
         if p.valid_time - p.issue_time != timedelta(hours=HEADLINE_H):
@@ -318,7 +376,22 @@ def _chart(rd: Reader, obs: list[ObsRow], challenger: str | None, now: datetime)
             }
             for h in hours
         ]
-        stations.append({"id": sid, "label": _station_label(sid), "points": points})
+        latest = newest_observations[sid]
+        stations.append(
+            {
+                "id": sid,
+                "label": _station_label(sid),
+                "points": points,
+                "future_persistence": sorted(
+                    future.get((sid, PERSISTENCE_MODEL_VERSION), []), key=lambda p: p["valid_time"]
+                ),
+                "future_challenger": sorted(
+                    future.get((sid, challenger or ""), []), key=lambda p: p["valid_time"]
+                ),
+                "latest_value": _num(latest.pm25, 1),
+                "latest_at": _iso(latest.ts),
+            }
+        )
     return {
         "stations": stations,
         "has_challenger": has_challenger,
@@ -389,7 +462,8 @@ def _drift(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any]:
         {
             "name": f,
             "psi": _num(r.psi),
-            "alert": r.psi is not None and math.isfinite(r.psi) and r.psi > PSI_ALERT,
+            "alert": r.status == "alert",
+            "status": r.status,
         }
         for f, r in sorted(latest.items())
     ]
@@ -415,7 +489,7 @@ def _models(rd: Reader, challenger: str | None) -> dict[str, Any]:
             if retrain
             else None
         ),
-        "promotion": "Manual, after 1\u20132 weeks of scores",
+        "promotion": "Review unless auto-promotion is enabled",
     }
 
 
@@ -538,7 +612,7 @@ def _nice_max(vmax: float) -> float:
 
 
 def _lines(points: list[dict[str, Any]], key: str, ymax: float, css: str) -> str:
-    w, h, pad = 800, 220, 8
+    h, pad = 220, 8
     n = max(len(points) - 1, 1)
     segments: list[list[str]] = [[]]
     for i, p in enumerate(points):
@@ -547,7 +621,7 @@ def _lines(points: list[dict[str, Any]], key: str, ymax: float, css: str) -> str
             segments.append([])
             continue
         y = h - pad - min(v, ymax) / ymax * (h - 2 * pad)
-        segments[-1].append(f"{i / n * w:.1f},{y:.1f}")
+        segments[-1].append(f"{i / n * 700:.1f},{y:.1f}")
     return "".join(
         f'<polyline class="ln {css}" vector-effect="non-scaling-stroke" points="{" ".join(s)}"/>'
         for s in segments
@@ -559,6 +633,12 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
     points = st["points"]
     keys = ["actual", "persistence"] + (["challenger"] if chart["has_challenger"] else [])
     values = [p[k] for p in points for k in keys if p[k] is not None]
+    values += [
+        p["value"]
+        for key in ("future_persistence", "future_challenger")
+        for p in st.get(key, [])
+        if p["value"] is not None
+    ]
     if not values:
         body = '<p class="muted small">No hourly data for this station yet.</p>'
     else:
@@ -576,17 +656,80 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
         if chart["has_challenger"]:
             series += _lines(points, "challenger", ymax, "ln-chal")
         series += _lines(points, "actual", ymax, "ln-actual")
+        actual_points = [
+            (i, point) for i, point in enumerate(points) if point["actual"] is not None
+        ]
+        if actual_points:
+            i, point = actual_points[-1]
+            x = i / max(len(points) - 1, 1) * 700
+            y = 212 - min(point["actual"], ymax) / ymax * 204
+            description = f"Actual: {point['actual']:g} µg/m³ at {point['t']}"
+            series += (
+                f'<circle class="actual-dot" cx="{x:.1f}" cy="{y:.1f}" r="4">'
+                f"<title>{e(description)}</title></circle>"
+            )
+        forecast_origin = datetime.fromisoformat(chart["end"])
+        for key, css in (("future_persistence", "ln-pers"), ("future_challenger", "ln-chal")):
+            coords = []
+            for forecast in st.get(key, []):
+                if forecast["value"] is None:
+                    continue
+                t = datetime.fromisoformat(forecast["valid_time"])
+                x = 700 + (t - forecast_origin).total_seconds() / 86400 * 100
+                y = 212 - min(forecast["value"], ymax) / ymax * 204
+                coords.append((x, y, forecast))
+            if len(coords) > 1:
+                pairs = " ".join(f"{x:.1f},{y:.1f}" for x, y, _ in coords)
+                series += (
+                    f'<polyline class="ln {css} future-line" '
+                    f'vector-effect="non-scaling-stroke" points="{pairs}"/>'
+                )
+            for x, y, forecast in coords:
+                description = (
+                    f"{key.replace('future_', '').capitalize()} forecast: "
+                    f"{forecast['value']:g} µg/m³, "
+                    f"valid {forecast['valid_time']}; issued {forecast['issue_time']}"
+                )
+                series += (
+                    f'<circle class="forecast-dot {css}" cx="{x:.1f}" cy="{y:.1f}" '
+                    f'r="4"><title>{e(description)}</title></circle>'
+                )
         aria = (
             f"Station {st['label']}, last 7 days in UTC: actual PM2.5 in \u00b5g/m\u00b3 against "
             "persistence and challenger forecasts made 24 h earlier"
         )
         start, end = datetime.fromisoformat(chart["start"]), datetime.fromisoformat(chart["end"])
+        future_html = []
+        for key, name in (
+            ("future_persistence", "Persistence forecast"),
+            ("future_challenger", "Challenger forecast"),
+        ):
+            for forecast in st.get(key, []):
+                if forecast["value"] is None:
+                    continue
+                issue = datetime.fromisoformat(forecast["issue_time"])
+                valid = datetime.fromisoformat(forecast["valid_time"])
+                hours_ahead = int((valid - issue) / timedelta(hours=1))
+                future_html.append(
+                    f'<span class="forecast-point"><b>{e(name)}</b> +{hours_ahead} h · '
+                    f"{forecast['value']:g} µg/m³ <small>({valid:%d %b %H:%M} UTC)</small></span>"
+                )
+        future_block = (
+            '<div class="future-forecasts"><strong>Upcoming forecasts</strong>'
+            + (
+                "".join(future_html)
+                if future_html
+                else "<span>Waiting for future forecasts.</span>"
+            )
+            + "</div>"
+        )
         body = (
             '<div class="plotwrap"><div class="ytitle">\u00b5g/m\u00b3</div><div class="plot">'
             f'{labels}<svg viewBox="0 0 800 220" preserveAspectRatio="none" role="img" '
             f'aria-label="{e(aria)}">{grid}{series}</svg></div>'
-            f'<div class="xlabs"><span>{start:%d %b %H:%M}</span><span>UTC, hourly</span>'
-            f"<span>{end:%d %b %H:%M}</span></div></div>"
+            f'<div class="xlabs"><span>{start:%d %b %H:%M} UTC</span>'
+            f'<span class="axis-now" title="{end:%d %b %H:%M} UTC">Now</span>'
+            "<span>+24 h</span></div></div>" + future_block
         )
     hidden = "" if first else " hidden"
     return f'<div class="chart" data-station="{e(st["id"])}"{hidden}>{body}</div>'
@@ -598,7 +741,7 @@ def _section_chart(data: dict[str, Any]) -> str:
     legend = (
         '<div class="legend"><span><i class="sw actual"></i>Actual</span>'
         f'<span><i class="sw chal"></i>{chal}</span>'
-        '<span><i class="sw pers"></i>Persistence (tomorrow = today)</span></div>'
+        '<span><i class="sw pers"></i>Persistence (latest reading)</span></div>'
     )
     if chart is None:
         inner = _unavailable("The chart")
@@ -614,7 +757,7 @@ def _section_chart(data: dict[str, Any]) -> str:
         pills = "".join(
             f'<button type="button" class="pill" data-station="{e(s["id"])}" '
             f'data-label="{e(s["label"])}" aria-label="{e(s["label"])}" '
-            f'aria-pressed="{"true" if i == 0 else "false"}">{e(s["id"])}</button>'
+            f'aria-pressed="{"true" if i == 0 else "false"}">{e(s["label"])}</button>'
             for i, s in enumerate(sts)
         )
         inner = "".join(_chart_block(s, chart, i == 0) for i, s in enumerate(sts))
@@ -624,7 +767,50 @@ def _section_chart(data: dict[str, Any]) -> str:
         f'<div class="pills" role="group" aria-label="Station">{pills}</div></div>'
         f"{legend}{inner}"
         '<figcaption class="muted small">Each point: the forecast made 24 h before that hour. '
-        "Last 7 days, hourly, UTC.</figcaption></figure>"
+        "Last 7 days, hourly, UTC. Future dots are forecasts; dashed lines connect available "
+        "points and do not imply intermediate predictions.</figcaption></figure>"
+    )
+
+
+def _section_map(data: dict[str, Any]) -> str:
+    stations = (data.get("chart") or {}).get("stations", [])
+    pins = []
+    for st in stations:
+        coords = STATION_MAP.get(st["id"])
+        if not coords:
+            continue
+        lat, lon = coords
+        value = st.get("latest_value")
+        if value is None:
+            continue
+        label = _station_label(st["id"])
+        latest_at = datetime.fromisoformat(st["latest_at"])
+        generated_at = datetime.fromisoformat(data["generated_at"])
+        age = int((generated_at - latest_at).total_seconds() // 60)
+        stale = age > REPORTING_H * 60
+        pins.append(
+            f'<button type="button" class="map-pin {"stale" if stale else ""}" '
+            f'data-age="{age}" data-stale="{str(stale).lower()}" '
+            f'data-time="{e(st["latest_at"])}" data-station="{e(st["id"])}" '
+            f'data-lat="{lat}" data-lon="{lon}" '
+            f'aria-label="{e(label)}: {value:g} µg/m³" title="{e(label)}: {value:g} µg/m³">'
+            f"{value:g}</button>"
+        )
+    return (
+        '<section class="card map-card"><div class="cardhead"><div>'
+        '<h2>Explore the map</h2><p class="muted small">Select a station · latest PM2.5 (µg/m³)</p>'
+        '</div></div><div class="map-frame"><div id="station-map" class="station-map">'
+        f'<div class="map-tiles" aria-hidden="true"></div>{"".join(pins)}'
+        '<p class="map-fallback" role="status" hidden '
+        'data-en="Map tiles could not load. Use the station list instead." '
+        'data-th="โหลดแผนที่ไม่สำเร็จ ใช้รายชื่อสถานีแทนได้">'
+        "Map tiles could not load. Use the station list instead.</p>"
+        '<span class="map-credit">© <a href="https://www.openstreetmap.org/copyright" '
+        'rel="noopener" referrerpolicy="strict-origin-when-cross-origin">'
+        "OpenStreetMap contributors</a></span></div></div>"
+        '<p id="selected-map-reading" class="muted small" aria-live="polite"></p>'
+        '<p class="muted small">Numbers are PM2.5 concentrations, not AQI. '
+        "Use the station list if the map is unavailable.</p></section>"
     )
 
 
@@ -675,21 +861,34 @@ def _section_pipeline(data: dict[str, Any]) -> str:
                 f'<span class="cell {"miss" if c == "missed" else c}"></span>'
                 for c in line["cells"]
             )
+            details = {
+                "Collect": (
+                    "Air4Thai quality checks; Python and Neon Postgres. "
+                    "These checks do not prove workflow completion."
+                ),
+                "Predict": (
+                    "Persistence prediction quality checks; Python and Neon Postgres. "
+                    "These checks do not prove workflow completion."
+                ),
+                "Quality": (
+                    "Worst recorded quality-check status across sources; Python and Neon Postgres."
+                ),
+            }
             rows.append(
-                f"<span>{e(line['name'])}</span>"
+                f'<abbr tabindex="0" title="{e(details[line["name"]])}">{e(line["name"])}</abbr>'
                 f'<div class="cells" role="img" aria-label="{e(aria)}">{cells}</div>'
                 f'<span class="mono muted">{line["ok"]}/{PIPELINE_HOURS} ok</span>'
             )
         body = f'<div class="pipe">{"".join(rows)}</div>'
     legend = (
-        '<p class="legend"><span><i class="sq" style="background:#2dd4bf"></i>ran ok</span>'
+        '<p class="legend"><span><i class="sq" style="background:#2dd4bf"></i>checks OK</span>'
         '<span><i class="sq" style="background:#f5a524"></i>warning</span>'
         '<span><i class="sq" style="background:#f87171"></i>failed</span>'
-        '<span><i class="sq" style="background:#6b7480;height:5px"></i>no run recorded '
+        '<span><i class="sq" style="background:#6b7480;height:5px"></i>no check recorded '
         "(half height)</span></p>"
     )
     return (
-        '<section class="card"><div class="cardhead"><h2>Pipeline \u00b7 last 24 hours</h2>'
+        '<section class="card"><div class="cardhead"><h2>Quality checks \u00b7 last 24 hours</h2>'
         '<span class="muted small">one cell per UTC hour \u00b7 newest on the right</span></div>'
         f"{body}{legend}</section>"
     )
@@ -706,6 +905,17 @@ def _section_quality(data: dict[str, Any]) -> str:
             body = '<p class="muted small">Waiting for the first station readings.</p>'
         else:
             now = datetime.fromisoformat(data["generated_at"])
+            counts = dict.fromkeys(("ok", "warn", "fail", "none"), 0)
+            for station_id in ids:
+                info = (q or {}).get("stations", {}).get(station_id)
+                counts[info["status"] if info else "none"] += 1
+            summary = (
+                '<div class="quality-summary">'
+                f"<span>Stations <strong>{len(ids)}</strong></span>"
+                f"<span>OK <strong>{counts['ok']}</strong></span>"
+                f"<span>Needs attention <strong>{counts['warn'] + counts['fail']}</strong></span>"
+                f"<span>Waiting <strong>{counts['none']}</strong></span></div>"
+            )
             rows = []
             for sid in ids:
                 info = (q or {}).get("stations", {}).get(sid)
@@ -719,16 +929,26 @@ def _section_quality(data: dict[str, Any]) -> str:
                 status = info["status"] if info else "none"
                 word = {"ok": "OK", "warn": "Warn", "fail": "Fail"}.get(status, "Waiting")
                 rows.append(
-                    f"<tr><td>{e(_station_label(sid))}</td><td>{age}</td><td>{missing}</td>"
+                    f'<tr data-quality-status="{status}"><td>{e(_station_label(sid))}</td>'
+                    f"<td>{age}</td><td>{missing}</td>"
                     f'<td><span class="badge {status}">{word}</span></td></tr>'
                 )
             body = (
-                '<div class="tablewrap" tabindex="0" role="region" '
+                summary + '<div class="quality-tools" hidden><label>Search stations '
+                '<input id="quality-search" type="search"></label> '
+                '<label>Status <select id="quality-filter"><option value="attention">'
+                'Needs attention</option><option value="all">All</option>'
+                '<option value="ok">OK</option><option value="warn">Warn</option>'
+                '<option value="fail">Fail</option><option value="none">Waiting</option>'
+                '</select></label></div><div class="tablewrap" tabindex="0" role="region" '
                 'aria-label="Data quality by station, scrollable"><table>'
                 "<caption>Latest hourly check per station</caption><thead><tr>"
                 '<th scope="col">Station</th><th scope="col">Newest reading</th>'
                 '<th scope="col">Missing, 24 h</th><th scope="col">Status</th></tr></thead>'
                 f"<tbody>{''.join(rows)}</tbody></table></div>"
+                '<div class="quality-pagination" hidden><span id="quality-count"></span>'
+                '<button id="quality-prev" type="button">Previous</button>'
+                '<button id="quality-next" type="button">Next</button></div>'
             )
     return f'<div class="card grow"><h2>Data quality by station</h2>{body}</div>'
 
@@ -749,7 +969,8 @@ def _section_drift(data: dict[str, Any]) -> str:
                 width = min(psi / PSI_BAR_MAX, 1) * 100
                 cls = "fill alert" if f["alert"] else "fill plain"
                 bar = f'<div class="{cls}" style="width:{width:.0f}%"></div>'
-                text = f"{psi:.2f}" + (" Alert" if f["alert"] else "")
+                suffix = " Alert" if f["alert"] else " Warning" if f["status"] == "warn" else ""
+                text = f"{psi:.2f}" + suffix
             tick = '<div class="tick"></div>'
             rows.append(
                 f'<div class="drow"><span class="name">{e(f["name"])}</span>'
@@ -760,7 +981,8 @@ def _section_drift(data: dict[str, Any]) -> str:
         '<div class="card grow"><h2>Drift \u00b7 last 7 days vs training data</h2>'
         f"{body}"
         '<p class="muted small">PSI measures how far recent inputs have moved from what the '
-        "model was trained on. Tick = 0.2 alert line; bars above it turn amber and say Alert."
+        "model was trained on. The threshold is 0.2; an alert requires two consecutive "
+        "daily breaches."
         "</p></div>"
     )
 
@@ -782,8 +1004,11 @@ def _section_models(data: dict[str, Any]) -> str:
 
         body = (
             '<div class="models">'
-            + item("Champion (serves)", m["champion"])
-            + item("Challenger (shadow)", chal)
+            + item(
+                "Registered champion",
+                m["champion"] if m["champion_registered"] else "none registered",
+            )
+            + item("Configured challenger (shadow)", chal)
             + item("Last retrain", last)
             + item("Promotion", m["promotion"], mono=False)
             + "</div>"
@@ -793,19 +1018,20 @@ def _section_models(data: dict[str, Any]) -> str:
 
 STEPS = (
     ("Trigger", "cron-job.org starts the run at :07, :27, :47"),
-    ("Collect", "Air4Thai, OpenAQ and CAMS into Postgres"),
+    ("Collect", "Air4Thai and CAMS; OpenAQ backfill is manual"),
     ("Predict", "persistence + challenger (shadow), +6/+12/+24 h"),
     ("Score", "forecasts vs actuals once they arrive"),
     ("Monitor", "data quality, drift (PSI), alerts"),
-    ("Retrain", "weekly; promote only if it beats the champion"),
+    ("Retrain", "weekly; evaluate candidate before promotion"),
 )
 
 
 def _section_how() -> str:
     items = "".join(
-        f'<li style="--i:{i}"><div class="arch-node" style="--i:{i}"><span class="arch-dot"></span>'
-        f'<span class="step">{i + 1:02d}</span><span class="t">{e(t)}</span>'
-        f'<span class="b">{e(b)}</span></div></li>'
+        f'<li style="--i:{i}"><button type="button" class="arch-node" data-step="{i}" '
+        f'aria-expanded="false" aria-controls="step-tooltip" style="--i:{i}">'
+        f'<span class="arch-dot"></span><span class="step">{i + 1:02d}</span>'
+        f'<span class="t">{e(t)}</span><span class="b">{e(b)}</span></button></li>'
         for i, (t, b) in enumerate(STEPS)
     )
     return (
@@ -814,10 +1040,34 @@ def _section_how() -> str:
         '<span class="muted small">every 20 minutes, unattended \u00b7 $0/month</span>'
         '<button type="button" id="pause" aria-pressed="false">Pause animation</button></div>'
         f'<ol class="arch" id="arch" style="list-style:none">{items}</ol>'
+        '<div id="step-tooltip" class="step-tooltip" role="tooltip" hidden></div>'
         '<div class="row muted small"><span>Storage: Neon Postgres (observations, predictions, '
         "scores, models)</span><span>Alerts: Discord \u00b7 daily heartbeat</span>"
-        "<span>Weekly retrain feeds a new challenger back into Predict</span></div></section>"
+        "<span>A candidate is served only after configuration and review</span></div></section>"
     )
+
+
+def _section_story() -> str:
+    return """<section class="story card">
+<h2 data-en="Behind the forecast" data-th="เบื้องหลังการพยากรณ์">Behind the forecast</h2>
+<div class="story-grid">
+<article><h3 data-en="Data sources" data-th="แหล่งข้อมูล">Data sources</h3>
+<p data-en="Air4Thai provides readings; OpenAQ backfills history; Open-Meteo provides CAMS forecasts." data-th="Air4Thai ให้ค่าตรวจวัด OpenAQ เติมข้อมูลย้อนหลัง และ Open-Meteo ให้ค่าพยากรณ์ CAMS">Air4Thai provides readings; OpenAQ backfills history; Open-Meteo provides CAMS forecasts.</p></article>
+<article><h3 data-en="Time-safe inputs" data-th="ข้อมูลเข้า ณ เวลาพยากรณ์">Time-safe inputs</h3>
+<p data-en="Features use only information available by forecast time. Training and serving share the same feature builder." data-th="ใช้เฉพาะข้อมูลที่มี ณ เวลาพยากรณ์ และใช้วิธีสร้างตัวแปรเดียวกันทั้งตอนฝึกและใช้งาน">Features use only information available by forecast time. Training and serving share the same feature builder.</p></article>
+<article><h3 data-en="Why five stations?" data-th="ทำไมเลือกห้าสถานี?">Why five stations?</h3>
+<p data-en="The initial pilot selected five stations with the fewest missing hourly readings in the Air4Thai probe." data-th="โครงการนำร่องเลือกห้าสถานีที่มีข้อมูลรายชั่วโมงขาดน้อยที่สุดจากการตรวจ Air4Thai">The initial pilot selected five stations with the fewest missing hourly readings in the Air4Thai probe.</p></article>
+<article><h3 data-en="Persistence baseline" data-th="วิธีพื้นฐาน Persistence">Persistence baseline</h3>
+<p data-en="The latest usable reading is carried forward. A reading older than three hours is not used." data-th="ใช้ค่าล่าสุดที่ใช้ได้เป็นค่าพยากรณ์ หากข้อมูลเก่ากว่าสามชั่วโมงจะไม่ใช้">The latest usable reading is carried forward. A reading older than three hours is not used.</p>
+<small data-en="Illustrative example" data-th="ตัวอย่างประกอบ">Illustrative example</small><svg class="explain-chart" viewBox="0 0 300 105" role="img" aria-label="Persistence example: the latest reading is carried forward to the forecast horizons."><polyline class="explain-actual" points="5,75 40,60 75,68 110,42 145,55"/><path class="explain-forecast" d="M145 55 H290"/><circle class="explain-current" cx="145" cy="55" r="4"/><circle class="explain-predicted" cx="195" cy="55" r="4"/><circle class="explain-predicted" cx="240" cy="55" r="4"/><circle class="explain-predicted" cx="290" cy="55" r="4"/><text x="132" y="93">Now</text><text x="183" y="93">+6h</text><text x="225" y="93">+12h</text><text x="273" y="93">+24h</text></svg>
+<a href="https://otexts.com/fpp3/toolbox.html" data-en="Read about naïve forecasting ↗" data-th="อ่านการพยากรณ์แบบ naïve ↗">Read about naïve forecasting ↗</a></article>
+<article><h3 data-en="LightGBM challenger" data-th="โมเดลท้าชิง LightGBM">LightGBM challenger</h3>
+<p data-en="Decision trees learn corrections. The configured challenger runs in shadow and is evaluated against persistence." data-th="ต้นไม้ตัดสินใจเรียนรู้เพื่อแก้ความคลาดเคลื่อน โมเดลท้าชิงทำงานคู่ขนานและประเมินเทียบวิธีพื้นฐาน">Decision trees learn corrections. The configured challenger runs in shadow and is evaluated against persistence.</p>
+<div class="boost-visual" role="img" aria-label="Illustrative gradient boosting: sequential decision trees combine corrections"><div class="boost-tree"><svg viewBox="0 0 52 45" aria-hidden="true"><path d="M26 6 L12 22 M26 6 L40 22 M12 22 L6 36 M12 22 L18 36 M40 22 L34 36 M40 22 L46 36"/><circle cx="26" cy="6" r="3"/><circle cx="12" cy="22" r="3"/><circle cx="40" cy="22" r="3"/><circle cx="6" cy="36" r="2.5"/><circle cx="18" cy="36" r="2.5"/><circle cx="34" cy="36" r="2.5"/><circle cx="46" cy="36" r="2.5"/></svg><span data-en="Tree 1" data-th="ต้นไม้ 1">Tree 1</span></div><b>+</b><div class="boost-tree"><svg viewBox="0 0 52 45" aria-hidden="true"><path d="M26 6 L12 22 M26 6 L40 22 M12 22 L6 36 M12 22 L18 36 M40 22 L34 36 M40 22 L46 36"/><circle cx="26" cy="6" r="3"/><circle cx="12" cy="22" r="3"/><circle cx="40" cy="22" r="3"/><circle cx="6" cy="36" r="2.5"/><circle cx="18" cy="36" r="2.5"/><circle cx="34" cy="36" r="2.5"/><circle cx="46" cy="36" r="2.5"/></svg><span data-en="Tree 2" data-th="ต้นไม้ 2">Tree 2</span></div><b>+</b><div class="boost-tree"><svg viewBox="0 0 52 45" aria-hidden="true"><path d="M26 6 L12 22 M26 6 L40 22 M12 22 L6 36 M12 22 L18 36 M40 22 L34 36 M40 22 L46 36"/><circle cx="26" cy="6" r="3"/><circle cx="12" cy="22" r="3"/><circle cx="40" cy="22" r="3"/><circle cx="6" cy="36" r="2.5"/><circle cx="18" cy="36" r="2.5"/><circle cx="34" cy="36" r="2.5"/><circle cx="46" cy="36" r="2.5"/></svg><span data-en="Tree 3" data-th="ต้นไม้ 3">Tree 3</span></div><b>=</b><span data-en="Forecast" data-th="พยากรณ์">Forecast</span></div>
+<a href="https://lightgbm.readthedocs.io/" data-en="LightGBM documentation ↗" data-th="เอกสาร LightGBM ↗">LightGBM documentation ↗</a></article>
+<article><h3 data-en="How we evaluate" data-th="วิธีประเมินผล">How we evaluate</h3>
+<p data-en="MAE is average absolute error. Skill compares challenger and baseline MAE on matched station-hours; above zero favors the challenger." data-th="MAE คือค่าเฉลี่ยความคลาดเคลื่อนสัมบูรณ์ Skill เปรียบเทียบ MAE ของสองโมเดลในสถานีและเวลาเดียวกัน ค่าบวกหมายถึงโมเดลท้าชิงแม่นกว่า">MAE is average absolute error. Skill compares challenger and baseline MAE on matched station-hours; above zero favors the challenger.</p></article>
+</div></section>"""  # noqa: E501
 
 
 def render_html(data: dict[str, Any]) -> str:
@@ -868,9 +1118,9 @@ def render_html(data: dict[str, Any]) -> str:
     )
     psi = k["worst_psi"]
     psi_sub = (
-        "alert above 0.2"
+        "warning above 0.2"
         if psi is None
-        else f"worst: {k['worst_psi_feature']} \u00b7 alert above 0.2"
+        else f"worst: {k['worst_psi_feature']} \u00b7 warning above 0.2"
     )
 
     def card(title: str, value: str, sub: str) -> str:
@@ -902,8 +1152,8 @@ def render_html(data: dict[str, Any]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
-<link rel="stylesheet" href="dashboard.css">
-<script src="dashboard.js" defer></script>
+<link rel="stylesheet" href="dashboard.css?v=kan73-redesign">
+<script src="dashboard.js?v=kan73-redesign" defer></script>
 </head>
 <body>
 <main>
@@ -911,7 +1161,7 @@ def render_html(data: dict[str, Any]) -> str:
 <div class="title">
 <h1>Bangkok PM2.5 \u00b7 24 h forecast</h1>
 <p class="muted">A live MLOps loop on free tiers: collect \u2192 predict \u2192 score \u2192 monitor \u2192 retrain</p>
-<p class="headline">Is it beating the naive guess \u201ctomorrow = today\u201d? <span class="answer {answer_cls}">{e(head["text"])}</span></p>
+<p class="headline">Is it beating the baseline of keeping the latest reading? <span class="answer {answer_cls}">{e(head["text"])}</span></p>
 </div>
 <div class="row" style="align-items:center">
 <p class="status"><span class="dot {status}" aria-hidden="true"></span>{label} \u00b7 updated {_fmt_time(data["generated_at"])}</p>
@@ -924,11 +1174,13 @@ def render_html(data: dict[str, Any]) -> str:
 </header>
 {note}
 <section aria-label="Key numbers" class="kpis">{cards}</section>
-<section class="row">{_section_chart(data)}{_section_horizons(data)}</section>
+<section class="dashboard-main">{_section_map(data)}{_section_chart(data)}</section>
+<section aria-label="Model performance" class="row">{_section_horizons(data)}</section>
 {_section_pipeline(data)}
 <section class="row">{_section_quality(data)}{_section_drift(data)}</section>
 {_section_models(data)}
 {_section_how()}
+{_section_story()}
 <footer>GitHub Actions \u00b7 Neon Postgres \u00b7 cron-job.org \u00b7 $0/month. Data: Air4Thai (Pollution Control Department, Thailand), OpenAQ, CAMS via Open-Meteo.</footer>
 </main>
 </body>
@@ -938,7 +1190,11 @@ def render_html(data: dict[str, Any]) -> str:
 
 def write_site(data: dict[str, Any], out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    (out / "data.json").write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
+    payload = json.dumps(data, indent=2, allow_nan=False)
+    # Still valid JSON (parses back identically) but never carries a literal <, > or & that could
+    # be mistaken for markup if the file is ever served or embedded as HTML.
+    payload = payload.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    (out / "data.json").write_text(payload + "\n")
     (out / "index.html").write_text(render_html(data), encoding="utf-8")
     for asset in ("dashboard.css", "dashboard.js"):
         shutil.copyfile(ASSETS / asset, out / asset)
