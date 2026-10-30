@@ -34,7 +34,10 @@ NOW = datetime(2026, 10, 30, 12, 20, tzinfo=UTC)
 H = timedelta(hours=1)
 REF_START = datetime(2026, 9, 1, tzinfo=UTC)
 REF_END = datetime(2026, 9, 21, tzinfo=UTC)
-SHIFT_FROM = datetime(2026, 10, 23, tzinfo=UTC)
+# Hour-aligned recent origins: CAMS valid times must fall on the hour to match build_features.
+RECENT_FROM = datetime(2026, 10, 22, 12, tzinfo=UTC)
+RECENT_TO = datetime(2026, 10, 30, 12, tzinfo=UTC)
+SHIFT_FROM =datetime(2026, 10, 23, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -322,7 +325,7 @@ def test_cams_needs_half_of_the_reference_origins_covered(fake):
     add_model(fake, CHALLENGER)
     add_series(fake)
     add_cams(fake, REF_START, REF_END, every=5)  # 20 % of the reference origins
-    add_cams(fake, NOW - timedelta(days=8), NOW)
+    add_cams(fake, RECENT_FROM, RECENT_TO)
     assert by_feature(do_run(fake))["cams_pm25"].status == INSUFFICIENT
 
 
@@ -330,8 +333,8 @@ def test_cams_with_full_coverage_is_compared(fake):
     add_model(fake, CHALLENGER)
     add_series(fake)
     add_cams(fake, REF_START, REF_END)
-    add_cams(fake, NOW - timedelta(days=8), NOW)
-    got = by_feature(do_run(fake))["cams_pm25"]
+    add_cams(fake, RECENT_FROM, RECENT_TO)
+    got =by_feature(do_run(fake))["cams_pm25"]
     assert got.n_ref >= drift.MIN_REFERENCE and got.status in {OK, WARN}
 
 
