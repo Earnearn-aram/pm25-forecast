@@ -1114,6 +1114,21 @@ def _retry_with_bundle(
     return first_probes + r_probes, first_stations, first_cov, tls_report
 
 
+def _default_client() -> httpx.Client:
+    """Primary probe client; honours ``AIR4THAI_CA_BUNDLE`` (verification stays on).
+
+    A missing/unreadable bundle falls back to the default trust store, so the AIA retry still runs.
+    """
+    verify: ssl.SSLContext | bool = True
+    bundle = os.environ.get("AIR4THAI_CA_BUNDLE", "").strip()
+    if bundle:
+        try:
+            verify = tls.build_verify(bundle)
+        except (OSError, ssl.SSLError):
+            verify = True
+    return httpx.Client(timeout=30.0, follow_redirects=True, verify=verify)
+
+
 def run(
     out: Path,
     days: int = 730,
@@ -1129,7 +1144,7 @@ def run(
     ``diagnose`` and ``verified_client_factory`` are test seams; the defaults hit the network.
     """
     now = now or datetime.now(UTC)
-    client = (client_factory or (lambda: httpx.Client(timeout=30.0, follow_redirects=True)))()
+    client = (client_factory or _default_client)()
     make_verified = verified_client_factory or (
         lambda verify: httpx.Client(timeout=30.0, follow_redirects=True, verify=verify)
     )

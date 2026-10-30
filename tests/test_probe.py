@@ -676,3 +676,39 @@ def test_openaq_failures_are_recorded_not_raised(monkeypatch: pytest.MonkeyPatch
     assert rows[0].status == "error" and "HTTP 429" in rows[0].note
     assert rows[1].status == "station_unknown"
     assert "dummy-value" not in rows[0].model_dump_json()
+
+
+def _capture_client(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+    real = httpx.Client
+
+    def fake(**kw: Any) -> httpx.Client:
+        seen.update(kw)
+        return real(transport=httpx.MockTransport(_handler))
+
+    monkeypatch.setattr(p.httpx, "Client", fake)
+    return seen
+
+
+def test_default_client_uses_ca_bundle_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sentinel = object()
+    paths: list[str] = []
+    monkeypatch.setattr(p.tls, "build_verify", lambda p: (paths.append(str(p)), sentinel)[1])
+    monkeypatch.setenv("AIR4THAI_CA_BUNDLE", str(tmp_path / "ca.pem"))
+    seen = _capture_client(monkeypatch)
+    p._default_client()
+    assert paths == [str(tmp_path / "ca.pem")]
+    assert seen["verify"] is sentinel
+
+
+def test_default_client_without_env_or_bad_bundle_keeps_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AIR4THAI_CA_BUNDLE", raising=False)
+    seen = _capture_client(monkeypatch)
+    p._default_client()
+    assert seen["verify"] is True
+    monkeypatch.setenv("AIR4THAI_CA_BUNDLE", str(tmp_path / "missing.pem"))
+    seen.clear()
+    p._default_client()
+    assert seen["verify"] is True
