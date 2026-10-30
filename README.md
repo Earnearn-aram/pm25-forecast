@@ -121,7 +121,7 @@ promotion log (KAN-24), dashboard (KAN-25), dead-man switch (KAN-30).
 | Service | Plan | Cost / month | Limit that matters |
 |---|---|---|---|
 | GitHub Actions | Free minutes (public repo) | $0 | Collector runs 3 times an hour, about 2,200 runs/month at 1-2 min each (`collector.yml` notes). Free because the repo is public; a private repo would draw on the plan's minute quota. |
-| Neon Postgres | Free tier | $0 | 1 GB storage and 100 CU-hours per project (`docs/storage-decision.md`; the doc marks these figures unverified, re-check on neon.com/pricing). Without retention, predictions would reach 1 GB in about 12-18 months. The decided 90-day purge exists as a statement (`sql.PURGE_OLD_PREDICTIONS`) but no job runs it yet. |
+| Neon Postgres | Free tier | $0 | 1 GB storage and 100 CU-hours per project (`docs/storage-decision.md`; the doc marks these figures unverified, re-check on neon.com/pricing). Without retention, predictions would reach 1 GB in about 12-18 months. The decided 90-day purge is run weekly by `pm25_forecast.housekeeping` (`sql.PURGE_OLD_PREDICTIONS`; CAMS vintages are never purged). |
 | cron-job.org | Free tier | $0 | Three schedules calling the GitHub API. The repo states no limit. |
 | Discord webhook | Free | $0 | Alerts and the daily heartbeat only. |
 | Air4Thai | Public API | $0 | Only the latest reading is exposed, hence frequent polling; history window is about 3 months. |
@@ -162,6 +162,10 @@ most runs before (KAN-50, KAN-67).
 | Heartbeat `WARN` or `(STALE)` | Some stations have no reading for over 3 h | As the stale-station alert above. |
 | Heartbeat `FAIL` or zero rows in 24 h | The Collector is not landing data | Check the cron-job.org timer, recent Collector runs and the 60-day disable rule. |
 | Predict fails after baselines are written | `CHALLENGER_MODEL_VERSION` points at a missing or incompatible model | Run `registry_cli check <version>`; unset the variable to turn the challenger off. |
+| `[pm25 retrain] recommend promote <version>` | A retrained candidate beat the champion; nothing was changed | Read the `RUN_SUMMARY` and `model_events`, then `registry_cli promote <version> --confirm`. Undo with `registry_cli rollback --confirm` (docs/retrain.md). |
+| `[pm25 retrain] AUTO_PROMOTE: <version> is now the production champion` | `AUTO_PROMOTE=true` and a candidate won | Check it is wanted; `registry_cli rollback --confirm` reverts; unset `AUTO_PROMOTE` to stop it. |
+| Drift alert, then a retrain run from the Drift workflow | Drift confirmed on two days; `retrain --if-drift` ran the normal (recommend-only) retrain | As the recommend alert above; the run is a no-op when there is no drift alert. |
+| `[pm25 housekeeping]` failure or crash | The weekly purge or prune dry run failed | Open the run; the `RUN_SUMMARY` lists the models a prune would delete (the job never deletes models). |
 | No heartbeat arrives at all | Not detected automatically yet | Planned: dead-man switch (KAN-30). Until then, check the Actions tab by hand. |
 
 ## Live dashboard

@@ -95,8 +95,9 @@ CREATE TABLE IF NOT EXISTS drift_checks (
     PRIMARY KEY (checked_at, model_version, feature)
 );
 
--- Reference distribution per model and feature, computed once from the model's training window
--- (immutable per model_version) so the daily run only reads the recent days. `edges` and `shares`
+-- Reference distribution per model and feature, computed from the same-season rows of the model's
+-- training window (`season_key`, e.g. 'doy±30@2026-W44'; rebuilt when it or the window changes)
+-- so the daily run only reads the recent days. `edges` and `shares`
 -- are JSON arrays; `usable` is false when the reference is too small, has too few distinct bins,
 -- or (cams_pm25) covers too few of the training origins.
 CREATE TABLE IF NOT EXISTS drift_reference (
@@ -108,5 +109,25 @@ CREATE TABLE IF NOT EXISTS drift_reference (
     n_origins      integer     NOT NULL,
     usable         boolean     NOT NULL,
     computed_at    timestamptz NOT NULL DEFAULT now(),
+    ref_start      timestamptz,
+    ref_end        timestamptz,
+    season_key     text,
     PRIMARY KEY (model_version, feature)
+);
+
+-- Promotion/rollback log (KAN-24). One row per champion change or retrain decision; a champion
+-- change is written in the same transaction as the model_champion pointer change. `recommend` and
+-- `keep` are retrain decisions that leave production alone. `metrics` is a JSON object (text).
+-- `id` gives the order of events (`at` is the database clock, now()). No foreign key: pruning a
+-- model must not erase history. (ref_start/ref_end/season_key above: see
+-- migrations/005_model_events.sql, which adds them with ALTER TABLE on existing databases.)
+CREATE TABLE IF NOT EXISTS model_events (
+    id bigserial PRIMARY KEY,
+    at                timestamptz NOT NULL DEFAULT now(),
+    action            text        NOT NULL CHECK (action IN ('promote', 'rollback', 'recommend', 'keep')),
+    model_version     text        NOT NULL,
+    previous_version  text,
+    actor             text        NOT NULL CHECK (actor IN ('cli', 'retrain', 'auto')),
+    metrics           text,
+    reason            text
 );

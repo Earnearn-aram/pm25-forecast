@@ -20,6 +20,7 @@ class InMemoryRegistry:
     def __init__(self):
         self.rows = {}
         self.champion = None
+        self.events = []
         self.lock = threading.Lock()
 
     @property
@@ -37,7 +38,18 @@ class InMemoryRegistry:
         return False
 
     def execute(self, statement, params):
-        if statement.lstrip().startswith("INSERT INTO models"):
+        if statement.lstrip().startswith("INSERT INTO model_events"):
+            with self.lock:
+                self.events.append(params)
+        elif "FROM model_events" in statement:
+            with self.lock:
+                changes = [e for e in self.events if e["action"] in ("promote", "rollback")]
+                last = changes[-1] if changes else None
+                if last is None:
+                    self._selected = None
+                else:
+                    self._selected = (last["model_version"], last["previous_version"])
+        elif statement.lstrip().startswith("INSERT INTO models"):
             with self.lock:
                 self.rows.setdefault(
                     params["model_version"],

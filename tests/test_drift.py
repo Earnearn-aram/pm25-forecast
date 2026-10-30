@@ -32,8 +32,8 @@ CHALLENGER = "kan15-retrospective-24h-lag1h"
 CHAMPION = "champ-v1"
 NOW = datetime(2026, 10, 30, 12, 20, tzinfo=UTC)
 H = timedelta(hours=1)
-REF_START = datetime(2026, 9, 1, tzinfo=UTC)
-REF_END = datetime(2026, 9, 21, tzinfo=UTC)
+REF_START = datetime(2026, 10, 1, tzinfo=UTC)  # within 30 days of the day of year of NOW
+REF_END = datetime(2026, 10, 21, tzinfo=UTC)
 # Hour-aligned recent origins: CAMS valid times must fall on the hour to match build_features.
 RECENT_FROM = datetime(2026, 10, 22, 12, tzinfo=UTC)
 RECENT_TO = datetime(2026, 10, 30, 12, tzinfo=UTC)
@@ -315,10 +315,142 @@ def test_reference_is_cached_per_model_and_not_rebuilt_daily(fake):
     assert len(cached) == len(FEATURE_NAMES) + 1
     first = checks(fake)
     # The training-window observations are gone; only the cached reference can explain the result.
-    fake.con.execute("DELETE FROM observations WHERE ts < '2026-10-01'")
+    fake.con.execute("DELETE FROM observations WHERE ts < '2026-10-21'")
     fake.con.commit()
     do_run(fake, now=NOW + timedelta(minutes=30))
     assert checks(fake) == first
+
+
+def reference_windows(fake):
+    rows = fake.con.execute("SELECT DISTINCT ref_start, ref_end FROM drift_reference").fetchall()
+    return [(datetime.fromisoformat(a), datetime.fromisoformat(b)) for a, b in rows]
+
+
+def test_reference_stores_its_training_window(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    assert reference_windows(fake) == [(REF_START, REF_END)]
+
+
+def test_reference_is_rebuilt_when_the_manifest_training_window_changes(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    new_end = REF_END + timedelta(days=2)
+    manifest = {
+        "version": CHALLENGER,
+        "training_window": {"start": REF_START.isoformat(), "end": new_end.isoformat()},
+        "assumed_reporting_lag_hours": 0,
+        "metrics": {"24": {"mae": 1.0}},
+    }
+    fake.con.execute(
+        "UPDATE models SET manifest = ? WHERE model_version = ?", (json.dumps(manifest), CHALLENGER)
+    )
+    fake.con.commit()
+    do_run(fake, now=NOW + timedelta(minutes=30))
+    assert reference_windows(fake) == [(REF_START, new_end)]
+
+
+def test_reference_without_a_stored_window_is_rebuilt_once(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    fake.con.execute("UPDATE drift_reference SET ref_start = NULL, ref_end = NULL")
+    fake.con.commit()
+    do_run(fake, now=NOW + timedelta(minutes=30))
+    assert reference_windows(fake) == [(REF_START, REF_END)]
+
+
+def season_keys(fake):
+    return [r[0] for r in fake.con.execute("SELECT DISTINCT season_key FROM drift_reference")]
+
+
+def computed_ats(fake):
+    rows = fake.con.execute("SELECT DISTINCT computed_at FROM drift_reference")
+    return sorted(r[0] for r in rows)
+
+
+def test_reference_stores_its_season_key(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    assert season_keys(fake) == ["doy\u00b130@2026-W44"]
+
+
+def test_reference_is_not_rebuilt_on_the_same_season_key(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    first = computed_ats(fake)
+    do_run(fake, now=NOW + timedelta(days=1))  # Sat 31 Oct, still ISO week 44
+    assert computed_ats(fake) == first
+
+
+def test_reference_is_rebuilt_when_the_season_key_changes(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake, end=NOW + timedelta(days=3))
+    do_run(fake)
+    first = computed_ats(fake)
+    later = NOW + timedelta(days=3)  # Mon 2 Nov: ISO week 45
+    do_run(fake, now=later)
+    assert season_keys(fake) == ["doy\u00b130@2026-W45"]
+    assert computed_ats(fake) != first
+    # A stale or missing key (rows from before this change) also rebuilds.
+    fake.con.execute("UPDATE drift_reference SET season_key = NULL")
+    fake.con.commit()
+    do_run(fake, now=later + timedelta(minutes=30))
+    assert season_keys(fake) == ["doy\u00b130@2026-W45"]
+
+
+def test_season_window_wraps_around_the_year_end_and_leap_day():
+    jan10 = datetime(2027, 1, 10, 12, tzinfo=UTC)
+    assert drift.in_season(datetime(2025, 12, 15, tzinfo=UTC), jan10)
+    assert drift.in_season(datetime(2026, 2, 9, tzinfo=UTC), jan10)
+    assert not drift.in_season(datetime(2026, 12, 10, tzinfo=UTC), jan10)
+    assert not drift.in_season(datetime(2026, 2, 10, tzinfo=UTC), jan10)
+    assert not drift.in_season(datetime(2026, 7, 1, tzinfo=UTC), jan10)
+    mar1 = datetime(2026, 3, 1, tzinfo=UTC)
+    assert drift.in_season(datetime(2024, 2, 29, tzinfo=UTC), mar1)  # leap day, other year
+
+
+def test_reference_with_recent_end_on_jan_10_picks_december_and_january_rows(fake):
+    def far_off_season(ts):  # in season (11 Dec to 9 Feb) ~20-42, otherwise 1000
+        return pm25(ts) if drift.in_season(ts, datetime(2027, 1, 10, tzinfo=UTC)) else 1000.0
+
+    start, end = datetime(2025, 9, 1, tzinfo=UTC), datetime(2026, 3, 1, tzinfo=UTC)
+    add_model(fake, CHALLENGER, start=start, end=end)
+    add_series(fake, start=start - 2 * H, end=end, fn=far_off_season)
+    manifest = drift.read_manifest(fake, CHALLENGER)
+    reference = drift.build_reference(fake, manifest, None, datetime(2027, 1, 10, 12, tzinfo=UTC))
+    target = reference[TARGET_FEATURE]
+    days = 21 + 31 + 9  # 11-31 Dec, all of Jan, 1-9 Feb
+    assert target.n_ref == days * 24  # both the December and the January rows
+    assert max(target.edges) < 100  # no off-season row in the reference
+
+
+def test_season_anchor_is_the_monday_of_the_iso_week():
+    anchor = drift.season_anchor(datetime(2026, 10, 30, 12, 20, tzinfo=UTC))  # a Friday
+    assert anchor == datetime(2026, 10, 26, tzinfo=UTC)
+    assert drift.season_key(anchor) == drift.season_key(datetime(2026, 11, 1, 23, tzinfo=UTC))
+    assert drift.season_anchor(datetime(2027, 1, 3, 5, tzinfo=UTC)) == datetime(
+        2026, 12, 28, tzinfo=UTC
+    )
+
+
+def test_too_few_same_season_points_is_insufficient_without_full_window_fallback(fake, caplog):
+    # The training window is plentiful but entirely out of season for the recent end (30 Oct).
+    start, end = datetime(2026, 3, 1, tzinfo=UTC), datetime(2026, 4, 1, tzinfo=UTC)
+    add_model(fake, CHALLENGER, start=start, end=end)
+    add_series(fake, start=start - 2 * H)
+    with caplog.at_level("WARNING", logger="pm25_forecast.drift"):
+        result = do_run(fake)
+    assert any(
+        "pm25_latest" in r.getMessage() and "2026-03-01" in r.getMessage() for r in caplog.records
+    )
+    assert {c.status for c in result.checks} == {INSUFFICIENT}
+    assert all(c.psi is None for c in result.checks)
+    assert all(c.n_ref < drift.MIN_REFERENCE for c in result.checks)
 
 
 def test_cams_needs_half_of_the_reference_origins_covered(fake):

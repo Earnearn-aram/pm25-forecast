@@ -153,6 +153,7 @@ def test_schema_primary_keys_match_conflict_targets():
         "data_quality_checks": ("checked_at", "source", "station_id", "check_name"),
         "drift_checks": ("checked_at", "model_version", "feature"),
         "drift_reference": ("model_version", "feature"),
+        "model_events": ("id",),
     }
     assert {t: _primary_key(b) for t, b in tables.items()} == expected
     for table, stmt in (

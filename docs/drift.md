@@ -41,7 +41,12 @@ An empty bin counts as a 0.0001 share so the logarithm is defined. Non-finite va
 
 - Models: the shadow challenger (`CHALLENGER_MODEL_VERSION`) and the production champion, if one
   is registered (checked once if they are the same).
-- Reference: the model manifest's `training_window` (start to end of the training origins).
+- Reference: the rows of the model manifest's `training_window` from the same season as the
+  recent window: day of the year within 30 days of the recent window's end date, across all
+  training years (wrapping around the year end; 29 Feb counts as 28 Feb). This keeps a
+  multi-year window from flagging plain seasonality (for example PM2.5 in the dry season against
+  a whole-year reference) as drift. If the seasonal reference has fewer than 200 points the
+  status is `insufficient`; there is no fallback to the whole window.
 - Recent: the last 7 days up to the current UTC hour.
 - Features: every name in `FEATURE_NAMES` (`pm25_latest`, `pm25_same_hour_24h`, `cams_pm25`),
   rebuilt hourly per station from stored observations and CAMS vintages through the shared
@@ -49,7 +54,7 @@ An empty bin counts as a 0.0001 share so the logarithm is defined. Non-finite va
   trained for (the manifest `metrics` keys; 24 h when they name none). The observation history
   is the 24 h up to `assumed_reporting_lag_hours` before the origin, as in training. Stations are
   pooled; `STATION_LOCATIONS` limits them when set.
-- `target_pm25`: the observed PM2.5 itself, recent 7 days against the training window.
+- `target_pm25`: the observed PM2.5 itself, recent 7 days against the same-season reference.
 
 A 24 h-only model with a reporting lag of 1 h or more never sees the reading of the origin hour,
 in training or in serving, so `pm25_same_hour_24h` is always empty for it and is `insufficient`.
@@ -57,9 +62,15 @@ That is correct, not a gap in the check. Models with shorter horizons (6 h, 12 h
 
 ## Cost: the reference is cached
 
-The reference side is computed once per `model_version` (a model's training window never
-changes) and stored in `drift_reference` as bin edges and shares. A daily run reads only the
-recent 7 days from the database. Delete a model's `drift_reference` rows to force a rebuild.
+The reference side is computed per `model_version` and season key (see below) and stored in
+`drift_reference` as bin edges and shares. A daily run reads only the recent 7 days from the database. Delete a model's `drift_reference` rows to force a rebuild.
+Since KAN-24 the rows also store the training window they were built from (`ref_start`,
+`ref_end`, migration `005_model_events.sql`). If that differs from the manifest's
+`training_window`, or is empty (rows from before the migration), the reference is rebuilt once
+on the next run. The rows also store a `season_key` (`doy±30@<ISO year>-W<ISO week of the recent
+end>`, for example `doy±30@2026-W44`, same migration); a different key rebuilds the reference, so
+it is rebuilt about once a week. A confirmed alert also triggers `retrain --if-drift`
+(docs/retrain.md).
 
 ## Where results go
 

@@ -12,6 +12,13 @@
 # fail the job; see docs/drift.md.
 # Failure alerting: the last step posts the job status and run link to ALERT_WEBHOOK_URL
 # when any step fails or the job is cancelled (e.g. timeout), as in the predict template.
+# KAN-24: the `drift-retrain` job (end of file) runs after the drift job succeeds and starts
+#   `retrain --if-drift`: it exits 0 without training unless the latest drift run has an alert for
+#   the challenger or the champion (and no retrain was logged in the last 7 days: cooldown).
+#   When it does train it is the normal retrain:
+#   recommend-only unless the repo variable AUTO_PROMOTE is "true" (leave it UNSET, see
+#   docs/retrain.md). Apply migration 005_model_events.sql before enabling it. To disable
+#   drift-triggered retrains, delete that job; the drift check itself is unaffected.
 name: Drift
 
 on:
@@ -52,6 +59,46 @@ jobs:
       # Independent of the drift module: no DB, no settings. If uv or the venv is unusable a curl
       # fallback posts a fixed message. The webhook URL is a secret: it comes in through env,
       # reaches curl on stdin (-K -), never the command line, and is never echoed.
+      - name: Alert on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          uv run --no-dev python -m pm25_forecast.monitoring.notify failure && exit 0
+          [ -n "$ALERT_WEBHOOK_URL" ] || { echo "ALERT_WEBHOOK_URL is not set"; exit 0; }
+          msg="[pm25 ci] ${JOB_STATUS:-failure} (fallback): workflow ${GITHUB_WORKFLOW}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -
+
+  # KAN-24: retrain when drift is confirmed. `needs: drift` means it only runs if the drift job
+  # succeeded; the drift job does not fail on a drift alert, so the gate is --if-drift itself.
+  drift-retrain:
+    needs: drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Share the weekly retrain's lock: two retrains never run at once.
+    concurrency:
+      group: retrain
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Retrain if drift
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }} # unset = no challenger
+          AUTO_PROMOTE: ${{ vars.AUTO_PROMOTE }} # unset = recommend only; "true" = promote
+        run: uv run --no-dev python -m pm25_forecast.retrain --if-drift
       - name: Alert on failure
         if: failure() || cancelled()
         timeout-minutes: 2

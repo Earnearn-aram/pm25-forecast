@@ -44,10 +44,11 @@ Create the Neon project and set `DATABASE_URL` (and `ALERT_WEBHOOK_URL`) as secr
 
 Decided (Genos, under Boss's delegation):
 
-1. Retention: raw prediction vintages are kept 90 days; scores are aggregated to daily after that. If row volume still hurts, slim the rows later with a `runs` table. Purge statement (`sql.PURGE_OLD_PREDICTIONS`, no scheduler in this PR; a later job runs it):
+1. Retention: raw MODEL prediction vintages are kept 90 days; scores are aggregated to daily after that. CAMS vintages (`model_version = 'cams_global'`) are never purged: they are training and drift-reference inputs. If row volume still hurts, slim the rows later with a `runs` table. Purge statement (`sql.PURGE_OLD_PREDICTIONS`, run weekly by `pm25_forecast.housekeeping`, KAN-24):
 
 ```sql
-DELETE FROM predictions WHERE issue_time < now() - interval '90 days';
+DELETE FROM predictions
+WHERE issue_time < now() - interval '90 days' AND model_version <> 'cams_global';
 ```
 
 2. DB driver: psycopg 3 with `%(name)s` placeholders. `sql.py` statements use this style. psycopg was added as a dependency in KAN-18 (`psycopg[binary]`), which also passes `storage.db.CONNECTION_ERRORS` (`psycopg.OperationalError`, `psycopg.InterfaceError`) to `run_entrypoint`; the `OSError`/`ConnectionError` default stays only as a placeholder for other callers. Tests stay offline: a tiny test helper translates `%(name)s` to `:name` for the SQLite fixture.

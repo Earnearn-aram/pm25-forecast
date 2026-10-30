@@ -40,7 +40,9 @@ class FakeDb:
 
     def __init__(self):
         self.con = sqlite3.connect(":memory:")
-        self.con.executescript(SCHEMA.replace("DEFAULT now()", "DEFAULT CURRENT_TIMESTAMP"))
+        script = SCHEMA.replace("DEFAULT now()", "DEFAULT CURRENT_TIMESTAMP")
+        # SQLite autoincrements only an `integer PRIMARY KEY`
+        self.con.executescript(script.replace("bigserial PRIMARY KEY", "integer PRIMARY KEY"))
 
     def __call__(self, url):
         return self
