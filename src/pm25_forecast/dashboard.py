@@ -883,10 +883,10 @@ def _section_pipeline(data: dict[str, Any]) -> str:
             )
         body = f'<div class="pipe">{"".join(rows)}</div>'
     legend = (
-        '<p class="legend"><span><i class="sq" style="background:#2dd4bf"></i>checks OK</span>'
-        '<span><i class="sq" style="background:#f5a524"></i>warning</span>'
-        '<span><i class="sq" style="background:#f87171"></i>failed</span>'
-        '<span><i class="sq" style="background:#6b7480;height:5px"></i>no check recorded '
+        '<p class="legend"><span><i class="sq" style="background:#0f766e"></i>checks OK</span>'
+        '<span><i class="sq" style="background:#b45309"></i>warning</span>'
+        '<span><i class="sq" style="background:#b91c1c"></i>failed</span>'
+        '<span><i class="sq" style="background:#6b7280;height:5px"></i>no check recorded '
         "(half height)</span></p>"
     )
     return (
@@ -1156,8 +1156,8 @@ def render_html(data: dict[str, Any]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
-<link rel="stylesheet" href="dashboard.css?v=kan73-readable-fonts">
-<script src="dashboard.js?v=kan73-readable-fonts" defer></script>
+<link rel="stylesheet" href="dashboard.css?v=kan73-light-mode">
+<script src="dashboard.js?v=kan73-light-mode" defer></script>
 </head>
 <body>
 <main>

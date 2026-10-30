@@ -194,6 +194,15 @@ def test_fonts_are_self_hosted(tmp_path):
     assert (tmp_path / "fonts" / "OFL-JetBrainsMono.txt").exists()
 
 
+def test_stylesheet_is_light_theme(tmp_path):
+    build(Fake(), tmp_path)
+    css = (tmp_path / "dashboard.css").read_text()
+    assert "--bg: #f6f8fa;" in css
+    assert "kan73-light-mode" in (tmp_path / "index.html").read_text()
+    for dark in ("#0e1116", "#141b22", "#10201d"):
+        assert dark not in css
+
+
 def test_empty_db_renders_waiting(tmp_path):
     assert build(Fake(), tmp_path) == 0
     data = load(tmp_path)
