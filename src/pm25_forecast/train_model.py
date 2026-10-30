@@ -49,12 +49,18 @@ def make_training_rows(
     return _make_training_rows_with_availability(export_path)[0]
 
 
-def _make_training_rows_with_availability(
-    export_path: Path,
-) -> tuple[
-    dict[int, tuple[np.ndarray, np.ndarray, list[datetime]]],
-    dict[int, list[datetime]],
-]:
+Sample = tuple[list[float], float, datetime, datetime, str]  # x, y, issue, label_avail, station
+
+
+def build_samples(
+    export_path: Path, as_of: datetime | None = None
+) -> tuple[dict[int, list[Sample]], dict[tuple, Any], dict]:
+    """Shared as-of sample builder: per horizon (x, y, issue, label_available, station).
+
+    Also returns the labels and per-station vintages so the caller can report availability counts.
+    ``as_of`` (default now) is the knowledge cut: labels dated or ingested after it are ignored.
+    Retrain (KAN-23) reuses this for its held-out evaluation so features are never duplicated.
+    """
     with duckdb.connect(str(export_path), read_only=True) as con:
         con.execute("SET TimeZone = 'UTC'")
         observations = _rows(
@@ -94,10 +100,8 @@ def _make_training_rows_with_availability(
         for station in {station for station, _ in labels}
     }
 
-    samples: dict[int, list[tuple[list[float], float, datetime, datetime]]] = {
-        h: [] for h in HORIZONS_H
-    }
-    training_as_of = datetime.now(UTC)
+    samples: dict[int, list[Sample]] = {h: [] for h in HORIZONS_H}
+    training_as_of = as_of or datetime.now(UTC)
     for horizon in HORIZONS_H:
         for (station, target_time), (target, target_available) in labels.items():
             if target_time.minute or target_time.second or target_time.microsecond:
@@ -134,8 +138,17 @@ def _make_training_rows_with_availability(
             ]
             if all(math.isnan(x) for x in vector):
                 continue
-            samples[horizon].append((vector, target, issue, target_available))
+            samples[horizon].append((vector, target, issue, target_available, station))
+    return samples, labels, by_station_vintages
 
+
+def _make_training_rows_with_availability(
+    export_path: Path, as_of: datetime | None = None
+) -> tuple[
+    dict[int, tuple[np.ndarray, np.ndarray, list[datetime]]],
+    dict[int, list[datetime]],
+]:
+    samples, labels, by_station_vintages = build_samples(export_path, as_of)
     result = {}
     label_availabilities = {}
     counts = {horizon: len(rows) for horizon, rows in samples.items()}
@@ -217,8 +230,10 @@ def load_model_bundle(artifact: bytes) -> dict[int, lgb.Booster]:
     return boosters
 
 
-def train(export_path: Path, model_version: str) -> tuple[bytes, dict[str, Any]]:
-    data, label_availabilities = _make_training_rows_with_availability(export_path)
+def train(
+    export_path: Path, model_version: str, as_of: datetime | None = None
+) -> tuple[bytes, dict[str, Any]]:
+    data, label_availabilities = _make_training_rows_with_availability(export_path, as_of)
     boosters: dict[str, str] = {}
     metrics: dict[str, Any] = {}
     first_train: datetime | None = None
