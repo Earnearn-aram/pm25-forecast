@@ -30,3 +30,6 @@ mlruns/
 .idea/
 .vscode/
 *.sqlite*
+
+# Static dashboard build output (KAN-25)
+/site/
