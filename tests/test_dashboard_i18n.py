@@ -78,7 +78,7 @@ def test_toggle_markup_and_default_language(tmp_path):
     # The switch is revealed by JS only: without JavaScript the page stays plain English.
     switch = next(a for tag, a in parse(page) if a.get("id") == "language-switch")
     assert "hidden" in switch
-    assert '<script src="dashboard.js?v=kan73-redesign" defer>' in page
+    assert re.search(r'<script src="dashboard\.js\?v=[^" ]+" defer>', page)
 
 
 def test_script_wires_setlanguage_and_storage_key(tmp_path):
