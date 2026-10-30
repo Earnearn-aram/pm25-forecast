@@ -15,7 +15,13 @@ from pm25_forecast.retrain import Decision, Evaluation, decide, retrain_version
 from pm25_forecast.settings import Settings
 from pm25_forecast.storage import db
 from pm25_forecast.storage.guard import RunSkipped, run_entrypoint
-from pm25_forecast.storage.registry import read_champion, read_model, write_model
+from pm25_forecast.storage.registry import (
+    artifact_sha256,
+    read_champion,
+    read_model,
+    write_model,
+)
+from pm25_forecast.train_model import build_samples, train
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 NOW = datetime(2026, 2, 10, 0, 30, tzinfo=UTC)  # holdout_start = 2026-02-03 00:00 UTC
@@ -86,6 +92,22 @@ def write_export(path: Path, hours: int = 960) -> None:
             for i in range(hours)
         ]
         con.executemany("INSERT INTO observations VALUES (?, ?, ?, ?, ?)", rows)
+
+
+def register_variant(reg, source, name, *, horizons=None, manifest_update=None):
+    """Register a copy of an existing bundle under a new name (optionally fewer horizons)."""
+    artifact, manifest = read_model(reg, source)
+    if horizons is not None:
+        bundle = json.loads(artifact)
+        bundle["horizons"] = {h: t for h, t in bundle["horizons"].items() if h in horizons}
+        artifact = json.dumps(bundle, separators=(",", ":")).encode()
+    manifest = {
+        **manifest,
+        "version": name,
+        "artifact_sha256": artifact_sha256(artifact),
+        **(manifest_update or {}),
+    }
+    write_model(reg, name, artifact, manifest)
 
 
 def export_fake(path, _url):
@@ -161,6 +183,19 @@ def test_keep_when_incumbent_mae_is_zero():
     assert decide(ev("cand", mae=0.0), ev("champ", mae=0.0)).action == "keep"
 
 
+def test_keep_when_candidate_regresses_at_another_horizon_even_if_24h_wins():
+    cand, champ = ev("cand", mae=5.0), ev("champ", mae=10.0)
+    worse = [(6, ev("cand", mae=10.21), ev("champ", mae=10.0))]
+    decision = decide(cand, champ, other_horizons=worse)
+    assert decision.action == "keep"
+    assert "+6h" in decision.reason
+    # exactly 2% worse is not "more than 2%"; better at the other horizon is fine
+    edge = [(6, ev("cand", mae=10.2), ev("champ", mae=10.0))]
+    assert decide(cand, champ, other_horizons=edge).action == "promote"
+    better = [(12, ev("cand", mae=8.0), ev("champ", mae=10.0))]
+    assert decide(cand, champ, other_horizons=better).action == "promote"
+
+
 # --- version naming and the training window ---------------------------------------------------
 
 
@@ -185,6 +220,53 @@ def test_training_export_keeps_only_rows_before_the_holdout(tmp_path):
     assert count == 33 * 24
 
 
+def test_training_export_drops_rows_that_arrived_after_the_cutoff(tmp_path):
+    full, cut = tmp_path / "full.duckdb", tmp_path / "cut.duckdb"
+    write_export(full)
+    late_label = HOLDOUT_START - timedelta(hours=2)  # dated before the cutoff, ingested after it
+    issue = HOLDOUT_START - timedelta(hours=30)
+    with duckdb.connect(str(full)) as con:
+        con.execute("SET TimeZone = 'UTC'")
+        con.execute(
+            "UPDATE observations SET available_at = ? WHERE ts = ?",
+            [HOLDOUT_START + timedelta(hours=5), late_label],
+        )
+        con.execute(
+            "INSERT INTO forecast_vintages VALUES "
+            "('59t', ?, ?, 'cams_global', 'r', 20.0, ?), "
+            "('59t', ?, ?, 'cams_global', 'r', 21.0, ?)",
+            [
+                issue,
+                issue + timedelta(hours=24),
+                issue + timedelta(hours=1),  # known in time: kept
+                issue,
+                issue + timedelta(hours=25),
+                HOLDOUT_START + timedelta(hours=1),  # ingested late: dropped
+            ],
+        )
+    retrain.make_training_export(full, cut, HOLDOUT_START)
+    with duckdb.connect(str(cut), read_only=True) as con:
+        con.execute("SET TimeZone = 'UTC'")
+        late = con.execute("SELECT count(*) FROM observations WHERE ts = ?", [late_label])
+        assert late.fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM observations").fetchone()[0] == 33 * 24 - 1
+        vintages = con.execute("SELECT pm25_pred FROM forecast_vintages").fetchall()
+    assert vintages == [(20.0,)]
+
+
+def test_build_samples_as_of_ignores_labels_after_the_cut(tmp_path):
+    export = tmp_path / "history.duckdb"
+    write_export(export, hours=96)
+    as_of = START + timedelta(hours=60)
+
+    cut, _labels, _vintages = build_samples(export, as_of)
+    for horizon, rows in cut.items():
+        assert rows
+        for _x, _y, issue, label_available, _station in rows:
+            assert issue + timedelta(hours=horizon) <= as_of and label_available <= as_of
+    assert len(build_samples(export)[0][24]) > len(cut[24])
+
+
 # --- the run ----------------------------------------------------------------------------------
 
 
@@ -204,6 +286,7 @@ def test_run_registers_candidate_and_only_recommends_when_auto_promote_is_off(ca
     table = result.comparison["+24h"]
     assert table["n_pairs"] >= 100
     assert set(table["models"]) == {result.version, "persistence-24h"}
+    assert result.artifact_bytes == len(read_model(reg, result.version)[0])
     assert table["models"][result.version]["mae"] < table["models"]["persistence-24h"]["mae"]
     assert set(result.comparison) == {"+6h", "+12h", "+24h"}
 
@@ -212,12 +295,19 @@ def test_run_registers_candidate_and_only_recommends_when_auto_promote_is_off(ca
     payload = json.loads(summary[0].split("RUN_SUMMARY ", 1)[1])
     assert payload["job"] == "retrain" and payload["auto_promote"] is False
     assert payload["decision"]["action"] == "promote"
+    assert payload["candidate_artifact_bytes"] == result.artifact_bytes > 0
     assert "+24h" in payload["comparison"]
 
 
 def test_training_window_ends_before_the_holdout_window():
-    reg = Registry()
-    result = do_run(reg, [])
+    reg, seen = Registry(), {}
+
+    def spy(path, version, as_of=None):
+        seen["as_of"] = as_of
+        return train(path, version, as_of=as_of)
+
+    result = do_run(reg, [], trainer=spy)
+    assert seen["as_of"] == HOLDOUT_START  # the training knowledge cut is the holdout start
     _artifact, manifest = read_model(reg, result.version)
     assert datetime.fromisoformat(manifest["training_window"]["end"]) < HOLDOUT_START
     assert manifest["holdout_start"] == HOLDOUT_START.isoformat()
@@ -253,13 +343,13 @@ def test_challenger_is_scored_when_set_and_skipped_when_unloadable():
         now=NOW + timedelta(hours=1),
         settings=settings(challenger_model_version=first.version),
     )
-    assert first.version in with_challenger.comparison["+24h"]["models"]
+    assert first.version in with_challenger.challenger_comparison["+24h"]["models"]
     assert with_challenger.roles["challenger"] == first.version
 
     missing = do_run(
         reg, [], now=NOW + timedelta(hours=2), settings=settings(challenger_model_version="nope")
     )
-    assert "nope" not in missing.comparison["+24h"]["models"]
+    assert missing.challenger_comparison == {}
     assert "challenger_error" in missing.roles
     assert missing.status == "ok"
 
@@ -276,6 +366,47 @@ def test_unloadable_champion_means_keep_and_a_failed_run():
     assert result.decision.action == "keep"
     assert result.status == "failed" and result.failures
     assert reg.champion == "bad-champion"  # never promoted over a champion we could not score
+
+
+def test_champion_that_cannot_be_scored_means_keep_never_promote():
+    reg, alerts = Registry(), []
+    first = do_run(reg, [])
+    register_variant(reg, first.version, "partial-champion", horizons={"6"})  # no +24 h booster
+    reg.champion = "partial-champion"
+
+    result = do_run(reg, alerts, now=NOW + timedelta(hours=1), settings=settings(auto_promote=True))
+    assert result.decision.action == "keep"
+    assert "could not be scored" in result.decision.reason
+    assert result.status == "failed"
+    assert reg.champion == "partial-champion"
+    assert not result.promoted and not result.recommended
+
+
+def test_challenger_never_changes_the_decision_pairs():
+    reg = Registry()
+    first = do_run(reg, [])
+    register_variant(reg, first.version, "partial-challenger", horizons={"6"})
+    second = do_run(reg, [], settings=settings(challenger_model_version="partial-challenger"))
+
+    assert second.comparison["+24h"]["n_pairs"] == first.comparison["+24h"]["n_pairs"]
+    assert "partial-challenger" not in second.comparison["+6h"]["models"]
+    assert "partial-challenger" in second.challenger_comparison["+6h"]["models"]
+
+
+def test_overlap_with_the_holdout_is_flagged_in_summary_and_alert(caplog):
+    reg, alerts = Registry(), []
+    first = do_run(reg, [])
+    window = {"start": "2026-01-01T00:00:00+00:00", "end": "2026-02-05T00:00:00+00:00"}
+    overlapping = {"training_window": window}
+    register_variant(reg, first.version, "overlapping", manifest_update=overlapping)
+
+    with caplog.at_level("INFO"):
+        result = do_run(reg, alerts, settings=settings(challenger_model_version="overlapping"))
+    assert any("challenger overlapping overlaps holdout" in w for w in result.warnings)
+    assert result.recommended
+    assert any("recommend promote" in a and "overlaps holdout" in a for a in alerts)
+    summary = [r.getMessage() for r in caplog.records if "RUN_SUMMARY" in r.getMessage()][-1]
+    assert "overlaps holdout" in summary
 
 
 def test_insufficient_history_fails_without_registering_or_promoting():
@@ -307,8 +438,11 @@ def test_auto_promote_defaults_off_and_parses_strictly(monkeypatch):
     assert Settings(auto_promote="").auto_promote is False  # unset repo variable
     assert Settings(auto_promote="false").auto_promote is False
     assert Settings(auto_promote="true").auto_promote is True
-    with pytest.raises(ValidationError):
-        Settings(auto_promote="maybe")
+    assert Settings(auto_promote=" TRUE ").auto_promote is True
+    assert Settings(auto_promote="False").auto_promote is False
+    for bad in ("maybe", "yes", "1", "on", "t", "y"):
+        with pytest.raises(ValidationError):
+            Settings(auto_promote=bad)
 
 
 # --- DB down and exit codes -------------------------------------------------------------------

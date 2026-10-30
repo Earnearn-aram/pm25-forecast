@@ -38,11 +38,16 @@ class Settings(BaseSettings):
 
     @field_validator("auto_promote", mode="before")
     @classmethod
-    def _blank_auto_promote_is_off(cls, v: object) -> object:
-        if isinstance(v, str):
-            v = v.strip()
-            return v or False
-        return v
+    def _auto_promote_strict(cls, v: object) -> bool:
+        """Only "true", "false" or blank (any case) is accepted; "1", "yes", "on" are errors."""
+        if isinstance(v, bool):
+            return v
+        text = v.strip().lower() if isinstance(v, str) else None
+        if text in ("", "false"):
+            return False
+        if text == "true":
+            return True
+        raise ValueError('AUTO_PROMOTE must be "true", "false" or blank')
 
     @field_validator("challenger_model_version", mode="before")
     @classmethod

@@ -48,7 +48,6 @@ from pm25_forecast.models.baselines import (
 from pm25_forecast.models.serving import (
     ModelLoadError,
     ServingModel,
-    load_registered_model,
     load_serving_model,
 )
 from pm25_forecast.monitoring.alerts import make_alert, safe_alert
@@ -102,6 +101,8 @@ def decide(
     incumbent: Evaluation | None,
     min_pairs: int = MIN_PAIRS,
     min_rel_gain: float = MIN_REL_GAIN,
+    *,
+    other_horizons: Sequence[tuple[int, Evaluation, Evaluation]] = (),
 ) -> Decision:
     """Promote only if the candidate beats the incumbent's MAE by at least ``min_rel_gain``
     (relative) on at least ``min_pairs`` matched pairs AND beats persistence. Otherwise keep.
@@ -109,6 +110,10 @@ def decide(
     ``incumbent`` is the current champion on the same pairs; None means there is no champion, so
     only the pairs and persistence checks apply. Boundaries: ``n == min_pairs`` passes, a relative
     gain of exactly ``min_rel_gain`` passes, equal to persistence does not beat it.
+
+    ``other_horizons`` holds ``(horizon_h, candidate, incumbent)`` for the other horizons both
+    models serve. A candidate worse than the incumbent by more than ``min_rel_gain`` (relative
+    MAE) at any of them is kept out, even if +24 h wins.
     """
     gain = None
     if incumbent is not None and incumbent.mae > 0 and math.isfinite(incumbent.mae):
@@ -124,6 +129,10 @@ def decide(
         "rel_gain_vs_incumbent": gain,
         "min_pairs": min_pairs,
         "min_rel_gain": min_rel_gain,
+        "other_horizons": [
+            {"horizon_h": h, "candidate_mae": c.mae, "incumbent_mae": i.mae, "n_pairs": c.n}
+            for h, c, i in other_horizons
+        ],
     }
 
     def keep(reason: str) -> Decision:
@@ -148,6 +157,12 @@ def decide(
         )
     if incumbent.n < min_pairs:
         return keep(f"incumbent has only {incumbent.n} matched pairs, need at least {min_pairs}")
+    for horizon, cand, inc in other_horizons:
+        if inc.mae > 0 and cand.mae / inc.mae - 1 > min_rel_gain + 1e-9:
+            return keep(
+                f"candidate is worse than champion {inc.version} at +{horizon}h "
+                f"(MAE {cand.mae:.3f} vs {inc.mae:.3f}, more than {min_rel_gain:.0%})"
+            )
     if gain is None:
         return keep("incumbent MAE is zero or not finite, no relative gain can be computed")
     if gain < min_rel_gain - 1e-9:  # tolerance: 1 - 0.98 is a hair under 0.02 in floating point
@@ -256,18 +271,24 @@ def comparison_table(comparisons: Mapping[int, Comparison]) -> dict[str, Any]:
 
 
 def make_training_export(full: Path, destination: Path, cutoff: datetime) -> None:
-    """Copy the export keeping only rows strictly before ``cutoff`` (the training window)."""
+    """Copy the export keeping only rows known before ``cutoff`` (the training window).
+
+    A row must be dated before the cutoff AND have arrived before it (``available_at``), so a
+    label or forecast vintage ingested late, after the cutoff, cannot leak into training.
+    """
     source = str(full).replace("'", "''")
     with duckdb.connect(str(destination)) as con:
         con.execute("SET TimeZone = 'UTC'")
         con.execute(f"ATTACH '{source}' AS src (READ_ONLY)")
         con.execute(
-            "CREATE TABLE observations AS SELECT * FROM src.observations WHERE ts < ?", [cutoff]
+            "CREATE TABLE observations AS "
+            "SELECT * FROM src.observations WHERE ts < ? AND available_at < ?",
+            [cutoff, cutoff],
         )
         con.execute(
             "CREATE TABLE forecast_vintages AS "
-            "SELECT * FROM src.forecast_vintages WHERE issue_time < ?",
-            [cutoff],
+            "SELECT * FROM src.forecast_vintages WHERE issue_time < ? AND available_at < ?",
+            [cutoff, cutoff],
         )
         con.execute("DETACH src")
 
@@ -291,6 +312,23 @@ def _registered(con: Any, version: str) -> bool:
     return True
 
 
+def _flag_overlap(
+    result: RetrainResult, role: str, version: str, manifest: Mapping[str, Any], start: datetime
+) -> None:
+    """Warn when a model's training data can reach into the held-out window (optimistic score)."""
+    window = manifest.get("training_window")
+    try:
+        end = require_utc(datetime.fromisoformat(window["end"]))
+    except (KeyError, TypeError, ValueError):
+        result.warnings.append(f"{role} {version}: training window unknown, overlap not ruled out")
+        return
+    if end + timedelta(hours=max(HORIZONS_H)) >= start:
+        result.warnings.append(
+            f"{role} {version} overlaps holdout (trained up to {end.isoformat()}); "
+            "its scores may be optimistic"
+        )
+
+
 @dataclass
 class RetrainResult:
     run_id: str
@@ -299,6 +337,9 @@ class RetrainResult:
     decision: Decision | None = None
     comparison: dict[str, Any] = field(default_factory=dict)
     roles: dict[str, Any] = field(default_factory=dict)
+    challenger_comparison: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    artifact_bytes: int = 0
     promoted: bool = False
     recommended: bool = False
     failures: list[str] = field(default_factory=list)
@@ -316,6 +357,9 @@ def _summary(result: RetrainResult, settings: Settings, **extra: Any) -> None:
             "auto_promote": settings.auto_promote,
             "roles": result.roles,
             "comparison": result.comparison,
+            "challenger_comparison": result.challenger_comparison,
+            "candidate_artifact_bytes": result.artifact_bytes,
+            "warnings": result.warnings,
             "decision": None
             if decision is None
             else {"action": decision.action, "reason": decision.reason, **decision.metrics},
@@ -333,7 +377,7 @@ def run(
     connect: Callable[[str], Any] = db.connect,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     export: Callable[[Path, str], Any] | None = None,
-    trainer: Callable[[Path, str], tuple[bytes, dict[str, Any]]] = train,
+    trainer: Callable[..., tuple[bytes, dict[str, Any]]] = train,
     holdout_days: int = HOLDOUT_DAYS,
     alert: Callable[[str], None] | None = None,
     workdir: Path | None = None,
@@ -362,7 +406,7 @@ def run(
         samples = build_samples(full)[0]
         make_training_export(full, train_copy, holdout_start)
         try:
-            artifact, manifest = trainer(train_copy, result.version)
+            artifact, manifest = trainer(train_copy, result.version, as_of=holdout_start)
         except ValueError as exc:  # too little data before the held-out window
             result.status = "failed"
             result.failures.append(f"training rejected: {exc}")
@@ -370,14 +414,16 @@ def run(
             return result
 
     manifest = {**manifest, **window, "source": "retrain"}
+    result.artifact_bytes = len(artifact)
     publish_model(url, result.version, artifact, manifest, connect=connect)
-    models: dict[str, ServingModel] = {
-        result.version: load_serving_model(result.version, artifact, manifest)
-    }
+    candidate = load_serving_model(result.version, artifact, manifest)
 
     champion_version: str | None = None
+    champion: ServingModel | None = None
     champion_error: str | None = None
-    challenger = settings.challenger_model_version
+    challenger_version = settings.challenger_model_version
+    challenger: ServingModel | None = None
+    challenger_error: str | None = None
     with open_db(connect, url) as con:
         try:
             champion_version, champion_artifact, champion_manifest = read_champion(con)
@@ -385,39 +431,68 @@ def run(
             champion_version = None  # no champion yet
         if champion_version is not None:
             try:
-                models[champion_version] = load_serving_model(
+                champion = load_serving_model(
                     champion_version, champion_artifact, champion_manifest
+                )
+                _flag_overlap(
+                    result, "champion", champion_version, champion_manifest, holdout_start
                 )
             except ModelLoadError as exc:
                 champion_error = f"champion {champion_version} cannot be loaded: {exc}"
-        challenger_error: str | None = None
-        if challenger and challenger not in (PERSISTENCE_MODEL_VERSION, *models):
+        already_scored = {PERSISTENCE_MODEL_VERSION, champion_version}
+        if challenger_version and challenger_version not in already_scored:
             try:
-                models[challenger] = load_registered_model(con, challenger)
-            except ModelLoadError as exc:
-                challenger_error = f"challenger {challenger} skipped: {exc}"
+                challenger_artifact, challenger_manifest = read_model(con, challenger_version)
+                challenger = load_serving_model(
+                    challenger_version, challenger_artifact, challenger_manifest
+                )
+                _flag_overlap(
+                    result, "challenger", challenger_version, challenger_manifest, holdout_start
+                )
+            except (LookupError, ValueError) as exc:  # ModelLoadError is a ValueError
+                challenger_error = f"challenger {challenger_version} skipped: {exc}"
     result.roles = {
         "candidate": result.version,
         "champion": champion_version,
-        "challenger": challenger,
+        "challenger": challenger_version,
         **({"challenger_error": challenger_error} if challenger_error else {}),
         **window,
     }
 
-    comparisons = compare(samples, models, holdout_start)
+    # The decision set is candidate + champion + persistence pairs only. The challenger is
+    # reported on its own pairs and can never shrink or change that set.
+    decision_models = {result.version: candidate}
+    if champion is not None and champion_version is not None:
+        decision_models[champion_version] = champion
+    comparisons = compare(samples, decision_models, holdout_start)
     result.comparison = comparison_table(comparisons)
+    if challenger is not None and challenger_version is not None:
+        pair = {result.version: candidate, challenger_version: challenger}
+        result.challenger_comparison = comparison_table(compare(samples, pair, holdout_start))
+
     headline = comparisons.get(HEADLINE_HORIZON_H, Comparison(0, {}))
     candidate_eval = evaluation(headline, result.version)
     if candidate_eval is None:
         candidate_eval = Evaluation(result.version, 0, math.nan, math.nan)
-    if champion_error:
-        # Never promote against a champion we could not score.
-        result.decision = Decision("keep", champion_error, {"candidate": result.version})
-        result.failures.append(champion_error)
+    incumbent = None if champion_version is None else evaluation(headline, champion_version)
+    if champion_version is not None and incumbent is None:
+        # A champion exists but cannot be scored: never promote over it.
+        reason = champion_error or (
+            f"champion {champion_version} could not be scored at +{HEADLINE_HORIZON_H}h "
+            "on the held-out pairs"
+        )
+        result.decision = Decision("keep", reason, {"candidate": result.version})
+        result.failures.append(reason)
     else:
-        incumbent = None if champion_version is None else evaluation(headline, champion_version)
-        result.decision = decide(candidate_eval, incumbent)
+        others = []
+        for horizon, comparison in comparisons.items():
+            cand_h = evaluation(comparison, result.version)
+            inc_h = None if champion_version is None else evaluation(comparison, champion_version)
+            if horizon != HEADLINE_HORIZON_H and cand_h is not None and inc_h is not None:
+                others.append((horizon, cand_h, inc_h))
+        result.decision = decide(candidate_eval, incumbent, other_horizons=others)
 
+    note = f" Warning: {'; '.join(result.warnings)}." if result.warnings else ""
     if result.decision.action == "promote":
         if settings.auto_promote:
             with open_db(connect, url) as con:
@@ -426,16 +501,18 @@ def run(
             if promoted_version != result.version or promoted_artifact != artifact:
                 raise ValueError("production champion readback does not match promoted model")
             result.promoted = True
-            safe_alert(alert, f"AUTO_PROMOTE: {result.version} is now the production champion")
+            safe_alert(
+                alert, f"AUTO_PROMOTE: {result.version} is now the production champion.{note}"
+            )
         else:
             result.recommended = True
             safe_alert(
                 alert,
                 f"recommend promote {result.version}: {result.decision.reason}. Not applied "
                 "(AUTO_PROMOTE is off). Run: python -m pm25_forecast.registry_cli promote "
-                f"{result.version} --confirm",
+                f"{result.version} --confirm.{note}",
             )
-    if champion_error:
+    if result.failures:
         result.status = "failed"
     _summary(result, settings)
     return result
