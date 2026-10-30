@@ -1,0 +1,71 @@
+# DRAFT for KAN-23. The agent token has no `workflow` scope, so this is committed as text.
+# Owner: copy to .github/workflows/retrain.yml (drop the .txt), then:
+#   1. Secrets and variables already used by the other workflows: DATABASE_URL, ALERT_WEBHOOK_URL
+#      (secrets), CHALLENGER_MODEL_VERSION (variable, optional).
+#   2. AUTO_PROMOTE is a repository VARIABLE and stays UNSET. Unset or anything but "true" means the
+#      run only registers the candidate and alerts "recommend promote <version>"; production is
+#      not touched. Set it to "true" only when you deliberately want weekly auto-promotion.
+#   3. Run it once with "Run workflow" (workflow_dispatch) and read the RUN_SUMMARY line before
+#      relying on cron. See docs/retrain.md.
+#   4. Actions are pinned by commit sha, copied from docs/predict-workflow.yml.txt.
+# Cron: Monday 03:17 UTC (off the hour). GitHub cron is best effort (late or skipped); a skipped
+# week is simply caught up by the next run or a manual dispatch. Re-running on the same day is
+# safe: versions are retrain-YYYYMMDD, then -2, -3 (registered versions are immutable).
+# The job reads the database, writes a new registry row and, only with AUTO_PROMOTE=true, moves
+# the champion pointer. If the DB is unreachable it skips, alerts and exits non-zero.
+# Failure alerting: the last step posts the job status and run link to ALERT_WEBHOOK_URL
+# when any step fails or the job is cancelled (e.g. timeout), as in the predict template.
+name: Retrain
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time. Do not cancel a running job: a half-finished run could leave a registered
+# candidate without its comparison.
+concurrency:
+  group: retrain
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Retrain
+        # Secrets come in through env only; they are never echoed or put on a command line.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }} # unset = no challenger
+          AUTO_PROMOTE: ${{ vars.AUTO_PROMOTE }} # unset = recommend only; "true" = promote
+        run: uv run --no-dev python -m pm25_forecast.retrain
+      # Alert when any step above failed, or the job was cancelled (timeout-minutes hit).
+      # Independent of the retrain module: no DB, no settings. If uv or the venv is unusable a curl
+      # fallback posts a fixed message. The webhook URL is a secret: it comes in through env,
+      # reaches curl on stdin (-K -), never the command line, and is never echoed.
+      - name: Alert on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          uv run --no-dev python -m pm25_forecast.monitoring.notify failure && exit 0
+          [ -n "$ALERT_WEBHOOK_URL" ] || { echo "ALERT_WEBHOOK_URL is not set"; exit 0; }
+          msg="[pm25 ci] ${JOB_STATUS:-failure} (fallback): workflow ${GITHUB_WORKFLOW}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -

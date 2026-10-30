@@ -76,6 +76,17 @@ jobs:
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }}
         run: uv run --no-dev python -m pm25_forecast.score
+      # KAN-21: data quality checks (freshness, missing hours, range, shape). Writes
+      # data_quality_checks; alerts only on new fails and recoveries. Needs migration 003 applied.
+      - name: Quality
+        if: success() || failure()
+        timeout-minutes: 4
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
+          CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }}
+        run: uv run --no-dev python -m pm25_forecast.quality
       # Alert when any step above failed, or the job was cancelled (timeout-minutes hit).
       # Independent of the predict module: no DB, no settings. If uv or the venv is unusable a curl
       # fallback posts a fixed message. The webhook URL is a secret: it comes in through env,

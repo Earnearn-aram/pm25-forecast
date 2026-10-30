@@ -1,0 +1,67 @@
+# DRAFT for KAN-22. The agent token has no `workflow` scope, so this is committed as text.
+# Owner: copy to .github/workflows/drift.yml (drop the .txt), then:
+#   1. Same secrets/variables as Predict: DATABASE_URL, ALERT_WEBHOOK_URL (secrets),
+#      STATION_LOCATIONS and CHALLENGER_MODEL_VERSION (variables).
+#   2. Apply src/pm25_forecast/storage/migrations/004_drift_checks.sql to the database first.
+#   3. Run it once with "Run workflow" (workflow_dispatch) and check the RUN_SUMMARY line.
+#   4. Actions are pinned by commit sha, copied from docs/predict-workflow.yml.txt.
+# Cron: 02:17 UTC daily, off the hour. GitHub cron is best effort (late or skipped runs); results
+# are upserted per UTC day, so a late or doubled run never duplicates rows.
+# The drift step only reads the database. If it is unreachable the run is skipped, an alert is
+# sent and the job fails (storage/guard.py). Drift alerts (PSI > 0.2) go to the webhook but do not
+# fail the job; see docs/drift.md.
+# Failure alerting: the last step posts the job status and run link to ALERT_WEBHOOK_URL
+# when any step fails or the job is cancelled (e.g. timeout), as in the predict template.
+name: Drift
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # daily, 02:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time. Do not cancel a running job: a half-finished run would skip its writes.
+concurrency:
+  group: drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # reads the training window and 7 days of observations
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Drift check
+        # Secrets come in through env only; they are never echoed or put on a command line.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          STATION_LOCATIONS: ${{ vars.STATION_LOCATIONS }}
+          CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }}
+        run: uv run --no-dev python -m pm25_forecast.drift
+      # Alert when any step above failed, or the job was cancelled (timeout-minutes hit).
+      # Independent of the drift module: no DB, no settings. If uv or the venv is unusable a curl
+      # fallback posts a fixed message. The webhook URL is a secret: it comes in through env,
+      # reaches curl on stdin (-K -), never the command line, and is never echoed.
+      - name: Alert on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          uv run --no-dev python -m pm25_forecast.monitoring.notify failure && exit 0
+          [ -n "$ALERT_WEBHOOK_URL" ] || { echo "ALERT_WEBHOOK_URL is not set"; exit 0; }
+          msg="[pm25 ci] ${JOB_STATUS:-failure} (fallback): workflow ${GITHUB_WORKFLOW}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -
