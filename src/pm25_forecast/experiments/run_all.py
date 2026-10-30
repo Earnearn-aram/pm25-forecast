@@ -40,6 +40,7 @@ KINDS = ("direct", "resid", "logratio")
 LGB_GRID = [(o, nl) for o in ("l2", "l1") for nl in (7, 31)]
 ALPHAS = (0.1, 1.0, 10.0, 100.0)
 CANDS = (
+    "val_best",
     "seasonal",
     "current",
     "smooth",
@@ -288,6 +289,9 @@ def predict_test(best, tab, m, run, h):
     bst = lgb.train(cp, lgb.Dataset(Xc[tr], label=tab.y[tr], feature_name=names), 200)
     FIT_COUNT["lgbm_refit"] += 1
     out["current"] = np.maximum(0.0, bst.predict(Xc[te]))
+    # primary candidate: family with the lowest validation MAE (chosen without looking at test)
+    fam_best = min(("lgbm_direct", "lgbm_resid", "ridge"), key=lambda f: best[f]["val_mae"])
+    out["val_best"] = out[fam_best]
     out["seasonal"] = tab.feats["pm25_t24" if h < 24 else "pm25_t48"][te]
     return out
 
@@ -574,11 +578,16 @@ def main(argv=None):
                 "preds": preds,
             }
             store[(run["name"], h)] = rec
-            selections[f"{run['name']}/+{h}"] = {
-                fam: {k: v for k, v in b["meta"].items() if k not in ("names", "cat")}
-                | {"val_mae": b["val_mae"], "names": b["meta"].get("names")}
-                for fam, b in best.items()
-            } | {"global": {k: v["meta"] for k, v in gl.items()}}
+            vb = min(("lgbm_direct", "lgbm_resid", "ridge"), key=lambda f: best[f]["val_mae"])
+            selections[f"{run['name']}/+{h}"] = (
+                {"val_best_family": vb}
+                | {
+                    fam: {k: v for k, v in b["meta"].items() if k not in ("names", "cat")}
+                    | {"val_mae": b["val_mae"], "names": b["meta"].get("names")}
+                    for fam, b in best.items()
+                }
+                | {"global": {k: v["meta"] for k, v in gl.items()}}
+            )
             log(
                 f"{run['name']} +{h}: n_test={int(te.sum())} persistence MAE "
                 f"{mae(rec['lat'], rec['y']):.3f}  "

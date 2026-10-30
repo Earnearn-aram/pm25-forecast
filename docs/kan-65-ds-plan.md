@@ -276,3 +276,26 @@ Changes to the plan (everything else stands):
 8. Data proposals (not fetched): weather (wind, boundary-layer height, rain), fire hotspots (FIRMS),
    traffic, and the raw hourly Air4Thai history before 2026-07 to remove the regime break; see the
    report.
+
+---
+
+# Amendment 4: primary candidate made explicit; transparent log of a first run
+
+Written after a first complete run (log in this history: commit "walk-forward harness") whose
+candidate list lacked the "val-selected best" candidate promised in Amendment 2. Honest disclosure
+of what was seen before this amendment: per-family results of that first run (all 10 candidates,
+all runs). The change below does not alter any model, split, grid or seed; it only adds the
+candidate that Amendment 2 already defined as "best candidate" and recomputes the multiplicity.
+
+1. New candidate `val_best` = the family with the lowest validation MAE among {LightGBM direct,
+   LightGBM residual (incl. log-ratio), ridge} for each run and horizon (validation MAE only; no
+   test information). It is the single primary candidate for the promotion rule (Amendment 3 item 6).
+2. Claims: 11 candidates x 3 horizons x 3 groups = 99 (Bonferroni 0.05/99, Holm over 99).
+   Per-run comparisons: 11 x 3 x 7 runs = 231. Total comparisons vs persistence: 330.
+3. Actual tuning counts are reported from the script counters (early-stopped LightGBM fits, ridge
+   fits, refits). The "1,536" figure in Amendment 2 was a pre-Amendment-3 estimate and is superseded.
+4. The high-pollution safeguard (rule d) is applied exactly as written in Amendment 3, in both
+   forms (conditioning on the realised target > 37.5, and on the forecast-time-observable latest
+   reading > 37.5). The report will state the outcome even if it fails and will separately discuss that
+   conditioning on the realised outcome penalises any shrinking predictor mechanically; that
+   discussion does not change the pre-registered verdict.
