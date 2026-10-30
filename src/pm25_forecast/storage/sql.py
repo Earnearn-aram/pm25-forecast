@@ -160,3 +160,7 @@ def write_rows(
 PURGE_OLD_PREDICTIONS = """
 DELETE FROM predictions WHERE issue_time < now() - interval '90 days'
 """
+# Dry-run count with the same condition as the purge (run by `pm25_forecast.housekeeping`, KAN-24).
+COUNT_OLD_PREDICTIONS = """
+SELECT count(*) FROM predictions WHERE issue_time < now() - interval '90 days'
+"""

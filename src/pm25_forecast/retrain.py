@@ -15,6 +15,12 @@ Run with ``python -m pm25_forecast.retrain``. One run:
 5. ``decide`` (the single decision function) returns promote or keep.
 6. Production changes only when ``AUTO_PROMOTE=true``. Otherwise a promote decision is logged and
    alerted as "recommend promote <version>" and the champion pointer is left alone.
+7. Every outcome is written to ``model_events`` (KAN-24): ``promote`` (actor ``auto``, in the same
+   transaction as the pointer change), ``recommend`` or ``keep`` (with the comparison metrics).
+
+``--if-drift`` (KAN-24) makes the run conditional: it exits 0 without training unless the latest
+drift run has an alert for the challenger (``CHALLENGER_MODEL_VERSION``) or, if none is set, the
+production champion. A triggered run is the normal run (still recommend-only unless AUTO_PROMOTE).
 
 The RUN_SUMMARY line holds the whole comparison table and the decision. DB down: the run is
 skipped, alerted, exit 1. Configuration error: exit 2. Failed run (e.g. not enough data): exit 1.
@@ -37,6 +43,7 @@ import duckdb
 from pydantic import ValidationError
 
 from pm25_forecast.collector import ConfigError, default_run_id, open_db
+from pm25_forecast.drift import latest_drift_alert
 from pm25_forecast.export_history import export_history
 from pm25_forecast.features import FEATURE_NAMES
 from pm25_forecast.models.baselines import (
@@ -56,10 +63,12 @@ from pm25_forecast.settings import Settings, get_settings
 from pm25_forecast.storage import db
 from pm25_forecast.storage.guard import RunSkipped, run_entrypoint
 from pm25_forecast.storage.registry import (
+    SELECT_CHAMPION,
     promote_model,
     publish_model,
     read_champion,
     read_model,
+    record_event,
 )
 from pm25_forecast.train_model import build_samples, train
 
@@ -312,6 +321,14 @@ def _registered(con: Any, version: str) -> bool:
     return True
 
 
+def drift_target(con: Any, settings: Settings) -> str | None:
+    """The model whose drift decides an ``--if-drift`` run: the challenger, else the champion."""
+    if settings.challenger_model_version:
+        return settings.challenger_model_version
+    row = con.execute(SELECT_CHAMPION, {}).fetchone()
+    return None if row is None else row[0]
+
+
 def _flag_overlap(
     result: RetrainResult, role: str, version: str, manifest: Mapping[str, Any], start: datetime
 ) -> None:
@@ -381,6 +398,7 @@ def run(
     holdout_days: int = HOLDOUT_DAYS,
     alert: Callable[[str], None] | None = None,
     workdir: Path | None = None,
+    if_drift: bool = False,
 ) -> RetrainResult:
     """One retrain run. Driver connection errors propagate for `run_entrypoint` to map."""
     now = require_utc(clock())
@@ -389,6 +407,20 @@ def run(
     if holdout_days < 1:
         raise ConfigError("--holdout-days must be at least 1")
     url = settings.database_url.get_secret_value()
+    if if_drift:
+        with open_db(connect, url) as con:
+            target = drift_target(con, settings)
+            triggered = target is not None and latest_drift_alert(con, target, now=now)
+        if not triggered:
+            skipped = RetrainResult(run_id=default_run_id(now), status="skipped")
+            _summary(
+                skipped,
+                settings,
+                if_drift=True,
+                drift_model=target,
+                skip_reason="no drift alert" if target else "no challenger or champion to check",
+            )
+            return skipped
     do_export = export or (lambda path, u: export_history(path, u, connect=connect))
 
     holdout_start = now.replace(minute=0, second=0, microsecond=0) - timedelta(days=holdout_days)
@@ -493,10 +525,18 @@ def run(
         result.decision = decide(candidate_eval, incumbent, other_horizons=others)
 
     note = f" Warning: {'; '.join(result.warnings)}." if result.warnings else ""
+    event_metrics = {**result.decision.metrics, "comparison": result.comparison}
     if result.decision.action == "promote":
         if settings.auto_promote:
             with open_db(connect, url) as con:
-                promote_model(con, result.version)
+                # One transaction: the pointer change and its model_events row commit together.
+                promote_model(
+                    con,
+                    result.version,
+                    actor="auto",
+                    reason=result.decision.reason,
+                    metrics=event_metrics,
+                )
                 promoted_version, promoted_artifact, _ = read_champion(con)
             if promoted_version != result.version or promoted_artifact != artifact:
                 raise ValueError("production champion readback does not match promoted model")
@@ -506,11 +546,32 @@ def run(
             )
         else:
             result.recommended = True
+            with open_db(connect, url) as con:
+                record_event(
+                    con,
+                    "recommend",
+                    result.version,
+                    previous_version=champion_version,
+                    actor="retrain",
+                    metrics=event_metrics,
+                    reason=result.decision.reason,
+                )
             safe_alert(
                 alert,
                 f"recommend promote {result.version}: {result.decision.reason}. Not applied "
                 "(AUTO_PROMOTE is off). Run: python -m pm25_forecast.registry_cli promote "
                 f"{result.version} --confirm.{note}",
+            )
+    else:
+        with open_db(connect, url) as con:
+            record_event(
+                con,
+                "keep",
+                result.version,
+                previous_version=champion_version,
+                actor="retrain",
+                metrics=event_metrics,
+                reason=result.decision.reason,
             )
     if result.failures:
         result.status = "failed"
@@ -524,6 +585,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--holdout-days", type=int, default=HOLDOUT_DAYS)
+        parser.add_argument(
+            "--if-drift",
+            action="store_true",
+            help="exit 0 without training unless the latest drift run has an alert",
+        )
         args = parser.parse_args(argv)
         try:
             settings = get_settings()
@@ -535,7 +601,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         alert = make_alert(webhook, prefix="[pm25 retrain]")
         result, code = run_entrypoint(
-            lambda: run(settings, holdout_days=args.holdout_days, alert=alert),
+            lambda: run(
+                settings, holdout_days=args.holdout_days, alert=alert, if_drift=args.if_drift
+            ),
             alert,
             connection_errors=db.CONNECTION_ERRORS,
         )

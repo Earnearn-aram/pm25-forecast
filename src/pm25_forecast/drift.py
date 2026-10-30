@@ -96,17 +96,18 @@ ON CONFLICT (checked_at, model_version, feature) DO UPDATE SET
     computed_at = excluded.computed_at
 """
 SELECT_REFERENCE = """
-SELECT feature, edges, shares, n_ref, n_origins, usable FROM drift_reference
+SELECT feature, edges, shares, n_ref, n_origins, usable, ref_start, ref_end FROM drift_reference
 WHERE model_version = %(model_version)s
 """
 UPSERT_REFERENCE = """
 INSERT INTO drift_reference (model_version, feature, edges, shares, n_ref, n_origins, usable,
-                             computed_at)
+                             computed_at, ref_start, ref_end)
 VALUES (%(model_version)s, %(feature)s, %(edges)s, %(shares)s, %(n_ref)s, %(n_origins)s,
-        %(usable)s, %(computed_at)s)
+        %(usable)s, %(computed_at)s, %(ref_start)s, %(ref_end)s)
 ON CONFLICT (model_version, feature) DO UPDATE SET
     edges = excluded.edges, shares = excluded.shares, n_ref = excluded.n_ref,
-    n_origins = excluded.n_origins, usable = excluded.usable, computed_at = excluded.computed_at
+    n_origins = excluded.n_origins, usable = excluded.usable, computed_at = excluded.computed_at,
+    ref_start = excluded.ref_start, ref_end = excluded.ref_end
 """
 SELECT_PREVIOUS_PSI = """
 SELECT psi FROM drift_checks
@@ -396,11 +397,21 @@ def make_reference(feature: str, values: list[float], n_origins: int) -> Referen
     return Reference(edges, shares, len(finite), n_origins, usable)
 
 
-def load_reference(con: Any, model_version: str) -> dict[str, Reference] | None:
-    """The cached reference for every feature and the target, or None if not (fully) cached."""
+def load_reference(
+    con: Any, model_version: str, window: Window | None = None
+) -> dict[str, Reference] | None:
+    """The cached reference for every feature and the target, or None if not (fully) cached.
+
+    With ``window`` (the manifest's training window), a reference built from a different window,
+    or one that stored no window (written before KAN-24), counts as not cached and is rebuilt.
+    """
     rows = con.execute(SELECT_REFERENCE, {"model_version": model_version}).fetchall()
     found: dict[str, Reference] = {}
-    for feature, edges, shares, n_ref, n_origins, usable in rows:
+    for feature, edges, shares, n_ref, n_origins, usable, ref_start, ref_end in rows:
+        if window is not None and (
+            _as_utc(ref_start) != _as_utc(window.start) or _as_utc(ref_end) != _as_utc(window.end)
+        ):
+            return None
         try:
             found[feature] = Reference(
                 [float(x) for x in json.loads(edges)],
@@ -415,7 +426,11 @@ def load_reference(con: Any, model_version: str) -> dict[str, Reference] | None:
 
 
 def save_reference(
-    con: Any, model_version: str, reference: dict[str, Reference], now: datetime
+    con: Any,
+    model_version: str,
+    reference: dict[str, Reference],
+    now: datetime,
+    window: Window | None = None,
 ) -> None:
     rows = [
         {
@@ -427,6 +442,8 @@ def save_reference(
             "n_origins": ref.n_origins,
             "usable": ref.usable,
             "computed_at": now,
+            "ref_start": None if window is None else window.start,
+            "ref_end": None if window is None else window.end,
         }
         for feature, ref in reference.items()
     ]
@@ -474,10 +491,10 @@ def model_checks(
     recent = Window(start=recent_end - RECENT_WINDOW, end=recent_end)
     lag = timedelta(hours=manifest.assumed_reporting_lag_hours or 0)
 
-    reference = load_reference(con, model_version)
-    if reference is None:
+    reference = load_reference(con, model_version, ref)
+    if reference is None:  # not cached, or built from a window other than the manifest's
         reference = build_reference(con, manifest, stations)
-        save_reference(con, model_version, reference, now)
+        save_reference(con, model_version, reference, now, ref)
 
     recent_inputs = Inputs(con, recent.start, recent.end, stations, manifest.horizons)
     recent_features, _ = recent_inputs.feature_values(

@@ -321,6 +321,47 @@ def test_reference_is_cached_per_model_and_not_rebuilt_daily(fake):
     assert checks(fake) == first
 
 
+def reference_windows(fake):
+    rows = fake.con.execute("SELECT DISTINCT ref_start, ref_end FROM drift_reference").fetchall()
+    return [(datetime.fromisoformat(a), datetime.fromisoformat(b)) for a, b in rows]
+
+
+def test_reference_stores_its_training_window(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    assert reference_windows(fake) == [(REF_START, REF_END)]
+
+
+def test_reference_is_rebuilt_when_the_manifest_training_window_changes(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    new_end = REF_END + timedelta(days=2)
+    manifest = {
+        "version": CHALLENGER,
+        "training_window": {"start": REF_START.isoformat(), "end": new_end.isoformat()},
+        "assumed_reporting_lag_hours": 0,
+        "metrics": {"24": {"mae": 1.0}},
+    }
+    fake.con.execute(
+        "UPDATE models SET manifest = ? WHERE model_version = ?", (json.dumps(manifest), CHALLENGER)
+    )
+    fake.con.commit()
+    do_run(fake, now=NOW + timedelta(minutes=30))
+    assert reference_windows(fake) == [(REF_START, new_end)]
+
+
+def test_reference_without_a_stored_window_is_rebuilt_once(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    fake.con.execute("UPDATE drift_reference SET ref_start = NULL, ref_end = NULL")
+    fake.con.commit()
+    do_run(fake, now=NOW + timedelta(minutes=30))
+    assert reference_windows(fake) == [(REF_START, REF_END)]
+
+
 def test_cams_needs_half_of_the_reference_origins_covered(fake):
     add_model(fake, CHALLENGER)
     add_series(fake)

@@ -22,7 +22,8 @@ window (rows dated before it and ingested before it), so the registered artifact
 scored. The price: a promoted model has not seen the last 7 days. A champion or challenger whose
 training window reaches into the held-out window is flagged "overlaps holdout" in the RUN_SUMMARY
 and the alert, because its scores may be optimistic. The RUN_SUMMARY also logs the candidate
-artifact size (`candidate_artifact_bytes`); registry pruning is left to KAN-24.
+artifact size (`candidate_artifact_bytes`); old models are cleaned up with `registry_cli prune`
+(below).
 
 ## The rule
 
@@ -46,17 +47,65 @@ python -m pm25_forecast.registry_cli promote retrain-20261102 --confirm
 
 `DATABASE_URL` comes from the environment or `.env`. `champion` shows the current pointer.
 
+## The promotion log (`model_events`)
+
+Every champion change and every retrain decision is one row in `model_events` (migration
+`005_model_events.sql`): `at` (UTC), `action` (`promote`, `rollback`, `recommend`, `keep`),
+`model_version`, `previous_version`, `actor` (`cli`, `retrain` or `auto`), `metrics` (JSON, the
+comparison numbers) and `reason`. A `promote` or `rollback` row is written in the same transaction
+as the champion pointer change, so the log and the pointer cannot disagree. `retrain` writes a
+`promote` row (actor `auto`) when `AUTO_PROMOTE=true`, otherwise `recommend` (and alerts), and a
+`keep` row when the candidate is not good enough.
+
+```sql
+SELECT at, action, model_version, previous_version, actor, reason
+FROM model_events ORDER BY at DESC LIMIT 20;
+```
+
 ## Roll back
 
-Registered versions are immutable, so a rollback is a promote of the previous champion. The
-previous version is printed by `promote` (`production champion: A -> B`) and logged in the
-`RUN_SUMMARY` (`roles.champion`) of the run that replaced it:
-
 ```
-python -m pm25_forecast.registry_cli promote <previous-version> --confirm
+python -m pm25_forecast.registry_cli rollback --confirm
 ```
 
-Production then points at it again. Also unset `AUTO_PROMOTE` if auto-promotion caused it.
+Moves the pointer back to the previous champion recorded in `model_events` (the `previous_version`
+of the latest `promote` or `rollback`) and logs a `rollback` row (actor `cli`). It refuses, and
+changes nothing, if there is no champion, no previous champion is recorded (the very first
+promote), that model cannot be served (same check as `promote`), or the latest logged change is not
+the live champion (the pointer was moved by hand outside the log; use `promote <version>`).
+A second `rollback` goes back to the version you just left, so use `promote <version>` to pick an
+older one. Also unset `AUTO_PROMOTE` if auto-promotion caused the problem.
+
+## Drift-triggered retrain
+
+`python -m pm25_forecast.retrain --if-drift` exits 0 without training unless the latest drift run
+(`drift.latest_drift_alert`, at most 36 h old) has an alert for `CHALLENGER_MODEL_VERSION`, or for
+the production champion when no challenger is set. With no challenger and no champion it does
+nothing. When it does run it is the normal retrain: the candidate is registered and, unless
+`AUTO_PROMOTE=true`, only recommended. The `drift-retrain` job in `drift-workflow.yml.txt` runs it
+after the daily drift check and shares the weekly retrain's concurrency group.
+
+## Prune old models
+
+```
+python -m pm25_forecast.registry_cli prune --keep 4            # dry run: prints keep/delete lines
+python -m pm25_forecast.registry_cli prune --keep 4 --confirm  # deletes
+```
+
+Always kept: the production champion, `CHALLENGER_MODEL_VERSION`, every model with predictions
+issued in the last 30 days, and the `--keep` newest models by registration time. The rest are
+deleted from `models` (and their cached drift reference); drift check history and `model_events`
+stay. The delete statement re-checks the champion and recent predictions, so a referenced model is
+never deleted. Deleted models cannot be restored (re-register from the original bundle).
+
+## Weekly housekeeping
+
+`python -m pm25_forecast.housekeeping` (Sundays 04:17 UTC, `housekeeping-workflow.yml.txt`) counts
+and then deletes prediction rows older than 90 days (`--dry-run` only counts), and lists what
+`prune --keep 4` would delete. It never deletes a model; the owner reviews the list in the
+`RUN_SUMMARY` and runs `prune --confirm` by hand. The 90-day purge also removes old CAMS vintages;
+a drift reference is cached per model, so only a rebuild after a training-window change needs
+data that old.
 
 ## Exit codes
 

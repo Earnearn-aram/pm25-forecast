@@ -60,6 +60,10 @@ That is correct, not a gap in the check. Models with shorter horizons (6 h, 12 h
 The reference side is computed once per `model_version` (a model's training window never
 changes) and stored in `drift_reference` as bin edges and shares. A daily run reads only the
 recent 7 days from the database. Delete a model's `drift_reference` rows to force a rebuild.
+Since KAN-24 the rows also store the training window they were built from (`ref_start`,
+`ref_end`, migration `005_model_events.sql`). If that differs from the manifest's
+`training_window`, or is empty (rows from before the migration), the reference is rebuilt once
+on the next run. A confirmed alert also triggers `retrain --if-drift` (docs/retrain.md).
 
 ## Where results go
 

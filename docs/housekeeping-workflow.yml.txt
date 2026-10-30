@@ -1,0 +1,68 @@
+# DRAFT for KAN-24. The agent token has no `workflow` scope, so this is committed as text.
+# Owner: copy to .github/workflows/housekeeping.yml (drop the .txt), then:
+#   1. Same secrets as the other workflows: DATABASE_URL, ALERT_WEBHOOK_URL (secrets), and
+#      CHALLENGER_MODEL_VERSION (variable, optional: that model is never listed for deletion).
+#   2. Apply src/pm25_forecast/storage/migrations/005_model_events.sql first (not needed by this
+#      job itself, but the registry commands in docs/retrain.md are).
+#   3. Run it once with "Run workflow" (workflow_dispatch) and read the RUN_SUMMARY line.
+#   4. Actions are pinned by commit sha, copied from docs/predict-workflow.yml.txt.
+# Cron: Sundays 04:17 UTC (off the hour). GitHub cron is best effort; a skipped week is caught up
+# by the next run.
+# What it does (python -m pm25_forecast.housekeeping):
+#   * Predictions retention: counts, then deletes, prediction rows older than 90 days
+#     (storage/sql.py PURGE_OLD_PREDICTIONS). Idempotent: a re-run finds nothing more to delete.
+#   * Registry prune in DRY-RUN mode ONLY: the RUN_SUMMARY lists the models `registry_cli prune`
+#     would delete. This job never deletes a model. To delete, run by hand (docs/retrain.md):
+#       python -m pm25_forecast.registry_cli prune --keep 4 --confirm
+# DB unreachable: the run is skipped, alerted and exits non-zero.
+# Failure alerting: the last step posts the job status and run link to ALERT_WEBHOOK_URL
+# when any step fails or the job is cancelled (e.g. timeout), as in the predict template.
+name: Housekeeping
+
+on:
+  schedule:
+    - cron: "17 4 * * 0" # Sundays 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time. Do not cancel a running job.
+concurrency:
+  group: housekeeping
+  cancel-in-progress: false
+
+jobs:
+  housekeeping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+      - name: Housekeeping
+        # Secrets come in through env only; they are never echoed or put on a command line.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }}
+        run: uv run --no-dev python -m pm25_forecast.housekeeping
+      # Alert when any step above failed, or the job was cancelled (timeout-minutes hit).
+      - name: Alert on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          uv run --no-dev python -m pm25_forecast.monitoring.notify failure && exit 0
+          [ -n "$ALERT_WEBHOOK_URL" ] || { echo "ALERT_WEBHOOK_URL is not set"; exit 0; }
+          msg="[pm25 ci] ${JOB_STATUS:-failure} (fallback): workflow ${GITHUB_WORKFLOW}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -sS -f -o /dev/null --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"text\": \"${msg}\", \"content\": \"${msg}\"}" -K -
