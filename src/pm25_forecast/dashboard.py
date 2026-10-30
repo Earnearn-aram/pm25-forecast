@@ -611,7 +611,7 @@ def _nice_max(vmax: float) -> float:
     return float(math.ceil(vmax / 400) * 400)
 
 
-def _lines(points: list[dict[str, Any]], key: str, ymax: float, css: str) -> str:
+def _lines(points: list[dict[str, Any]], key: str, ymax: float, css: str, width: int = 400) -> str:
     h, pad = 220, 8
     n = max(len(points) - 1, 1)
     segments: list[list[str]] = [[]]
@@ -621,7 +621,7 @@ def _lines(points: list[dict[str, Any]], key: str, ymax: float, css: str) -> str
             segments.append([])
             continue
         y = h - pad - min(v, ymax) / ymax * (h - 2 * pad)
-        segments[-1].append(f"{i / n * 400:.1f},{y:.1f}")
+        segments[-1].append(f"{i / n * width:.1f},{y:.1f}")
     return "".join(
         f'<polyline class="ln {css}" vector-effect="non-scaling-stroke" points="{" ".join(s)}"/>'
         for s in segments
@@ -633,6 +633,12 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
     # Show the latest 24 hours beside the next 24 hours on equal time scales.
     points = st["points"][-25:]
     keys = ["actual", "persistence"] + (["challenger"] if chart["has_challenger"] else [])
+    has_future = any(
+        p["value"] is not None
+        for key in ("future_persistence", "future_challenger")
+        for p in st.get(key, [])
+    )
+    past_width = 400 if has_future else 800
     values = [p[k] for p in points for k in keys if p[k] is not None]
     values += [
         p["value"]
@@ -653,16 +659,16 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
             f"{int(ymax - i * ymax / 4)}</span>"
             for i in range(5)
         )
-        series = _lines(points, "persistence", ymax, "ln-pers")
+        series = _lines(points, "persistence", ymax, "ln-pers", past_width)
         if chart["has_challenger"]:
-            series += _lines(points, "challenger", ymax, "ln-chal")
-        series += _lines(points, "actual", ymax, "ln-actual")
+            series += _lines(points, "challenger", ymax, "ln-chal", past_width)
+        series += _lines(points, "actual", ymax, "ln-actual", past_width)
         actual_points = [
             (i, point) for i, point in enumerate(points) if point["actual"] is not None
         ]
         if actual_points:
             i, point = actual_points[-1]
-            x = i / max(len(points) - 1, 1) * 400
+            x = i / max(len(points) - 1, 1) * past_width
             y = 212 - min(point["actual"], ymax) / ymax * 204
             description = f"Actual: {point['actual']:g} µg/m³ at {point['t']}"
             series += (
@@ -721,17 +727,27 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
             + (
                 "".join(future_html)
                 if future_html
-                else "<span>Waiting for future forecasts.</span>"
+                else '<span class="forecast-empty">Waiting for future forecasts.</span>'
             )
             + "</div>"
+        )
+        future_background = (
+            '<rect class="forecast-region" x="400" y="0" width="400" height="220"/>'
+            '<line class="forecast-boundary" x1="400" x2="400" y1="0" y2="220"/>'
+            if has_future
+            else ""
+        )
+        axis_end = (
+            f'<span class="axis-now" title="{end:%d %b %H:%M} UTC">Now</span><span>+24 h</span>'
+            if has_future
+            else f'<span title="{end:%d %b %H:%M} UTC">Now</span>'
         )
         body = (
             '<div class="plotwrap"><div class="ytitle">\u00b5g/m\u00b3</div><div class="plot">'
             f'{labels}<svg viewBox="-8 0 816 220" preserveAspectRatio="none" role="img" '
-            f'aria-label="{e(aria)}">{grid}{series}</svg></div>'
+            f'aria-label="{e(aria)}">{future_background}{grid}{series}</svg></div>'
             f'<div class="xlabs"><span>{start:%d %b %H:%M} UTC</span>'
-            f'<span class="axis-now" title="{end:%d %b %H:%M} UTC">Now</span>'
-            "<span>+24 h</span></div></div>" + future_block
+            f"{axis_end}</div></div>" + future_block
         )
     hidden = "" if first else " hidden"
     return f'<div class="chart" data-station="{e(st["id"])}"{hidden}>{body}</div>'
@@ -1156,8 +1172,8 @@ def render_html(data: dict[str, Any]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
-<link rel="stylesheet" href="dashboard.css?v=kan73-layout-story">
-<script src="dashboard.js?v=kan73-layout-story" defer></script>
+<link rel="stylesheet" href="dashboard.css?v=kan73-chart-layout-v2">
+<script src="dashboard.js?v=kan73-chart-layout-v2" defer></script>
 </head>
 <body>
 <main>

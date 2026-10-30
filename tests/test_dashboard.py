@@ -551,3 +551,14 @@ def test_chart_gives_equal_space_to_recent_history_and_future(tmp_path):
     assert 'cx="600.0"' in page
     assert 'cx="800.0"' in page
     assert "Last 24 hours, hourly, UTC" in page
+
+
+def test_chart_uses_full_width_when_no_future_forecasts_exist(tmp_path):
+    fake = Fake()
+    seed(fake)
+    assert build(fake, tmp_path) == 0
+    page = (tmp_path / "index.html").read_text()
+    assert 'class="forecast-region"' not in page
+    assert 'class="axis-now"' not in page
+    assert 'class="forecast-empty"' in page
+    assert 'class="actual-dot" cx="800.0"' in page
