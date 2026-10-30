@@ -34,15 +34,22 @@ SET model_version = EXCLUDED.model_version, promoted_at = now()
 """
 
 
+# Locks the pointer row until the transaction ends, so two concurrent promotes/rollbacks cannot
+# both read the same "previous champion". Postgres only (SQLite has no FOR UPDATE).
+SELECT_CHAMPION_LOCK = SELECT_CHAMPION.rstrip("\n") + " FOR UPDATE\n"
+# `at` is the database clock (column default now()); `id` is the order of events.
 INSERT_EVENT = """
-INSERT INTO model_events (at, action, model_version, previous_version, actor, metrics, reason)
-VALUES (%(at)s, %(action)s, %(model_version)s, %(previous_version)s, %(actor)s, %(metrics)s,
-        %(reason)s)
+INSERT INTO model_events (action, model_version, previous_version, actor, metrics, reason)
+VALUES (%(action)s, %(model_version)s, %(previous_version)s, %(actor)s, %(metrics)s, %(reason)s)
 """
 # The latest champion change in the log (a recommend/keep decision never moves the pointer).
 SELECT_LAST_CHANGE = """
 SELECT model_version, previous_version FROM model_events
-WHERE action IN ('promote', 'rollback') ORDER BY at DESC LIMIT 1
+WHERE action IN ('promote', 'rollback') ORDER BY id DESC LIMIT 1
+"""
+# When retrain last logged a decision (actor 'auto' is retrain's own auto-promote).
+SELECT_LAST_RETRAIN_EVENT = """
+SELECT max(at) FROM model_events WHERE actor IN ('retrain', 'auto')
 """
 SELECT_ALL_MODELS = "SELECT model_version, created_at FROM models ORDER BY created_at DESC"
 SELECT_RECENT_PREDICTION_MODELS = """
@@ -55,6 +62,10 @@ DELETE FROM models
 WHERE model_version = %(model_version)s
   AND model_version NOT IN (SELECT model_version FROM model_champion)
   AND model_version NOT IN (SELECT model_version FROM predictions WHERE issue_time >= %(since)s)
+  AND model_version NOT IN (
+      SELECT previous_version FROM model_events
+      WHERE id = (SELECT max(id) FROM model_events WHERE action IN ('promote', 'rollback'))
+        AND previous_version IS NOT NULL)
 """
 DELETE_MODEL_REFERENCE = "DELETE FROM drift_reference WHERE model_version = %(model_version)s"
 
@@ -201,20 +212,18 @@ def record_event(
     actor: str = "cli",
     metrics: Mapping[str, Any] | None = None,
     reason: str | None = None,
-    now: datetime | None = None,
 ) -> None:
-    """Append one row to ``model_events`` on ``con`` (the caller's transaction)."""
+    """Append one row to ``model_events`` on ``con`` (the caller's transaction).
+
+    The event time is the database clock (``at`` defaults to ``now()``).
+    """
     if action not in EVENT_ACTIONS:
         raise ValueError(f"unknown model event action: {action}")
     if actor not in EVENT_ACTORS:
         raise ValueError(f"unknown model event actor: {actor}")
-    moment = now or datetime.now(UTC)
-    if moment.tzinfo is None:
-        raise ValueError("event time must be timezone-aware (UTC)")
     con.execute(
         INSERT_EVENT,
         {
-            "at": moment.astimezone(UTC),
             "action": action,
             "model_version": model_version,
             "previous_version": previous_version,
@@ -233,19 +242,20 @@ def promote_model(
     action: str = "promote",
     reason: str | None = None,
     metrics: Mapping[str, Any] | None = None,
-    now: datetime | None = None,
 ) -> str | None:
     """Point production at an existing, content-verified model version and log the change.
 
     The pointer change and its ``model_events`` row are written on the same connection, so they
-    commit (or roll back) together. Returns the previous champion, or None if there was none.
+    commit (or roll back) together. The pointer row is locked (``FOR UPDATE``) before the previous
+    champion is read, so concurrent changes are serialised. Returns the previous champion, or
+    None if there was none.
     """
     if action not in ("promote", "rollback"):
         raise ValueError("a champion change is a promote or a rollback")
     # Verify existence and artifact integrity before changing the pointer. The database foreign
     # key is an additional guard against a dangling pointer.
     read_model(con, model_version)
-    before = con.execute(SELECT_CHAMPION, {}).fetchone()
+    before = con.execute(SELECT_CHAMPION_LOCK, {}).fetchone()
     previous = None if before is None else before[0]
     con.execute(UPSERT_CHAMPION, {"model_version": model_version})
     row = con.execute(SELECT_CHAMPION, {}).fetchone()
@@ -259,7 +269,6 @@ def promote_model(
         actor=actor,
         metrics=metrics,
         reason=reason,
-        now=now,
     )
     return previous
 
@@ -268,9 +277,10 @@ def previous_champion(con: Any) -> str:
     """The champion before the latest recorded change, for a rollback.
 
     Raises LookupError if the log has no change, the latest change had no previous champion, or
-    the log disagrees with the live pointer (the pointer was changed outside the log).
+    the log disagrees with the live pointer (the pointer was changed outside the log). Call it in
+    the transaction that then does the rollback: it locks the pointer row (``FOR UPDATE``).
     """
-    current = con.execute(SELECT_CHAMPION, {}).fetchone()
+    current = con.execute(SELECT_CHAMPION_LOCK, {}).fetchone()
     if current is None:
         raise LookupError("production champion model is not set; nothing to roll back")
     last = con.execute(SELECT_LAST_CHANGE, {}).fetchone()
@@ -295,8 +305,9 @@ def plan_prune(
 ) -> PrunePlan:
     """Which ``models`` rows a prune would delete. Nothing is changed.
 
-    Kept: the production champion, ``challenger``, every model with predictions issued in the last
-    ``PRUNE_REFERENCE_DAYS`` days, and the ``keep_newest`` newest by ``created_at``.
+    Kept: the production champion, ``challenger``, the rollback target (the previous champion of the
+    latest logged change), every model with predictions issued in the last ``PRUNE_REFERENCE_DAYS``
+    days, and the ``keep_newest`` newest by ``created_at``.
     """
     if keep_newest < 0:
         raise ValueError("--keep must not be negative")
@@ -309,6 +320,9 @@ def plan_prune(
         keep[champion[0]] = "production champion"
     if challenger:
         keep.setdefault(challenger, "challenger")
+    last_change = con.execute(SELECT_LAST_CHANGE, {}).fetchone()
+    if last_change is not None and last_change[1]:
+        keep.setdefault(last_change[1], "rollback target (previous champion)")
     for (version,) in con.execute(SELECT_RECENT_PREDICTION_MODELS, {"since": since}).fetchall():
         keep.setdefault(version, f"predictions in the last {PRUNE_REFERENCE_DAYS} days")
     for version in models[:keep_newest]:
@@ -333,6 +347,17 @@ def prune_models(con: Any, plan: PrunePlan, *, now: datetime | None = None) -> l
             con.execute(DELETE_MODEL_REFERENCE, {"model_version": version})
             deleted.append(version)
     return deleted
+
+
+def last_retrain_event_at(con: Any) -> datetime | None:
+    """When retrain last logged a decision (any action by actor retrain or auto), in UTC."""
+    row = con.execute(SELECT_LAST_RETRAIN_EVENT, {}).fetchone()
+    value = None if row is None else row[0]
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def read_champion(con: Any) -> tuple[str, bytes, dict[str, Any]]:

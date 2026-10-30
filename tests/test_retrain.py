@@ -36,6 +36,7 @@ class Registry:
         self.rows = {}
         self.champion = None
         self.events = []  # model_events rows (parameter dicts), oldest first
+        self.last_retrain_at = None  # stand-in for max(at) over retrain/auto events
         self.lock = threading.Lock()
         self._selected = None
 
@@ -52,6 +53,10 @@ class Registry:
         with self.lock:
             if statement.lstrip().startswith("INSERT INTO model_events"):
                 self.events.append(params)
+                if params["actor"] in ("retrain", "auto"):
+                    self.last_retrain_at = datetime.now(UTC)
+            elif "max(at) FROM model_events" in statement:
+                self._selected = (self.last_retrain_at,)
             elif "FROM model_events" in statement:
                 changes = [e for e in self.events if e["action"] in ("promote", "rollback")]
                 self._selected = None

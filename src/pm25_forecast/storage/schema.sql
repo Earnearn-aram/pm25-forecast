@@ -116,15 +116,16 @@ CREATE TABLE IF NOT EXISTS drift_reference (
 -- Promotion/rollback log (KAN-24). One row per champion change or retrain decision; a champion
 -- change is written in the same transaction as the model_champion pointer change. `recommend` and
 -- `keep` are retrain decisions that leave production alone. `metrics` is a JSON object (text).
--- No foreign key: pruning a model must not erase history. (ref_start/ref_end above: see
--- migrations/005_model_events.sql, which adds them with ALTER TABLE on existing databases.)
+-- `id` gives the order of events (`at` is the database clock, now()). No foreign key: pruning a
+-- model must not erase history. (ref_start/ref_end above: see migrations/005_model_events.sql,
+-- which adds them with ALTER TABLE on existing databases.)
 CREATE TABLE IF NOT EXISTS model_events (
-    at                timestamptz NOT NULL,
+    id bigserial PRIMARY KEY,
+    at                timestamptz NOT NULL DEFAULT now(),
     action            text        NOT NULL CHECK (action IN ('promote', 'rollback', 'recommend', 'keep')),
     model_version     text        NOT NULL,
     previous_version  text,
     actor             text        NOT NULL CHECK (actor IN ('cli', 'retrain', 'auto')),
     metrics           text,
-    reason            text,
-    PRIMARY KEY (at, action, model_version)
+    reason            text
 );

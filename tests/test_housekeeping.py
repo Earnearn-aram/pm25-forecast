@@ -20,14 +20,11 @@ class HousekeepingDb(FakeDb):
     """FakeDb that runs the Postgres-only retention SQL as its SQLite equivalent."""
 
     def execute(self, statement, params=()):
-        if statement == sql.COUNT_OLD_PREDICTIONS:
-            return self.con.execute(
-                "SELECT count(*) FROM predictions WHERE issue_time < ?", (CUTOFF.isoformat(),)
-            )
-        if statement == sql.PURGE_OLD_PREDICTIONS:
-            return self.con.execute(
-                "DELETE FROM predictions WHERE issue_time < ?", (CUTOFF.isoformat(),)
-            )
+        if statement in (sql.COUNT_OLD_PREDICTIONS, sql.PURGE_OLD_PREDICTIONS):
+            # Only the date arithmetic is swapped; the rest of the real statement (including the
+            # CAMS exclusion) is what SQLite runs.
+            local = statement.replace("now() - interval '90 days'", "?")
+            return self.con.execute(local, (CUTOFF.isoformat(),))
         return super().execute(statement, params)
 
 
@@ -36,12 +33,15 @@ def settings(**kw):
 
 
 def seed(fake):
-    for i, age in enumerate((120, 91, 89, 1)):
+    # (model_version, age in days): two model rows past 90 days, two inside; old CAMS vintages
+    for i, (version, age) in enumerate(
+        (("m3", 120), ("m3", 91), ("m3", 89), ("m3", 1), ("cams_global", 400), ("cams_global", 95))
+    ):
         issue = (NOW - timedelta(days=age)).isoformat()
         fake.con.execute(
             "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id,"
-            " pm25_pred) VALUES ('59t', ?, ?, 'cams_global', ?, 1.0)",
-            (issue, issue, f"r{i}"),
+            " pm25_pred) VALUES ('59t', ?, ?, ?, ?, 1.0)",
+            (issue, issue, version, f"r{i}"),
         )
     for i in range(1, 7):  # m6 is the newest
         fake.con.execute(
@@ -64,21 +64,26 @@ def count(fake, table):
     return fake.con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
-def test_retention_sql_uses_the_90_day_rule_on_both_statements():
+def test_retention_sql_uses_the_90_day_rule_and_spares_cams_on_both_statements():
     for statement in (sql.COUNT_OLD_PREDICTIONS, sql.PURGE_OLD_PREDICTIONS):
         assert "issue_time < now() - interval '90 days'" in statement
+        assert "model_version <> 'cams_global'" in statement
 
 
-def test_run_counts_then_purges_old_predictions(fake):
+def test_run_counts_then_purges_old_model_predictions_but_never_cams(fake):
     result = housekeeping.run(settings(), connect=fake, clock=lambda: NOW)
     assert result.predictions_due == 2 and result.predictions_deleted == 2
-    assert count(fake, "predictions") == 2  # the 89 and 1 day old rows stay
+    assert count(fake, "predictions") == 4  # the 89 and 1 day old model rows + both CAMS rows
+    cams = fake.con.execute(
+        "SELECT count(*) FROM predictions WHERE model_version = 'cams_global'"
+    ).fetchone()[0]
+    assert cams == 2
 
 
 def test_dry_run_counts_but_deletes_nothing(fake):
     result = housekeeping.run(settings(), connect=fake, clock=lambda: NOW, dry_run=True)
     assert result.predictions_due == 2 and result.predictions_deleted == 0
-    assert count(fake, "predictions") == 4
+    assert count(fake, "predictions") == 6
 
 
 def test_prune_is_only_ever_a_dry_run_here(fake):

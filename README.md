@@ -121,7 +121,7 @@ promotion log (KAN-24), dashboard (KAN-25), dead-man switch (KAN-30).
 | Service | Plan | Cost / month | Limit that matters |
 |---|---|---|---|
 | GitHub Actions | Free minutes (public repo) | $0 | Collector runs 3 times an hour, about 2,200 runs/month at 1-2 min each (`collector.yml` notes). Free because the repo is public; a private repo would draw on the plan's minute quota. |
-| Neon Postgres | Free tier | $0 | 1 GB storage and 100 CU-hours per project (`docs/storage-decision.md`; the doc marks these figures unverified, re-check on neon.com/pricing). Without retention, predictions would reach 1 GB in about 12-18 months. The decided 90-day purge exists as a statement (`sql.PURGE_OLD_PREDICTIONS`) but no job runs it yet. |
+| Neon Postgres | Free tier | $0 | 1 GB storage and 100 CU-hours per project (`docs/storage-decision.md`; the doc marks these figures unverified, re-check on neon.com/pricing). Without retention, predictions would reach 1 GB in about 12-18 months. The decided 90-day purge is run weekly by `pm25_forecast.housekeeping` (`sql.PURGE_OLD_PREDICTIONS`; CAMS vintages are never purged). |
 | cron-job.org | Free tier | $0 | Three schedules calling the GitHub API. The repo states no limit. |
 | Discord webhook | Free | $0 | Alerts and the daily heartbeat only. |
 | Air4Thai | Public API | $0 | Only the latest reading is exposed, hence frequent polling; history window is about 3 months. |

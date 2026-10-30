@@ -50,16 +50,19 @@ python -m pm25_forecast.registry_cli promote retrain-20261102 --confirm
 ## The promotion log (`model_events`)
 
 Every champion change and every retrain decision is one row in `model_events` (migration
-`005_model_events.sql`): `at` (UTC), `action` (`promote`, `rollback`, `recommend`, `keep`),
+`005_model_events.sql`): `id` (the order of events), `at` (the database clock, UTC),
+`action` (`promote`, `rollback`, `recommend`, `keep`),
 `model_version`, `previous_version`, `actor` (`cli`, `retrain` or `auto`), `metrics` (JSON, the
 comparison numbers) and `reason`. A `promote` or `rollback` row is written in the same transaction
-as the champion pointer change, so the log and the pointer cannot disagree. `retrain` writes a
+as the champion pointer change, so the log and the pointer cannot disagree. The pointer row is
+locked (`SELECT ... FOR UPDATE`) before the previous champion is read, so two concurrent promotes or
+rollbacks are serialised. `retrain` writes a
 `promote` row (actor `auto`) when `AUTO_PROMOTE=true`, otherwise `recommend` (and alerts), and a
 `keep` row when the candidate is not good enough.
 
 ```sql
 SELECT at, action, model_version, previous_version, actor, reason
-FROM model_events ORDER BY at DESC LIMIT 20;
+FROM model_events ORDER BY id DESC LIMIT 20;
 ```
 
 ## Roll back
@@ -79,9 +82,13 @@ older one. Also unset `AUTO_PROMOTE` if auto-promotion caused the problem.
 ## Drift-triggered retrain
 
 `python -m pm25_forecast.retrain --if-drift` exits 0 without training unless the latest drift run
-(`drift.latest_drift_alert`, at most 36 h old) has an alert for `CHALLENGER_MODEL_VERSION`, or for
-the production champion when no challenger is set. With no challenger and no champion it does
-nothing. When it does run it is the normal retrain: the candidate is registered and, unless
+(`drift.latest_drift_alert`, at most 36 h old) has an alert for `CHALLENGER_MODEL_VERSION` OR for
+the production champion (both are checked). With neither it does nothing.
+
+Cooldown: it also skips if a retrain decision (any `model_events` row by actor `retrain` or `auto`)
+was logged after that drift run was computed, so one drift alert causes one retrain even if the job
+is re-run. The next daily drift run that still alerts counts as a new alert. When it does run it is
+the normal retrain: the candidate is registered and, unless
 `AUTO_PROMOTE=true`, only recommended. The `drift-retrain` job in `drift-workflow.yml.txt` runs it
 after the daily drift check and shares the weekly retrain's concurrency group.
 
@@ -92,7 +99,8 @@ python -m pm25_forecast.registry_cli prune --keep 4            # dry run: prints
 python -m pm25_forecast.registry_cli prune --keep 4 --confirm  # deletes
 ```
 
-Always kept: the production champion, `CHALLENGER_MODEL_VERSION`, every model with predictions
+Always kept: the production champion, `CHALLENGER_MODEL_VERSION`, the rollback target (the
+`previous_version` of the latest logged change), every model with predictions
 issued in the last 30 days, and the `--keep` newest models by registration time. The rest are
 deleted from `models` (and their cached drift reference); drift check history and `model_events`
 stay. The delete statement re-checks the champion and recent predictions, so a referenced model is
@@ -101,11 +109,11 @@ never deleted. Deleted models cannot be restored (re-register from the original 
 ## Weekly housekeeping
 
 `python -m pm25_forecast.housekeeping` (Sundays 04:17 UTC, `housekeeping-workflow.yml.txt`) counts
-and then deletes prediction rows older than 90 days (`--dry-run` only counts), and lists what
+and then deletes model prediction rows older than 90 days (`--dry-run` only counts), and lists what
 `prune --keep 4` would delete. It never deletes a model; the owner reviews the list in the
-`RUN_SUMMARY` and runs `prune --confirm` by hand. The 90-day purge also removes old CAMS vintages;
-a drift reference is cached per model, so only a rebuild after a training-window change needs
-data that old.
+`RUN_SUMMARY` and runs `prune --confirm` by hand. The purge only touches model prediction rows:
+CAMS vintages (`model_version = 'cams_global'`) are never purged, because training and the drift
+reference use them as the `cams_pm25` input.
 
 ## Exit codes
 

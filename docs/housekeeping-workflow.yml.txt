@@ -9,7 +9,8 @@
 # Cron: Sundays 04:17 UTC (off the hour). GitHub cron is best effort; a skipped week is caught up
 # by the next run.
 # What it does (python -m pm25_forecast.housekeeping):
-#   * Predictions retention: counts, then deletes, prediction rows older than 90 days
+#   * Predictions retention: counts, then deletes, model prediction rows older than 90 days
+#     (never CAMS vintages: model_version cams_global is kept, it is training input)
 #     (storage/sql.py PURGE_OLD_PREDICTIONS). Idempotent: a re-run finds nothing more to delete.
 #   * Registry prune in DRY-RUN mode ONLY: the RUN_SUMMARY lists the models `registry_cli prune`
 #     would delete. This job never deletes a model. To delete, run by hand (docs/retrain.md):

@@ -14,7 +14,8 @@
 # when any step fails or the job is cancelled (e.g. timeout), as in the predict template.
 # KAN-24: the `drift-retrain` job (end of file) runs after the drift job succeeds and starts
 #   `retrain --if-drift`: it exits 0 without training unless the latest drift run has an alert for
-#   the challenger (or, with none set, the champion). When it does train it is the normal retrain:
+#   the challenger or the champion (and no retrain was logged since that drift run: cooldown).
+#   When it does train it is the normal retrain:
 #   recommend-only unless the repo variable AUTO_PROMOTE is "true" (leave it UNSET, see
 #   docs/retrain.md). Apply migration 005_model_events.sql before enabling it. To disable
 #   drift-triggered retrains, delete that job; the drift check itself is unaffected.

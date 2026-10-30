@@ -1,7 +1,7 @@
 """Weekly housekeeping (KAN-24). Run with ``python -m pm25_forecast.housekeeping``.
 
-1. Predictions retention: count, then delete, the prediction rows older than 90 days
-   (``sql.PURGE_OLD_PREDICTIONS``). ``--dry-run`` only counts.
+1. Predictions retention: count, then delete, the model prediction rows older than 90 days
+   (``sql.PURGE_OLD_PREDICTIONS``; CAMS vintages are never purged). ``--dry-run`` only counts.
 2. Registry prune in DRY-RUN mode only: logs which ``models`` rows ``registry_cli prune`` would
    delete. This job never deletes a model; the owner decides (see docs/retrain.md).
 

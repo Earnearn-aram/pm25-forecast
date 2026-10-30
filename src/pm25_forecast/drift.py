@@ -409,7 +409,7 @@ def load_reference(
     found: dict[str, Reference] = {}
     for feature, edges, shares, n_ref, n_origins, usable, ref_start, ref_end in rows:
         if window is not None and (
-            _as_utc(ref_start) != _as_utc(window.start) or _as_utc(ref_end) != _as_utc(window.end)
+            as_utc(ref_start) != as_utc(window.start) or as_utc(ref_end) != as_utc(window.end)
         ):
             return None
         try:
@@ -525,12 +525,18 @@ def model_checks(
     return checks
 
 
-def _as_utc(value: Any) -> datetime | None:
+def as_utc(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, str):
         value = datetime.fromisoformat(value)
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def latest_drift_run(con: Any, model_version: str) -> datetime | None:
+    """When the latest drift run for ``model_version`` was computed (UTC), or None if none."""
+    row = con.execute(SELECT_LATEST_RUN_MODEL, {"model_version": model_version}).fetchone()
+    return as_utc(row[0]) if row else None
 
 
 def latest_drift_alert(
@@ -543,7 +549,7 @@ def latest_drift_alert(
     """
     now = sql.require_utc(now or datetime.now(UTC))
     params = {} if model_version is None else {"model_version": model_version}
-    latest = _as_utc(
+    latest = as_utc(
         con.execute(
             SELECT_LATEST_RUN if model_version is None else SELECT_LATEST_RUN_MODEL, params
         ).fetchone()[0]

@@ -155,12 +155,16 @@ def write_rows(
     return affected
 
 
-# Retention (Decided): raw prediction vintages are kept 90 days. Run by a job added later
-# (no scheduler in KAN-17). Scores are aggregated to daily before their raw rows are purged.
+# Retention (Decided): MODEL prediction vintages are kept 90 days; run weekly by
+# `pm25_forecast.housekeeping` (KAN-24). Scores are aggregated to daily before their raw rows are
+# purged. CAMS vintages (model_version 'cams_global', written by the collector) are NEVER purged:
+# they are training and drift-reference inputs (the feature `cams_pm25`).
 PURGE_OLD_PREDICTIONS = """
-DELETE FROM predictions WHERE issue_time < now() - interval '90 days'
+DELETE FROM predictions
+WHERE issue_time < now() - interval '90 days' AND model_version <> 'cams_global'
 """
-# Dry-run count with the same condition as the purge (run by `pm25_forecast.housekeeping`, KAN-24).
+# Dry-run count with the same condition as the purge.
 COUNT_OLD_PREDICTIONS = """
-SELECT count(*) FROM predictions WHERE issue_time < now() - interval '90 days'
+SELECT count(*) FROM predictions
+WHERE issue_time < now() - interval '90 days' AND model_version <> 'cams_global'
 """
