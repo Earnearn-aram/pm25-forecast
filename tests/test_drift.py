@@ -37,7 +37,7 @@ REF_END = datetime(2026, 9, 21, tzinfo=UTC)
 # Hour-aligned recent origins: CAMS valid times must fall on the hour to match build_features.
 RECENT_FROM = datetime(2026, 10, 22, 12, tzinfo=UTC)
 RECENT_TO = datetime(2026, 10, 30, 12, tzinfo=UTC)
-SHIFT_FROM =datetime(2026, 10, 23, tzinfo=UTC)
+SHIFT_FROM = datetime(2026, 10, 23, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -334,7 +334,7 @@ def test_cams_with_full_coverage_is_compared(fake):
     add_series(fake)
     add_cams(fake, REF_START, REF_END)
     add_cams(fake, RECENT_FROM, RECENT_TO)
-    got =by_feature(do_run(fake))["cams_pm25"]
+    got = by_feature(do_run(fake))["cams_pm25"]
     assert got.n_ref >= drift.MIN_REFERENCE and got.status in {OK, WARN}
 
 
