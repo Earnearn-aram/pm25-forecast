@@ -1,0 +1,23 @@
+{
+ "best": {
+  "mae": 3.730575950419619,
+  "name": "e15-smoother-gbm"
+ },
+ "dirty": false,
+ "finding": "No variant clearly beats the smoother. 1 of 5 have a CI below zero but are fragile (e15-smoother-gbm).",
+ "n_variants": 5,
+ "outcome": "fragile",
+ "plots": [
+  "mae",
+  "paired",
+  "folds",
+  "breakdown"
+ ],
+ "snapshots": [
+  "a00cfc9edd4c"
+ ],
+ "status": "written up",
+ "ticket": "KAN-92",
+ "title": "E15 Ensembles of the family-best models (KAN-92)",
+ "verdict": "NO CONFIRMED WIN, ONE LEAD."
+}
