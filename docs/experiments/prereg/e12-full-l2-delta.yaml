@@ -1,0 +1,35 @@
+id: e12-full-l2-delta
+ticket: KAN-89
+hypothesis: >-
+  Pooled LightGBM (station as categorical) on fs_v2_full with objective l2 and target delta
+  (value minus the newest reading in [t-3h, t-1h]) lowers
+  +24 h MAE versus the smoother on the dev folds. Family of 12 dev variants (2 feature sets x 3 objectives x 2 targets), all with the same fixed tuning budget (8 configurations, 3 inner time-series folds, inside each fold's training part only). The variant with the lowest dev mae_24h is the E12 best configuration and gets the feature-group ablation (4 further dev variants). Dev CIs are unadjusted for these 16 runs.
+model_family: lightgbm
+model: gbm-pooled-l2-delta
+feature_set: fs_v2_full
+params:
+  feature_set: fs_v2_full
+  objective: l2
+  target: delta
+  drop_groups: []
+  budget: 8
+  inner_folds: 3
+  huber_alpha: 8.0
+  num_threads: 4
+  seed: 20261101
+  log_dir: out/kan89
+  log_name: e12-full-l2-delta
+horizons: [6, 12, 24]
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.2
+decision_rule: >-
+  Dev-only, descriptive: the variant counts as beating the baselines only if
+  diff_vs_smoother_24h_ci_high < 0 and diff_vs_persistence_24h_ci_high < 0 (72 h block CI, 95%,
+  unadjusted) and diff_vs_smoother_24h <= -0.15 ug/m3. Otherwise report that nothing beats the
+  smoother. No holdout run is made in this ticket.
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist

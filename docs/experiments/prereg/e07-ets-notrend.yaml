@@ -1,0 +1,33 @@
+id: e07-ets-notrend
+ticket: KAN-85
+hypothesis: Additive Holt-Winters without trend and with daily (24 h) seasonality (level plus seasonal,
+  same fit and state windows as the damped variant) lowers +24 h MAE versus the smoother.
+model_family: ets
+model: holt-winters-notrend
+feature_set: own-history-hourly
+params:
+  name: ets-notrend
+  factory: ets
+  trend: null
+  damped_trend: false
+  seasonal_periods: 24
+  fit_days: 28
+  state_hours: 168
+horizons:
+- 6
+- 12
+- 24
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.15
+decision_rule: 'Dev, descriptive. Primary CI: 72 h moving-block bootstrap (B 10,000, seed 20261101), sensitivities
+  24 h and 168 h. Five E07 variants are registered (arima-d0, arima-d1, sarima, ets-damped, ets-notrend);
+  read the CI at the unadjusted 95% level and at the Bonferroni level 1-0.05/5 (tracked sensitivity run).
+  Keep the family only if a variant has diff_vs_smoother_24h <= -0.15 with the 72 h CI entirely below
+  zero against both persistence and the smoother after the 5-variant correction and not fragile; otherwise
+  drop it. No holdout.'
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist

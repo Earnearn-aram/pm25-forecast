@@ -113,3 +113,38 @@ Stop writers, then copy the whole directory (the database and artifacts belong t
     cp -R ~/pm25-experiments/mlflow ~/pm25-experiments/mlflow-backup-$(date -u +%Y%m%d)
 
 or `sqlite3 ~/pm25-experiments/mlflow/mlflow.db ".backup 'mlflow-backup.db'"` for the database alone.
+
+## HTML reports per ticket (KAN-97)
+
+One self-contained HTML file per experiment ticket, plus an index, written to `docs/experiments/reports/`
+(committed; the written source stays `docs/experiments/e*.md`):
+
+    uv run --group experiments python -m pm25_forecast.experiments.report --ticket KAN-83 \
+        [--out docs/experiments/reports/] [--docs-dir docs/experiments]
+    uv run --group experiments python -m pm25_forecast.experiments.report index
+
+Open `docs/experiments/reports/index.html`: a table with one row per ticket (write-up, verdict,
+best +24 h MAE, link) and the leaderboard with the DIRTY flag and the mixed-snapshot warning.
+
+- Data: the best valid dev run of every `kan78/*` experiment tagged with the ticket, its
+  `evaluation.json` artifact, the prereg YAMLs (`<docs-dir>/prereg/<prereg tag>.yaml`) and the
+  `e*.md` whose title line names the ticket. Runs with a CI level other than 95% (for example a
+  Bonferroni sensitivity run) are listed in the table but not plotted. Dev only: holdout runs are
+  never read. Only aggregates are embedded (scores, CIs, per-fold, per-station, per-hour MAE).
+- Plots (PNG embedded as base64, no network): 1 MAE per variant with persistence and smoother;
+  2 paired difference vs the smoother with the 95% CI (72 h blocks) and fragile flags; 3 per-fold
+  difference; 4 MAE by station and by hour for the best variant vs baselines; 5 feature ablation
+  (only when `-abl-` experiments exist). Titles state the finding; a win is only claimed when the
+  CI is entirely below zero, and it is always flagged as exploratory and unadjusted.
+- No Jira status is stored. The "write-up" column says whether an `e*.md` names the ticket. The
+  verdict is the `Verdict: **...**` line of that `e*.md` (nothing is guessed; without the line the
+  index says "no explicit verdict"). The index shows the computed finding next to it and flags a
+  MISMATCH when the written verdict claims a win the numbers do not show, or the reverse.
+  The CI level and block lengths come from each run's `evaluation.json`. For a ticket whose branch
+  is not merged yet, point `--docs-dir` at that worktree's `docs/experiments`.
+- The index leaderboard uses `collect_leaderboard()` with its default `split="dev"`, so it reads dev
+  runs only; reports read dev runs only too.
+- Each report also writes `<ticket>.json` (title, write-up, verdict, computed outcome, best run); the index reads them.
+- Needs `mlflow` and `matplotlib` (both come with the experiments group; matplotlib is a transitive
+  dependency of mlflow, not declared in `pyproject.toml`). Output depends on the store contents, so
+  regenerate after new runs.

@@ -1,0 +1,45 @@
+id: e07-sarima
+ticket: KAN-85
+hypothesis: Per-station SARIMA with a 24 h seasonal period (p=1, q 0-1, seasonal P/Q in {(1,0),(0,1),(1,1)},
+  order by AIC on the newest 42 days of the training part), state updated hourly, lowers +24 h MAE versus
+  the smoother.
+model_family: sarima
+model: sarima-s24-aic
+feature_set: own-history-hourly
+params:
+  name: sarima
+  factory: sarima
+  d: 0
+  p_grid:
+  - 1
+  q_grid:
+  - 0
+  - 1
+  seasonal_grid:
+  - - 1
+    - 0
+  - - 0
+    - 1
+  - - 1
+    - 1
+  seasonal_period: 24
+  fit_days: 42
+  maxiter: 50
+horizons:
+- 6
+- 12
+- 24
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.15
+decision_rule: 'Dev, descriptive. Primary CI: 72 h moving-block bootstrap (B 10,000, seed 20261101), sensitivities
+  24 h and 168 h. Five E07 variants are registered (arima-d0, arima-d1, sarima, ets-damped, ets-notrend);
+  read the CI at the unadjusted 95% level and at the Bonferroni level 1-0.05/5 (tracked sensitivity run).
+  Keep the family only if a variant has diff_vs_smoother_24h <= -0.15 with the 72 h CI entirely below
+  zero against both persistence and the smoother after the 5-variant correction and not fragile; otherwise
+  drop it. No holdout.'
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist
