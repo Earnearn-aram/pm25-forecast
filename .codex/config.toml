@@ -1,0 +1,8 @@
+# Codex app config for this repo (KAN-95). Read docs/experiments/START-HERE.md first.
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+# uv sync, git push and gh need the network.
+network_access = true
+# Shared MLflow store and frozen snapshots live outside the repo (see START-HERE).
+writable_roots = ["~/pm25-experiments", "~/.cache/uv"]
