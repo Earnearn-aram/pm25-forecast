@@ -1,0 +1,32 @@
+# KAN-92 (E15). Committed before the run. Dev split only; never the holdout.
+id: e15-ridge-clim
+ticket: KAN-92
+hypothesis: The equal blend of the two best simple members (pooled ridge e06-ridge-pool-raw-chg and 28
+  d climatology blend e05-clim-28d-blend) lowers +24 h dev MAE versus the smoother.
+model_family: ensemble
+model: ridge-clim-blend
+feature_set: member-predictions
+params:
+  variant: ridge_clim
+  members: ridge e06-ridge-pool-raw-chg + clim e05-clim-28d-blend, weights 0.5/0.5
+horizons:
+- 24
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.15
+decision_rule: 'Dev, descriptive. Primary CI: 72 h moving-block bootstrap (B 10,000, seed 20261101), 24
+  h and 168 h as sensitivities. Five E15 ensemble variants are registered (equal5, invmae5, stack5, smoother-gbm,
+  ridge-clim), K = 5. An ensemble counts as better than the smoother only if its 72 h CI at the Bonferroni
+  level 1 - 0.05/5 = 99% is entirely below zero against both persistence and the smoother, the point estimate
+  vs the smoother is <= -0.15 ug/m3, and the result is not fragile; the best variant by dev mae_24h gets
+  a tracked run at that level (--finalists 5). The unadjusted 95% CI is descriptive. The selection of
+  the five members from earlier tickets (about 100 dev runs) is not corrected and makes every number optimistic.
+  Shortlist rule (up to 3, written reason each, at most 2 would be registered as holdout finalists): an
+  ensemble or member enters only with a CI vs persistence entirely below zero, a dev MAE not above the
+  smoother plus 0.05, a point estimate vs the smoother below zero, and gate checks (serving lag pass,
+  station gate pass) satisfied. No holdout.'
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist

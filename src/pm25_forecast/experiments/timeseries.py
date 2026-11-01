@@ -184,7 +184,14 @@ def arima_family(train: TrainSnapshot, params: Mapping[str, Any]) -> Predictor:
     base = dict(chains)  # the refit results; ``chains`` advances hourly
     cache: dict[str, Any] = {"snap": None, "fc": None}
 
+    stateless = bool(
+        params.get("stateless", False)
+    )  # KAN-92: no hourly chain, same call = same value
+
     def advance(station: str, by_ts: Mapping[datetime, Observation], end: datetime) -> Any:
+        if stateless:  # always filter the same recent window with the frozen refit parameters
+            win = _grid(by_ts, end - (FALLBACK_WINDOW - 1) * HOUR, end, _value)
+            return base[station].results.apply(win)
         chain = chains[station]
         cur = by_ts.get(chain.end)
         same = (cur is None and np.isnan(chain.last)) or (
@@ -198,7 +205,7 @@ def arima_family(train: TrainSnapshot, params: Mapping[str, Any]) -> Predictor:
         else:  # fresh instance / earlier origin / changed history: filter a recent window
             start = end - (FALLBACK_WINDOW - 1) * HOUR
             win = _grid(by_ts, start, end, _value)
-            res = base[station].apply(win)
+            res = base[station].results.apply(win)
         chains[station] = _Chain(res, end, float(by_ts[end].value) if end in by_ts else np.nan)
         return res
 
