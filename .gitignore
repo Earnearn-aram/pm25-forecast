@@ -33,3 +33,6 @@ mlruns/
 
 # Static dashboard build output (KAN-25)
 /site/
+
+# Rendered experiment reports (KAN-81)
+/report/

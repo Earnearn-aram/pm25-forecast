@@ -23,6 +23,11 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.17",
 ]
+experiments = [
+    "jupyter",
+    "mlflow",
+    "nbconvert",
+]
 
 [build-system]
 requires = ["hatchling"]
