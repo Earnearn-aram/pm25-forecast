@@ -12,6 +12,7 @@ from typing import Any
 
 from pm25_forecast.collector import open_db
 from pm25_forecast.features import SMOOTHER_FEATURE_NAMES
+from pm25_forecast.models.ridge_bundle import validate_ridge_artifact
 from pm25_forecast.storage import db
 
 INSERT_MODEL = """
@@ -139,6 +140,9 @@ def _validate_artifact_features(artifact: bytes, feature_list: list[str]) -> Non
             raise ValueError("smoother artifact needs a beta in [0, 1]")
         if feature_list != list(SMOOTHER_FEATURE_NAMES):
             raise ValueError("manifest feature_list does not match the smoother inputs")
+        return
+    if "ridge" in bundle:  # KAN-100: coefficients, no booster; features must equal the manifest
+        validate_ridge_artifact(artifact, feature_list)
         return
     if isinstance(bundle.get("horizons"), dict) and bundle["horizons"]:
         model_texts = list(bundle["horizons"].values())
