@@ -1,10 +1,13 @@
 """Leakage-safe rolling PM2.5 features for experimental smoothing models."""
 
+import logging
 from datetime import datetime, timedelta
 from math import isfinite
 
 from pm25_forecast.backtest import Observation
 from pm25_forecast.models.baselines import require_utc
+
+logger = logging.getLogger(__name__)
 
 
 def rolling_values(
@@ -13,6 +16,9 @@ def rolling_values(
     """Return available, finite values in [origin-hours, origin-1h]."""
     origin = require_utc(origin)
     start, end = origin - timedelta(hours=hours), origin - timedelta(hours=1)
+    missing = sum(1 for o in observations if start <= o.ts <= end and o.available_at is None)
+    if missing:
+        logger.warning("Dropped %d rolling observations with missing available_at", missing)
     return [
         (o.ts, o.value)
         for o in observations
@@ -32,6 +38,11 @@ def exponential_mean(
         raise ValueError("half-life must be positive")
     origin = require_utc(origin)
     numerator = denominator = 0.0
+    missing = sum(
+        1 for o in observations if o.ts <= origin - timedelta(hours=1) and o.available_at is None
+    )
+    if missing:
+        logger.warning("Dropped %d EWMA observations with missing available_at", missing)
     for o in observations:
         age = (origin - o.ts).total_seconds() / 3600
         if (
@@ -54,8 +65,24 @@ def same_hour_mean(
     """Mean at target's UTC hour in the preceding days, with the serving lag."""
     if days <= 0:
         raise ValueError("days must be positive")
-    target = require_utc(target)
-    values = [
-        v for ts, v in rolling_values(observations, origin, days * 24) if ts.hour == target.hour
-    ]
-    return sum(values) / len(values) if values else None
+    origin, target = require_utc(origin), require_utc(target)
+    hourly: dict[datetime, tuple[datetime, datetime, float]] = {}
+    start, end = origin - timedelta(days=days), origin - timedelta(hours=1)
+    missing = sum(1 for o in observations if start <= o.ts <= end and o.available_at is None)
+    if missing:
+        logger.warning("Dropped %d climatology observations with missing available_at", missing)
+    for o in observations:
+        if (
+            not start <= o.ts <= end
+            or o.ts.hour != target.hour
+            or o.available_at is None
+            or o.available_at > origin
+            or not isfinite(o.value)
+            or o.value < 0
+        ):
+            continue
+        hour = o.ts.replace(minute=0, second=0, microsecond=0)
+        candidate = (o.ts, o.available_at, o.value)
+        if hour not in hourly or candidate > hourly[hour]:
+            hourly[hour] = candidate
+    return sum(row[2] for row in hourly.values()) / len(hourly) if hourly else None

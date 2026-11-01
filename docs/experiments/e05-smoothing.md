@@ -1,15 +1,26 @@
 # E05 smoothing experiments — KAN-83
 
-Development only, frozen snapshot `a00cfc9edd4c3fb5f7b946e8871be9e5a88fe2bb8ef56b91d895101da41c0208`. All 26 preregistered variants produced valid, clean tracked runs; one moving-average variant was rerun after an optimization (27 completed runs total). They share 4,200 +24 h pairs across five stations and five weekly folds. Observations assume `available_at = ts + 1h`; this is not measured arrival time. The holdout was not accessed. These are unadjusted exploratory CIs, and selection among 26 variants makes them optimistic.
+Development only, frozen snapshot `a00cfc9edd4c3fb5f7b946e8871be9e5a88fe2bb8ef56b91d895101da41c0208`. All 26 preregistered variants produced valid, clean tracked runs; one moving-average variant was rerun after an optimization (27 original-grid runs total), followed by one tracked Bonferroni sensitivity run (28 total). They share 4,200 +24 h pairs across five stations and five weekly folds. Observations assume `available_at = ts + 1h`; this is not measured arrival time. The holdout was not accessed. These are unadjusted exploratory CIs, and selection among 26 variants makes them optimistic. No candidate has an interval entirely below zero after the 26-comparison Bonferroni sensitivity check described below.
 
-Best by +24 h dev MAE in each family:
+Lowest +24 h dev MAE in each family (none establishes an advantage after correction):
 
 - Moving average: 24 h, MAE 3.926; CI vs smoother [-0.099, 0.154], run `3a4d8f968d104fe4818703cc29b28adb`.
 - EWMA: 6 h half-life, MAE 3.874; CI [-0.061, 0.060], run `d2e50e44ba8343598ab50e5e75fcada4`.
 - Beta smoother: beta 0.7, MAE 3.829; CI [-0.109, 0.008], run `3f8a628c51014da4ac62ffbbe58245ee`.
 - Same-hour climatology: 28 days blended equally with persistence, MAE 3.791; CI [-0.339, 0.205], run `444eecf8cc5d4dc492e157ee0fa51104`.
 
-Beta 0.6 has MAE 3.837 and a 72 h CI [-0.066, -0.007] below zero against the fixed smoother, but it is **fragile**: the 24 h sensitivity CI [-0.070, 0.002] crosses zero (168 h: [-0.051, -0.007]). Its dev result is not evidence of holdout performance or promotion. The lowest-MAE beta 0.7 and climatology blend have intervals crossing zero. Spike metrics are undefined: 15 observed spikes, below the minimum of 50. Pure climatology and the 50/50 blend use observations from the last N days at the target UTC hour, respecting the serving lag. EWMA weights all available history by elapsed hours. Beta 0.5 is the fixed smoother and beta 1.0 matches the 24 h moving average on this snapshot.
+Beta 0.6 has MAE 3.837 and a 72 h CI [-0.066, -0.007] below zero against the fixed smoother, but it is **fragile**: the 24 h sensitivity CI [-0.070, 0.002] crosses zero (168 h: [-0.051, -0.007]). Its dev result is not evidence of holdout performance or promotion. The lowest-MAE beta 0.7 and climatology blend have intervals crossing zero. No variant beats the smoother after the 26-comparison correction. Spike metrics are undefined: 15 observed spikes, below the minimum of 50. Pure climatology and the 50/50 blend use observations from the last N days at the target UTC hour, respecting the serving lag. EWMA weights all available history by elapsed hours. Beta 0.5 is the fixed smoother and beta 1.0 matches the 24 h moving average on this snapshot.
+
+
+## Review of provenance and uncertainty
+
+The 3 h moving average was rerun after restricting the feature scan to recent observations to reduce runtime. Its original run `ce4e9829b0114e62a9bcff34c0c957b6` and rerun `2dcd664e144e4f37a984a623126a2f37` have identical full score and counter objects in `evaluation.json`; the rerun is the single row counted on the leaderboard. The shared fixed-smoother reference is E04 run `da9ad074c138430199b42f1c2ef23d21` (MAE 3.867). Beta 0.5 is a separate candidate that reproduces that baseline; the report chart uses the E04 run.
+
+Protocol section 6 specifies 72-hour blocks as primary, with 24- and 168-hour sensitivities. The individual preregistrations did not explicitly name a block length, so all 72-hour results here are exploratory, not a candidate-specific preregistered claim.
+
+Protocol section 8 does not require a multiple-comparison adjustment for dev exploration: dev CIs are descriptive and its Bonferroni rule is for up to two registered holdout finalists. As an additional post-hoc conservative sensitivity, we used a two-sided Bonferroni level of 1 - 0.05/26 = 99.8077% on the 72-hour CI. Beta 0.6 was the only candidate with an unadjusted 95% upper bound below zero; at the wider level its CI is [-0.081, 0.009] (tracked diagnostic run `e3fb0fa2e6dc4d4e9050a71208fa56ae`), so it no longer excludes zero. All other finite 95% intervals already included zero and a nested wider percentile interval cannot exclude it; the identical smoother has no CI. Thus no candidate beats the smoother under this sensitivity. This is not the protocol's holdout gate and does not unlock holdout scoring.
+
+The post-run feature safeguards choose one deterministic value per observed UTC hour if duplicates occur and log a count of rows excluded for missing availability. The evaluated frozen snapshot has one observation per station-hour and no missing availability, so these safeguards do not change the recorded runs.
 
 ## E05 leaderboard rows
 

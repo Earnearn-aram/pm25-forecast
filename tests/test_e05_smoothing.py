@@ -46,3 +46,26 @@ def test_beta_half_matches_serving_smoother():
     train = TrainSnapshot(T, ("a",), (24,), (), ())
     snap = Snapshot(T, "a", (ob(24, 10), ob(2, 20), ob(1, 30)), ())
     assert beta_smoother(train, {"beta": 0.5})(snap, 24) == pytest.approx(25)
+
+
+def test_beta_one_matches_ma24():
+    train = TrainSnapshot(T, ("a",), (24,), (), ())
+    snap = Snapshot(T, "a", (ob(24, 10), ob(2, 20), ob(1, 30)), ())
+    assert beta_smoother(train, {"beta": 1})(snap, 24) == pytest.approx(
+        moving_average(train, {"window_hours": 24})(snap, 24)
+    )
+
+
+def test_climatology_ignores_future_and_deduplicates_hours(caplog):
+    from dataclasses import replace
+
+    old = ob(24, 20)
+    rows = (
+        old,
+        replace(old, value=40),
+        ob(0, 999),
+        ob(48, 5, T + timedelta(hours=1)),
+        replace(ob(72, 99), available_at=None),
+    )
+    assert same_hour_mean(rows, T, T + timedelta(hours=24), 7) == 40
+    assert "Dropped 1 climatology observations with missing available_at" in caplog.text
