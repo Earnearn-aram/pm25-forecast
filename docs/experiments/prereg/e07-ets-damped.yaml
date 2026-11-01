@@ -1,0 +1,34 @@
+id: e07-ets-damped
+ticket: KAN-85
+hypothesis: Additive Holt-Winters with damped trend and daily (24 h) seasonality, smoothing parameters
+  refit weekly on the newest 28 days and state re-run hourly over the newest 168 gap-free hours, lowers
+  +24 h MAE versus the smoother.
+model_family: ets
+model: holt-winters-damped
+feature_set: own-history-hourly
+params:
+  name: ets-damped
+  factory: ets
+  trend: add
+  damped_trend: true
+  seasonal_periods: 24
+  fit_days: 28
+  state_hours: 168
+horizons:
+- 6
+- 12
+- 24
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.15
+decision_rule: 'Dev, descriptive. Primary CI: 72 h moving-block bootstrap (B 10,000, seed 20261101), sensitivities
+  24 h and 168 h. Five E07 variants are registered (arima-d0, arima-d1, sarima, ets-damped, ets-notrend);
+  read the CI at the unadjusted 95% level and at the Bonferroni level 1-0.05/5 (tracked sensitivity run).
+  Keep the family only if a variant has diff_vs_smoother_24h <= -0.15 with the 72 h CI entirely below
+  zero against both persistence and the smoother after the 5-variant correction and not fragile; otherwise
+  drop it. No holdout.'
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist
