@@ -1,5 +1,7 @@
 # E05 smoothing experiments — KAN-83
 
+Verdict: **NO WIN**. No variant beats the smoother once fragility and the 26-comparison check are applied (dev only).
+
 Development only, frozen snapshot `a00cfc9edd4c3fb5f7b946e8871be9e5a88fe2bb8ef56b91d895101da41c0208`. All 26 preregistered variants produced valid, clean tracked runs; one moving-average variant was rerun after an optimization (27 original-grid runs total), followed by one tracked Bonferroni sensitivity run (28 total). They share 4,200 +24 h pairs across five stations and five weekly folds. Observations assume `available_at = ts + 1h`; this is not measured arrival time. The holdout was not accessed. These are unadjusted exploratory CIs, and selection among 26 variants makes them optimistic. No candidate has an interval entirely below zero after the 26-comparison Bonferroni sensitivity check described below.
 
 Lowest +24 h dev MAE in each family (none establishes an advantage after correction):
