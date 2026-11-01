@@ -15,7 +15,7 @@ from pm25_forecast.features.weather import (
     weather_features,
 )
 
-FIXTURE = Path(__file__).parent / "fixtures" / "open_meteo" / "previous_runs_kan88_59t.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "open_meteo_previous_runs" / "recorded_59t.json"
 T0 = datetime(2026, 10, 20, tzinfo=UTC)  # first fixture hour
 HOUR = timedelta(hours=1)
 
