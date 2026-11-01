@@ -29,7 +29,9 @@ SMOOTHER_HORIZONS: tuple[int, ...] = (24,)
 SMOOTHER_VERSION = "kan76-smoother-24h-b05"
 # KAN-65 v2 analysis (branch kan-65/ds-eda-features, out/kan65_v2/tables.md): KAN-15 snapshot and
 # the +24 h HOLDOUT row (n = 10,729 station-hours) for the smoother and for persistence.
-KAN65_SNAPSHOT_SHA256 = "fdd9b90ba6b96a1de512175f638808efe34fc8ae80c35b3e89bf440e71553a09"
+KAN65_SNAPSHOT_SHA256 = (
+    "fdd9b90ba6b96a1de512175f638808efe34fc8ae80c35b3e89bf440e71553a09"  # pragma: allowlist secret
+)
 KAN65_WINDOW = {"start": "2024-10-28T00:00:00+00:00", "end": "2026-10-28T21:00:00+00:00"}
 KAN65_HOLDOUT_24H = {
     "n": 10729,
