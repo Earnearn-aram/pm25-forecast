@@ -1,10 +1,15 @@
 """Application settings, read from environment variables (and an optional local .env file)."""
 
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# KAN-77: observations after this are affected by the KAN-74 collector bug and are kept out of the
+# drift reference. Lift it with DRIFT_KAN74_CUTOFF= (blank) once KAN-74 is repaired.
+KAN74_BUG_CUTOFF = datetime(2026, 10, 26, 0, 0, tzinfo=UTC)
 
 
 class Settings(BaseSettings):
@@ -35,6 +40,23 @@ class Settings(BaseSettings):
     # KAN-23: weekly retrain may move the production champion only when this is true. Default off;
     # a blank value (unset repo variable) is off; an unparseable value is a config error.
     auto_promote: bool = False
+
+    # KAN-77: DRIFT_KAN74_CUTOFF, an ISO timestamp with a UTC offset; unset = default, blank = none.
+    drift_kan74_cutoff: datetime | None = KAN74_BUG_CUTOFF
+
+    @field_validator("drift_kan74_cutoff", mode="before")
+    @classmethod
+    def _cutoff_blank_disables(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("drift_kan74_cutoff", mode="after")
+    @classmethod
+    def _cutoff_is_aware(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.utcoffset() is None:
+            raise ValueError(
+                "DRIFT_KAN74_CUTOFF needs a UTC offset, e.g. 2026-10-26T00:00:00+00:00"
+            )
+        return v
 
     @field_validator("auto_promote", mode="before")
     @classmethod
