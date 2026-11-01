@@ -84,7 +84,7 @@ Best variant, in detail:
   Predicting the median of a skewed target after `expm1` does not help MAE here, and "change in
   log space" is the worst choice.
 - Level versus change matters little for ridge (3.768 vs 3.757) and nothing for OLS (identical);
-  it helps lasso (3.819 to 3.787) and per-station ridge (3.859 to 3.812) because shrinkage then
+  it helps lasso (3.819 to 3.787) and per-station ridge (3.859 to 3.812) plausibly because shrinkage then
   pulls toward persistence rather than toward the training mean.
 - Pooled with station one-hot is as good as or better than one model per station (ridge 3.757 vs
   3.812) at 5 stations and about 4 weeks of data at the first refit.
@@ -105,7 +105,7 @@ The lag, mean and difference features are strongly collinear, so individual sign
 interpretable. Summed in raw units, a uniform +1 ug/m3 shift of the whole history moves the +24 h
 forecast by about +0.65 ug/m3 (0.59 to 0.80 across refits): the model is partial mean reversion
 to the recent level, similar in spirit to the smoother, plus small calendar and station offsets
-(weekend, day-of-week, hour of day). Lasso (ratio 0.1) keeps 10 to 16 of 25 features, mostly
+(weekend, day-of-week, hour of day). Lasso (ratio 0.03 to 0.1) keeps 10 to 16 of 25 features, mostly
 `pm25_lag_1h` and the differences. These are predictive associations, not causes.
 
 ## 6. Limits
