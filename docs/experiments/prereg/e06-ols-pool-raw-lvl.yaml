@@ -1,0 +1,35 @@
+id: e06-ols-pool-raw-lvl
+ticket: KAN-84
+hypothesis: A ols model (pooled, raw target, predicting the level) on fs_v2_core lowers +24 h dev MAE
+  versus the smoother (E06 grid of 24 variants plus 1 planned sensitivity, K = 25).
+model_family: linear
+model: ols-pool-raw-lvl
+feature_set: fs_v2_core
+params:
+  variant: e06-ols-pool-raw-lvl
+  model: ols
+  scope: pooled
+  target: raw
+  output: level
+  feature_set: fs_v2_core
+  regularisation: none (ordinary least squares)
+  inner_cv: expanding window, 5 time blocks by origin, 4 splits, MAE in ug/m3, training part of each fold
+    only
+  primary_ci_block_hours: 72
+  planned_comparisons_K: 25
+horizons:
+- 6
+- 12
+- 24
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.15
+decision_rule: 'Dev exploration. Primary CI: 72 h moving-block bootstrap (24 h and 168 h as sensitivities).
+  The best variant is the valid one with the lowest dev mae_24h. It counts as better than the smoother
+  only if its 72 h CI at the Bonferroni level 1 - 0.05/25 (K = 25 planned variants) is entirely below
+  zero; the unadjusted 95% CI is descriptive. No holdout scoring.'
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist
