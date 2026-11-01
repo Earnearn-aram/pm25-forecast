@@ -145,6 +145,9 @@ def _synthetic_run(factory, params=None):
     [("ridge", None), ("lgbm", {"n_seeds": 1, "n_estimators": 20, "min_child_samples": 20})],
 )
 def test_models_run_through_the_runner_and_base_cams_use_same_rows(family, params):
+    if family == "lgbm":
+        # LightGBM's scikit-learn API needs scikit-learn, which lives in the experiments group only.
+        pytest.importorskip("sklearn")
     from pm25_forecast.experiments import kan87_models as m
 
     cams = _synthetic_run(getattr(m, f"{family}_cams"), params)
