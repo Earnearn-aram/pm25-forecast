@@ -61,3 +61,28 @@ def ewma(train: TrainSnapshot, params: Mapping[str, Any]) -> Predictor:
         return last_result
 
     return predict
+
+
+def beta_smoother(train: TrainSnapshot, params: Mapping[str, Any]) -> Predictor:
+    """Blend latest and serving mean24 with a fixed preregistered coefficient."""
+    from pm25_forecast.features import mean_24h
+
+    beta = float(params["beta"])
+    stations = set(train.stations)
+
+    def predict(snapshot: Snapshot, horizon: int) -> float | None:
+        if snapshot.station_id not in stations:
+            return None
+        recent = snapshot.observations[-24:]
+        latest = build_features(
+            recent,
+            (),
+            snapshot.prediction_time,
+            snapshot.prediction_time + timedelta(hours=horizon),
+        )["pm25_latest"]
+        if latest is None:
+            return None
+        mean = mean_24h(recent, snapshot.prediction_time)
+        return latest if mean is None else latest + beta * (mean - latest)
+
+    return predict
