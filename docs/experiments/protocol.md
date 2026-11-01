@@ -38,7 +38,7 @@ valid `available_at` are excluded, never filled with `ts`.
 experiment snapshot we apply an explicit, documented assumption instead: `available_at = ts + 1 h`
 for every air4thai observation (backfilled rows have an `ingested_at` days later, which would
 distort walk-forward training). This is the serving lag, not a measured arrival time, and every
-report states it. CAMS vintages keep their real `available_at` (collected only since 2026-10-27).
+report states it. CAMS vintages keep their real `available_at` (collected only since 2026-10-27). The default snapshot therefore has 0 vintages; a CAMS-inclusive snapshot needs `--kan74-repaired` (KAN-80).
 KAN-74-affected targets stay excluded until the repair (section 3).
 
 ## 3. Data
@@ -46,7 +46,7 @@ KAN-74-affected targets stay excluded until the repair (section 3).
 - Frozen snapshot from E02 (KAN-80), identified by `snapshot_sha256`. Never re-export mid-story.
 - **air4thai era only**: `ts >= 2026-07-31T17:00:00Z` (`S0`). Earlier openaq rows MUST NOT enter
   features, labels or training (source break: openaq is ~8.6× smoother hour to hour; KAN-65).
-- **Targets after 2026-10-26T00:00:00Z are excluded** until the KAN-74 repair; rows after that may
+- **Targets at or after 2026-10-26T00:00:00Z are excluded** until the KAN-74 repair; rows after that may
   not be used as labels. (Feature inputs before the cut are fine.)
 - Station cohort: stations in the snapshot with at least 80% hourly coverage in the dev period,
   fixed once in the snapshot manifest and used by all experiments.
