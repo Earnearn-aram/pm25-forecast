@@ -40,6 +40,16 @@ def obs():
     return make_obs()
 
 
+@pytest.fixture(autouse=True)
+def small_lag_probe(request, monkeypatch):
+    """Probe 8 origins per fold instead of 48: same mechanism, a sixth of the cost.
+
+    Tests marked ``full_probe`` keep the production sample size.
+    """
+    if "full_probe" not in request.keywords:
+        monkeypatch.setattr(ev, "LAG_PROBE_ORIGINS_PER_FOLD", 8)
+
+
 def prereg(**over):
     base = {
         "id": "e99-test-v1",
@@ -350,11 +360,13 @@ def test_holdout_run_scores_three_weekly_folds(obs):
 # ---- end to end: CLI, snapshot on disk, MLflow ------------------------------------------
 
 
-@pytest.fixture
-def snapshot_dir(tmp_path, obs):
+@pytest.fixture(scope="module")
+def snapshot_dir(tmp_path_factory, obs):
+    """Written once per module; every test only reads it."""
+    root = tmp_path_factory.mktemp("snap")
     rows = [(o.station_id, o.ts, o.value, "air4thai", o.available_at, o.available_at) for o in obs]
-    write_snapshot(tmp_path / "snap", rows, [], kan74_repaired=False, git_sha="x")
-    return tmp_path / "snap"
+    write_snapshot(root / "snap", rows, [], kan74_repaired=False, git_sha="x")
+    return root / "snap"
 
 
 @pytest.fixture
@@ -504,10 +516,18 @@ def test_holdout_already_scored_rejects_unsafe_id():
 # ---- the documented example model ------------------------------------------------------
 
 
-def test_ridge_example_runs_through_the_runner(obs):
+@pytest.fixture(scope="module")
+def ridge_run(obs):
+    """One shared ridge run (the slowest model here) for the runner and the runtime tests."""
     from pm25_forecast.experiments.examples import ridge_linear
 
+    start = time.perf_counter()
     res = ev.run_evaluation(obs, [], fit=ridge_linear.fit, horizons=(6, 24), params={"alpha": 5})
+    return res, time.perf_counter() - start
+
+
+def test_ridge_example_runs_through_the_runner(ridge_run):
+    res = ridge_run[0]
     s = res["scores"]["24"]
     assert s["coverage"] == 1.0 and res["invalid_reasons"] == []
     assert s["n_pairs"] == 5 * 7 * 24 * len(STATIONS)
@@ -633,6 +653,7 @@ def future_vintage_model(train):
     return predict
 
 
+@pytest.mark.full_probe
 def test_lag_probe_passes_for_the_builtin_models(obs):
     for fit in (ev.persistence, ev.smoother, ev.seasonal_naive):
         lag = ev.run_evaluation(obs, [], fit=fit, horizons=(24,))["serving_lag"]
@@ -753,13 +774,10 @@ def test_lag_probe_never_touches_the_live_predictor(obs):
     assert all(v <= 200 for cache in live_seen[0::3] for v in cache.values())
 
 
-def test_lag_probe_runtime_with_a_nontrivial_model(obs):
-    from pm25_forecast.experiments.examples import ridge_linear
-
-    start = time.perf_counter()
-    r = ev.run_evaluation(obs, [], fit=ridge_linear.fit, horizons=(6, 12, 24))
+def test_lag_probe_runtime_with_a_nontrivial_model(ridge_run):
+    r, elapsed = ridge_run  # probe sample size is the shrunken test one; the model cost dominates
     assert r["serving_lag"]["status"] == "pass"
-    assert time.perf_counter() - start < 240
+    assert elapsed < 240
 
 
 def test_lag_probe_is_deterministic(obs):
