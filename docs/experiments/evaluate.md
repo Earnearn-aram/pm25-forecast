@@ -17,9 +17,9 @@ Statistics live in `experiments/stats.py` (numpy and math only, no scipy).
 | `--prereg` | pre-registration YAML/JSON. Without it the run is tagged `prereg=exploratory` (never holdout-eligible) and the model name comes from the factory name |
 | `--snapshot` | E02 snapshot directory (hash is re-verified on load) |
 | `--model module:factory` | the model factory, see below. Built-ins: `pm25_forecast.experiments.evaluate:{persistence,seasonal_naive,smoother}` |
-| `--holdout` | score the locked holdout instead of dev. Refused unless the prereg is `final: true`, `split: holdout`, the git tree is clean, logging is on, and no holdout run with this prereg id exists yet |
-| `--finalists k` | number of registered finalists; CI level is `1 - 0.05/k` (logged as `ci_level`) |
-| `--horizons 6 12 24` | default: the prereg horizons, else 6 12 24 |
+| `--holdout` | (with it, `--horizons` and `--finalists` are rejected: both come from the prereg) score the locked holdout instead of dev. Refused unless the prereg is `final: true`, `split: holdout`, the git tree is clean, logging is on, and no holdout run with this prereg id exists yet |
+| `--finalists k` | dev only; default is `prereg.finalists`. CI level is `1 - 0.05/k` (logged as `ci_level`) |
+| `--horizons 6 12 24` | dev only; default: the prereg horizons, else 6 12 24 |
 | `--no-log` | dry run, nothing written to MLflow (not allowed with `--holdout`) |
 | `--experiment`, `--run-name`, `--ticket`, `--agent`, `--out-dir` | overrides; default experiment is `kan78/<prereg id>` or `kan78/e04-<model>` |
 
@@ -29,28 +29,45 @@ validity reasons) is `evaluation.json`, attached to the MLflow run as an artifac
 
 ## Writing a model
 
+The complete, tested example is `src/pm25_forecast/experiments/examples/ridge_linear.py` (ridge
+on `[1, last value, mean24]`, numpy only); run it with
+`--model pm25_forecast.experiments.examples.ridge_linear:fit`. Copy it as a starting point.
+
+A factory is `fit(train: TrainSnapshot[, params]) -> predict`. Called once per weekly fold.
+
+**What you receive** (all datetimes UTC and timezone-aware):
+
+- `TrainSnapshot(refit_time, stations, horizons, observations, vintages)`.
+- `Observation(station_id, ts, value, available_at)`: one hourly PM2.5 reading. Rows in
+  `train.observations` all have `ts <= refit_time` and `available_at <= refit_time`.
+- `Vintage(station_id, issue_time, valid_time, value, available_at, model)`: a stored CAMS
+  forecast (the default snapshot has none).
+- `params`: optional second argument, receives `prereg.params` (declare it to get it).
+
+**Training pairs** for horizon `h`: every observation is a label with `target = ob.ts`; its
+origin is `target - h hours`. Both are `<= refit_time`, so the pair has matured. For the
+features at that origin use only rows with `ts <= origin - 1 h` and `available_at <= origin`
+(the serving lag), per station:
+
 ```python
-# my_models/lgbm.py  (importable from the working directory or installed)
-from pm25_forecast.experiments.evaluate import TrainSnapshot
+from pm25_forecast.features import build_features, mean_24h
 
-
-def fit(train: TrainSnapshot, params: dict):  # `params` is optional: it receives prereg.params
-    # train.observations / train.vintages: only rows with ts/issue_time <= train.refit_time and
-    # available_at <= train.refit_time. Build (origin, origin+h) pairs from them with
-    # pm25_forecast.features (do not write feature code of your own) and require origin + h <= refit_time.
-    model = ...  # fit here
-
-    def predict(snapshot, horizon: int) -> float | None:
-        feats = snapshot.features(snapshot.prediction_time + timedelta(hours=horizon))
-        return None if all(v is None for v in feats.values()) else float(model.predict(feats))
-
-    return predict
+window = [by_ts[origin - k * HOUR] for k in range(1, 25) if (origin - k * HOUR) in by_ts]
+latest = build_features(window, station_vintages, origin, target)["pm25_latest"]  # may be None
+mean24 = mean_24h(window, origin)  # may be None
 ```
 
-`predict` is the `backtest.Predictor` contract (`docs/backtest.md`): `snapshot` holds only
-observations with `ts <= origin - 1 h` and `available_at <= origin`. Return `None` when there
-is nothing to predict from (never impute); negatives are clipped to 0 and counted; NaN/inf
-aborts the run. The factory is called once per weekly fold.
+`build_features(observations, vintages, prediction_time, valid_time)` returns
+`pm25_latest`, `pm25_same_hour_24h`, `cams_pm25`; it ignores anything later than
+`prediction_time`. Never write feature code of your own: use `pm25_forecast.features`.
+
+**The predictor** is the `backtest.Predictor` contract (`docs/backtest.md`):
+`predict(snapshot: Snapshot, horizon: int) -> float | None`. `snapshot.prediction_time` is the
+origin, `snapshot.station_id` the station, `snapshot.observations` / `snapshot.vintages` only
+rows available at the origin (`snapshot.features(valid_time)` calls `build_features`). Return
+`None` when an input is missing (never impute); negatives are clipped to 0 and counted; NaN or
+inf aborts the run. Use only what is in `train` and `snapshot`; do not read the snapshot
+directory or other data yourself.
 
 ## What the runner does
 
@@ -68,7 +85,7 @@ aborts the run. The factory is called once per weekly fold.
 - **Inference**: hourly pair-weighted series; 72 h moving-block bootstrap (B 10,000, seed
   20261101) for `diff_vs_persistence` and `diff_vs_smoother`, with 24 h / 168 h sensitivities
   and a `fragile` flag; Diebold-Mariano (absolute error, Newey-West, m = 167, HLN, Student-t)
-  against the smoother, with m = 47 and m = h-1 as sensitivities in the JSON.
+  against the smoother (hours with no pairs are dropped, not filled), with m = 47 and m = h-1 as sensitivities in the JSON.
 - **Other**: spike recall/precision (> 37.5, null below 50 observed spikes), MAE by station and
   by target UTC hour, validity reasons (`invalid` tag when any).
 

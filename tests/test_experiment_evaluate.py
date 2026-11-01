@@ -446,3 +446,76 @@ def test_bad_model_spec():
         ev.resolve_factory("no_colon")
     with pytest.raises(ev.EvaluationError):
         ev.resolve_factory("pm25_forecast.experiments.evaluate:HOUR")
+
+
+# ---- review fixes: holdout inputs come from the prereg only; fail closed -----------------
+
+
+@pytest.mark.parametrize("extra", [{"horizons": [24]}, {"finalists": 1}])
+def test_holdout_rejects_cli_horizons_and_finalists(snapshot_dir, extra):
+    with pytest.raises(ev.EvaluationError, match="not allowed with --holdout"):
+        ev.execute(
+            snapshot=snapshot_dir,
+            model="pm25_forecast.experiments.evaluate:smoother",
+            prereg=prereg(**FINAL),
+            holdout=True,
+            **extra,
+        )
+
+
+def test_cli_holdout_with_horizons_exits_2(snapshot_dir, tmp_path):
+    import yaml
+
+    path = tmp_path / "f.yaml"
+    path.write_text(yaml.safe_dump(prereg(horizons=[24], **FINAL).model_dump(mode="json")))
+    args = ["--prereg", str(path), "--snapshot", str(snapshot_dir), "--holdout", "--horizons", "24"]
+    assert ev.main([*args, "--model", "pm25_forecast.experiments.evaluate:smoother"]) == 2
+
+
+def test_ci_level_comes_from_prereg_finalists(snapshot_dir, tmp_path):
+    two = prereg(horizons=[24], finalists=2)
+    res = ev.execute(
+        snapshot=snapshot_dir,
+        model="pm25_forecast.experiments.evaluate:smoother",
+        prereg=two,
+        log=False,
+        out_dir=tmp_path,
+    )
+    assert res["ci_level"] == pytest.approx(0.975)
+
+
+def test_holdout_check_failing_store_refuses(monkeypatch):
+    monkeypatch.setattr(tracking, "git_state", lambda: ("c" * 40, False))
+
+    def boom(_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(ev, "holdout_already_scored", boom)
+    with pytest.raises(ev.EvaluationError, match="cannot check"):
+        ev.check_holdout_allowed(prereg(**FINAL), flag=True, logging_on=True)
+
+
+def test_holdout_already_scored_rejects_unsafe_id():
+    with pytest.raises(ValueError, match="unsafe"):
+        ev.holdout_already_scored("x' or tags.split = 'dev")
+
+
+# ---- the documented example model ------------------------------------------------------
+
+
+def test_ridge_example_runs_through_the_runner(obs):
+    from pm25_forecast.experiments.examples import ridge_linear
+
+    res = ev.run_evaluation(obs, [], fit=ridge_linear.fit, horizons=(6, 24), params={"alpha": 5})
+    s = res["scores"]["24"]
+    assert s["coverage"] == 1.0 and res["invalid_reasons"] == []
+    assert s["n_pairs"] == 5 * 7 * 24 * len(STATIONS)
+    assert s["vs_persistence"]["ci"][1] < 0  # on AR noise a linear blend beats persistence
+    assert np.isfinite(s["mae"]) and "ci" in s["vs_smoother"]
+
+
+def test_ridge_example_resolves_as_a_cli_model_and_takes_params(obs):
+    fit, name = ev.resolve_factory("pm25_forecast.experiments.examples.ridge_linear:fit")
+    assert name == "fit"
+    train = ev.TrainSnapshot(folds.S0 + timedelta(days=40), STATIONS, (24,), tuple(obs[:2000]), ())
+    assert callable(fit(train, params={"alpha": 1.0}))

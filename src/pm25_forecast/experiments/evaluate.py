@@ -22,6 +22,7 @@ import inspect
 import json
 import logging
 import math
+import re
 import sys
 import tempfile
 import time
@@ -52,6 +53,7 @@ SPIKE_THRESHOLD = 37.5  # ug/m3, strictly above (protocol section 5)
 MIN_SPIKE_PAIRS = 50
 MIN_COVERAGE = 0.95
 MIN_CONSIDERED_COVERAGE = 0.80  # station cohort: hourly coverage in the dev period
+_SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 DEFAULT_TICKET = "KAN-82"
 DEFAULT_AGENT = "claude-engineer"
 BASELINE_NAMES = ("persistence", "seasonal_naive", "smoother")
@@ -534,6 +536,8 @@ def run_evaluation(
         raise EvaluationError("no usable observations in the air4thai era")
     plan = make_plan(max(o.ts for o in usable), split)
     data = [o for o in usable if o.ts < plan.limit]
+    # The full list was needed only to find E; drop labels beyond the split's limit (dev: H0).
+    del usable
     cohort = select_cohort(data, folds_mod.S0, plan.dev_limit)
     if not cohort:
         raise EvaluationError("no station has >= 80% hourly coverage in the dev period")
@@ -622,6 +626,8 @@ def ci_level_for(finalists: int) -> float:
 
 def holdout_already_scored(prereg_id: str) -> bool:
     """True if a holdout run tagged with this pre-registration id is already in the store."""
+    if not _SAFE_ID.fullmatch(prereg_id):
+        raise ValueError(f"unsafe pre-registration id {prereg_id!r}")
     client = tracking._client()
     exps = client.search_experiments(filter_string=f"name LIKE '{tracking.EXPERIMENT_PREFIX}%'")
     ids = [e.experiment_id for e in exps]
@@ -644,7 +650,13 @@ def check_holdout_allowed(prereg: Prereg | None, *, flag: bool, logging_on: bool
         raise EvaluationError("a holdout run must be logged to the tracker (no --no-log)")
     if tracking.git_state()[1]:
         raise EvaluationError("refusing holdout: git working tree is dirty (protocol section 12)")
-    if holdout_already_scored(prereg.id):
+    try:
+        scored = holdout_already_scored(prereg.id)
+    except Exception as exc:  # fail closed: if the store cannot be queried, do not score
+        raise EvaluationError(
+            f"refusing holdout: cannot check earlier holdout runs ({type(exc).__name__})"
+        ) from exc
+    if scored:
         raise EvaluationError(
             f"holdout for {prereg.id} was already scored once (protocol section 8)"
         )
@@ -656,7 +668,7 @@ def execute(
     model: str,
     prereg: Prereg | None = None,
     holdout: bool = False,
-    finalists: int = 1,
+    finalists: int | None = None,
     horizons: Sequence[int] | None = None,
     experiment: str | None = None,
     run_name: str | None = None,
@@ -668,6 +680,11 @@ def execute(
     """Guards, evaluation, then ``tracking.log_run``. Returns the result (with ``run_id``)."""
     split = "holdout" if holdout else "dev"
     if split == "holdout":
+        if horizons is not None or finalists is not None:
+            raise EvaluationError(
+                "--horizons and --finalists are not allowed with --holdout: "
+                "both come from the pre-registration"
+            )
         check_holdout_allowed(prereg, flag=holdout, logging_on=log)
     fit, short = resolve_factory(model)
     observations, vintages, _ = load_snapshot(snapshot)
@@ -678,7 +695,9 @@ def execute(
         fit=fit,
         split=split,
         horizons=list(horizons or (prereg.horizons if prereg else HORIZONS_H)),
-        ci_level=ci_level_for(finalists),
+        ci_level=ci_level_for(
+            finalists if finalists is not None else (prereg.finalists if prereg else 1)
+        ),
         params=prereg.params if prereg else None,
     )
     sha = tracking.snapshot_hash(Path(snapshot))
@@ -749,9 +768,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", required=True, help="module:factory, fit(train) -> predictor")
     parser.add_argument("--holdout", action="store_true", help="score the locked holdout (final)")
     parser.add_argument(
-        "--finalists", type=int, default=1, help="k registered finalists (CI level)"
+        "--finalists",
+        type=int,
+        default=None,
+        help="k registered finalists (dev only; default prereg.finalists)",
     )
-    parser.add_argument("--horizons", type=int, nargs="+", default=None)
+    parser.add_argument(
+        "--horizons", type=int, nargs="+", default=None, help="dev only; holdout uses the prereg"
+    )
     parser.add_argument("--experiment", default=None, help="kan78/<id> (default from the prereg)")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--ticket", default=None, help="without a prereg (default KAN-82)")

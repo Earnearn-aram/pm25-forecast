@@ -83,9 +83,21 @@ def test_non_mapping_rejected():
         parse_prereg("- a\n- b\n")
 
 
+def test_finalists_field_default_and_bounds():
+    assert _make().finalists == 1
+    for bad in (0, 3, -1):
+        with pytest.raises(ValueError):
+            _make(finalists=bad)
+    for bad_id in ("x' or tags.split = 'dev", "UPPER-case", "a b c", "ab"):
+        with pytest.raises(ValueError):
+            _make(id=bad_id)
+
+
 def test_finalist_cap_and_duplicates():
-    fin = [_make(id=f"cand-{i}", split="holdout", final=True) for i in range(2)]
+    fin = [_make(id=f"cand-{i}", split="holdout", final=True, finalists=2) for i in range(2)]
     check_finalists(fin)
+    with pytest.raises(ValueError, match="must equal the number registered"):
+        check_finalists([_make(id="cand-a", split="holdout", final=True, finalists=1), fin[0]])
     with pytest.raises(ValueError, match="at most 2"):
         check_finalists([*fin, _make(id="cand-9", split="holdout", final=True)])
     with pytest.raises(ValueError, match="duplicate"):
