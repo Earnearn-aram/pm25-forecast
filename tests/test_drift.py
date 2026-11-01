@@ -4,6 +4,7 @@ import json
 import math
 import socket
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -38,6 +39,9 @@ REF_END = datetime(2026, 10, 21, tzinfo=UTC)
 RECENT_FROM = datetime(2026, 10, 22, 12, tzinfo=UTC)
 RECENT_TO = datetime(2026, 10, 30, 12, tzinfo=UTC)
 SHIFT_FROM = datetime(2026, 10, 23, tzinfo=UTC)
+TAG = "|" + drift.reference_tag()
+SEAS = TAG + "#seasonal"
+ERAS_FIXTURE = Path(__file__).parent / "fixtures" / "drift_reference_eras_synthetic.json"
 
 
 @pytest.fixture(autouse=True)
@@ -375,7 +379,7 @@ def test_reference_stores_its_season_key(fake):
     add_model(fake, CHALLENGER)
     add_series(fake)
     do_run(fake)
-    assert season_keys(fake) == ["doy\u00b130@2026-W44"]
+    assert season_keys(fake) == ["doy\u00b130@2026-W44" + SEAS]
 
 
 def test_reference_is_not_rebuilt_on_the_same_season_key(fake):
@@ -394,13 +398,13 @@ def test_reference_is_rebuilt_when_the_season_key_changes(fake):
     first = computed_ats(fake)
     later = NOW + timedelta(days=3)  # Mon 2 Nov: ISO week 45
     do_run(fake, now=later)
-    assert season_keys(fake) == ["doy\u00b130@2026-W45"]
+    assert season_keys(fake) == ["doy\u00b130@2026-W45" + SEAS]
     assert computed_ats(fake) != first
     # A stale or missing key (rows from before this change) also rebuilds.
     fake.con.execute("UPDATE drift_reference SET season_key = NULL")
     fake.con.commit()
     do_run(fake, now=later + timedelta(minutes=30))
-    assert season_keys(fake) == ["doy\u00b130@2026-W45"]
+    assert season_keys(fake) == ["doy\u00b130@2026-W45" + SEAS]
 
 
 def test_season_window_wraps_around_the_year_end_and_leap_day():
@@ -414,7 +418,10 @@ def test_season_window_wraps_around_the_year_end_and_leap_day():
     assert drift.in_season(datetime(2024, 2, 29, tzinfo=UTC), mar1)  # leap day, other year
 
 
-def test_reference_with_recent_end_on_jan_10_picks_december_and_january_rows(fake):
+def test_reference_with_recent_end_on_jan_10_picks_december_and_january_rows(fake, monkeypatch):
+    monkeypatch.setattr(drift, "DATA_SOURCE_BREAK", datetime(2025, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(drift, "KAN74_BUG_CUTOFF", datetime(2030, 1, 1, tzinfo=UTC))
+
     def far_off_season(ts):  # in season (11 Dec to 9 Feb) ~20-42, otherwise 1000
         return pm25(ts) if drift.in_season(ts, datetime(2027, 1, 10, tzinfo=UTC)) else 1000.0
 
@@ -438,19 +445,144 @@ def test_season_anchor_is_the_monday_of_the_iso_week():
     )
 
 
-def test_too_few_same_season_points_is_insufficient_without_full_window_fallback(fake, caplog):
-    # The training window is plentiful but entirely out of season for the recent end (30 Oct).
-    start, end = datetime(2026, 3, 1, tzinfo=UTC), datetime(2026, 4, 1, tzinfo=UTC)
+def add_eras(fake):
+    data = json.loads(ERAS_FIXTURE.read_text())
+    ts = datetime.fromisoformat(data["start"])
+    rows = [(data["station_id"], (ts + i * H).isoformat(), v) for i, v in enumerate(data["values"])]
+    fake.con.executemany(
+        "INSERT INTO observations (station_id, ts, pm25, source) VALUES (?, ?, ?, 'test')", rows
+    )
+    fake.con.commit()
+
+
+def add_era_model(fake, start, end):
+    add_model(fake, CHALLENGER, start=start, end=end)
+    return drift.read_manifest(fake, CHALLENGER)
+
+
+def test_cut_off_constants_are_timezone_aware_utc():
+    assert datetime(2026, 7, 31, 17, tzinfo=UTC) == drift.DATA_SOURCE_BREAK
+    assert datetime(2026, 10, 26, tzinfo=UTC) == drift.KAN74_BUG_CUTOFF
+    assert drift.DATA_SOURCE_BREAK.utcoffset() == timedelta(0)
+    assert drift.KAN74_BUG_CUTOFF.utcoffset() == timedelta(0)
+
+
+def test_reference_excludes_rows_before_the_data_source_break(fake):
+    add_eras(fake)
+    manifest = add_era_model(
+        fake, datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 10, 25, tzinfo=UTC)
+    )
+    anchor = datetime(2026, 8, 15, tzinfo=UTC)  # season 16 Jul to 14 Sep, spans the break
+    target = drift.build_reference(fake, manifest, None, anchor)[TARGET_FEATURE]
+    first, last = drift.DATA_SOURCE_BREAK, datetime(2026, 9, 14, 23, tzinfo=UTC)
+    assert target.n_ref == int((last - first) / H) + 1  # the break hour is in, nothing before it
+    assert min(target.edges) > 10  # no pre-break value (5-7)
+
+
+def test_reference_excludes_targets_after_the_kan74_cutoff(fake):
+    add_eras(fake)
+    manifest = add_era_model(
+        fake, datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 10, 30, tzinfo=UTC)
+    )
+    anchor = datetime(2026, 10, 12, tzinfo=UTC)  # season 12 Sep to 11 Nov, spans the cut-off
+    reference = drift.build_reference(fake, manifest, None, anchor)
+    first, last = datetime(2026, 9, 12, tzinfo=UTC), drift.KAN74_BUG_CUTOFF
+    target = reference[TARGET_FEATURE]
+    assert target.n_ref == int((last - first) / H) + 1  # the cut-off hour itself is kept
+    assert max(target.edges) < 100  # no bug-era value (900+)
+    # Origins stop 24 h before the cut-off, so their 24 h targets are not after it.
+    latest = reference["pm25_latest"]
+    assert latest.n_ref == int((last - 24 * H - first) / H) + 1
+    assert max(latest.edges) < 100
+
+
+def test_too_little_data_after_the_break_is_insufficient_not_a_crash(fake):
+    # Without KAN-77 the pre-break rows (21 to 31 Jul) would make this reference big enough.
+    add_eras(fake)
+    add_era_model(fake, datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 8, 5, tzinfo=UTC))
+    result = do_run(fake, now=datetime(2026, 8, 20, 12, 20, tzinfo=UTC))
+    assert {c.status for c in result.checks} == {INSUFFICIENT}
+    assert all(c.psi is None for c in result.checks)
+    assert all(c.n_ref < drift.MIN_REFERENCE for c in result.checks)
+    assert by_feature(result)[TARGET_FEATURE].n_ref > 0  # some air4thai-era rows, just too few
+    rows = fake.con.execute("SELECT psi, status, ref_start FROM drift_checks").fetchall()
+    assert {r[0] for r in rows} == {None}
+    assert {datetime.fromisoformat(r[2]) for r in rows} == {drift.DATA_SOURCE_BREAK}
+
+
+def test_training_window_entirely_before_the_break_is_insufficient(fake):
+    add_eras(fake)
+    add_era_model(fake, datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 7, 30, tzinfo=UTC))
+    result = do_run(fake, now=datetime(2026, 8, 20, 12, 20, tzinfo=UTC))
+    assert {c.status for c in result.checks} == {INSUFFICIENT}
+    assert all(c.psi is None and c.n_ref == 0 for c in result.checks)
+
+
+def test_reference_built_with_other_cut_offs_is_rebuilt(fake):
+    add_model(fake, CHALLENGER)
+    add_series(fake)
+    do_run(fake)
+    first = computed_ats(fake)
+    # Rows from before KAN-77 carry a key without the cut-off tag: recomputed on the next run.
+    fake.con.execute("UPDATE drift_reference SET season_key = 'doy±30@2026-W44'")
+    fake.con.commit()
+    do_run(fake, now=NOW + timedelta(minutes=30))
+    assert season_keys(fake) == ["doy±30@2026-W44" + SEAS]
+    assert computed_ats(fake) != first
+
+
+def test_season_without_enough_points_falls_back_to_the_whole_clamped_window(fake, caplog):
+    # The window is plentiful but entirely out of season for the recent end (30 Oct): the whole
+    # clamped window is used and recorded in the season key.
+    start, end = datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 9, 10, tzinfo=UTC)
     add_model(fake, CHALLENGER, start=start, end=end)
     add_series(fake, start=start - 2 * H)
     with caplog.at_level("WARNING", logger="pm25_forecast.drift"):
         result = do_run(fake)
-    assert any(
-        "pm25_latest" in r.getMessage() and "2026-03-01" in r.getMessage() for r in caplog.records
-    )
+    assert any("whole clamped window" in r.getMessage() for r in caplog.records)
+    assert season_keys(fake) == ["doy\u00b130@2026-W44" + TAG + "#whole-window"]
+    target = by_feature(result)[TARGET_FEATURE]
+    assert target.n_ref >= drift.MIN_REFERENCE
+    assert target.status != INSUFFICIENT
+    # A rerun on the same key does not rebuild (the mode suffix is not part of the match).
+    first = computed_ats(fake)
+    do_run(fake, now=NOW + timedelta(minutes=30))
+    assert computed_ats(fake) == first
+
+
+def test_whole_window_too_small_is_still_insufficient(fake):
+    start, end = datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 8, 3, tzinfo=UTC)
+    add_model(fake, CHALLENGER, start=start, end=end)
+    add_series(fake, start=start - 2 * H)
+    result = do_run(fake)
     assert {c.status for c in result.checks} == {INSUFFICIENT}
     assert all(c.psi is None for c in result.checks)
-    assert all(c.n_ref < drift.MIN_REFERENCE for c in result.checks)
+    assert season_keys(fake) == ["doy\u00b130@2026-W44" + TAG + "#whole-window"]
+
+
+def test_kan74_cutoff_setting_can_be_lifted_and_changes_the_reference_tag(fake):
+    add_eras(fake)
+    manifest = add_era_model(
+        fake, datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 10, 30, tzinfo=UTC)
+    )
+    anchor = datetime(2026, 10, 12, tzinfo=UTC)
+    lifted = drift.build_reference(fake, manifest, None, anchor, None)
+    clamped = drift.build_reference(fake, manifest, None, anchor)
+    # Bug-era rows (after 26 Oct) are included again.
+    assert lifted[TARGET_FEATURE].n_ref > clamped[TARGET_FEATURE].n_ref
+    assert drift.reference_tag(None) != drift.reference_tag()
+    # The setting reaches the run: a lifted cut-off stores the other tag and window end.
+    do_run(fake, drift_kan74_cutoff=None)
+    assert "ref@20260731T17/none" in season_keys(fake)[0]
+
+
+def test_settings_cutoff_default_blank_and_naive():
+    assert Settings(_env_file=None).drift_kan74_cutoff == drift.KAN74_BUG_CUTOFF
+    assert Settings(_env_file=None, drift_kan74_cutoff="").drift_kan74_cutoff is None
+    given = Settings(_env_file=None, drift_kan74_cutoff="2026-11-05T00:00:00+00:00")
+    assert given.drift_kan74_cutoff == datetime(2026, 11, 5, tzinfo=UTC)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, drift_kan74_cutoff="2026-11-05T00:00:00")
 
 
 def test_cams_needs_half_of_the_reference_origins_covered(fake):

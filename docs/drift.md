@@ -45,8 +45,26 @@ An empty bin counts as a 0.0001 share so the logarithm is defined. Non-finite va
   recent window: day of the year within 30 days of the recent window's end date, across all
   training years (wrapping around the year end; 29 Feb counts as 28 Feb). This keeps a
   multi-year window from flagging plain seasonality (for example PM2.5 in the dry season against
-  a whole-year reference) as drift. If the seasonal reference has fewer than 200 points the
-  status is `insufficient`; there is no fallback to the whole window.
+  a whole-year reference) as drift. If the seasonal reference has fewer than 200 points (KAN-77:
+  the clamped window shrinks as the weeks pass, so this happens from about late November) the
+  whole clamped window is used instead, stored as `#whole-window` at the end of
+  `drift_reference.season_key` (`#seasonal` otherwise) and logged. Still under 200 points is
+  `insufficient`.
+  Since KAN-77 the reference only uses the air4thai era: rows before `DATA_SOURCE_BREAK`
+  (2026-07-31 17:00 UTC; before it the data was the smoothed OpenAQ product, which made PSI
+  about 0.7) and origins whose target lies after `KAN74_BUG_CUTOFF` (2026-10-26 00:00 UTC, rows
+  affected by the KAN-74 collector bug) are excluded. Origins start 24 h after the break so no
+  history window reaches before it. Both are timezone-aware UTC constants in `drift.py`. If too
+  little is left the status is `insufficient` (PSI NULL). `ref_start`/`ref_end` in `drift_checks`
+  and `drift_reference` show the clamped window. The cut-offs are part of the stored
+  `season_key` (`...|ref@20260731T17/20261026T00#seasonal`), so reference rows built with other cut-offs
+  are recomputed on the next run, with no manual SQL; changing a constant does the same.
+  **Lifting the KAN-74 cut-off** after the collector data is repaired: set `DRIFT_KAN74_CUTOFF`
+  (env var / workflow variable of the drift job). Unset keeps the default
+  `2026-10-26T00:00:00+00:00`; a value needs a UTC offset (for example
+  `2026-11-20T00:00:00+00:00` to move it); blank disables it (tag `ref@...T17/none`). Any change
+  alters the stored key, so the next run rebuilds the references. `DATA_SOURCE_BREAK` stays a
+  constant in `drift.py`.
 - Recent: the last 7 days up to the current UTC hour.
 - Features: every name in `FEATURE_NAMES` (`pm25_latest`, `pm25_same_hour_24h`, `cams_pm25`),
   rebuilt hourly per station from stored observations and CAMS vintages through the shared
