@@ -26,11 +26,20 @@ def _make(**over) -> Prereg:
     return Prereg.model_validate(d)
 
 
+def test_pyyaml_is_importable():
+    # The template is YAML: a missing PyYAML must fail here in CI, not at runtime.
+    import yaml
+
+    assert yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["id"]
+
+
 def test_template_is_valid():
     p = load_prereg(TEMPLATE)
     assert p.horizons == [6, 12, 24]
     assert p.final is False
-    assert p.expected_effect.magnitude < 0
+    assert p.expected_effect.magnitude <= -0.15
+    assert "-0.15" in p.decision_rule
+    assert "3 weekly" in p.decision_rule
 
 
 def test_json_roundtrip(tmp_path):

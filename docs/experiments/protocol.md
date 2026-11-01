@@ -5,7 +5,7 @@ deviate silently: a deviation makes the run invalid (section 12) unless this fil
 reviewed PR first. Words MUST / MUST NOT are binding.
 
 **Goal.** Find a +24 h PM2.5 model that beats persistence **and** the smoother on a locked
-holdout, with a paired 95% CI entirely below zero, servable through the existing registry and
+holdout, with a paired CI (level in section 8) entirely below zero, servable through the existing registry and
 shadow path.
 
 ## 1. Targets, horizons, baselines
@@ -167,8 +167,8 @@ over all pairs of the split.
   **once each**. Candidates, features and parameters are frozen in git before scoring.
 - Confidence level for the gate: 95% when one finalist is registered; with `k` finalists
   (`k` = number registered, not number scored) use Bonferroni, level `1 − 0.05/k` (two-sided
-  percentiles `0.025/k`, `1 − 0.025/k`; at most 97.5%). The level is fixed in the preregistration set before the
-  holdout is touched and logged as param `ci_level`. Each finalist is compared against two
+  percentiles `0.025/k`, `1 − 0.025/k`; at most 97.5%). The level is fixed in the
+  preregistration set before the holdout is touched and logged as param `ci_level`. Each finalist is compared against two
   baselines; both comparisons use the same level.
 - A holdout re-run of the same preregistration id is invalid (a crash re-run with identical
   `git_sha`, `snapshot_sha256` and predictions is allowed and noted).
@@ -195,8 +195,8 @@ A candidate is promoted to shadow only if **all** hold on the holdout:
 2. The paired diff (candidate − baseline) is negative in **each of the 3 weekly holdout folds**,
    against both persistence and the smoother.
 3. No station has MAE worse than persistence by more than **5%** at +24 h. Report a bootstrap CI
-   (same blocks) for each station's relative difference; the gate fails on the point estimate
-   and the report flags stations whose CI includes +5%. Stations below the section 7 minimum are
+   (same blocks) for each station's relative difference; the gate fails on the point estimate;
+   the rule is to report the CI and flag every station whose CI includes +5%. Stations below the section 7 minimum are
    listed; if more than 10% of the cohort is below it, the gate is `insufficient_data`.
 4. Serving-lag check passes: a test proves features at origin `t` use only `ts <= t−1h` and
    `available_at <= t`, and that the serving feature code is the shared module.
@@ -204,7 +204,8 @@ A candidate is promoted to shadow only if **all** hold on the holdout:
    (`feature_list`, `assumed_reporting_lag_hours`, training window, `snapshot_sha256`, artifact hash).
 6. Valid run (section 12), holdout minimums (section 7) met.
 
-Passing is supportive evidence (section 6), a shadow-run recommendation, not production promotion; Boss decides promotion.
+Passing is supportive evidence (section 6) and a shadow-run recommendation, not production
+promotion; Boss decides promotion.
 
 ## 11. MLflow logging
 
