@@ -195,12 +195,24 @@ A candidate is promoted to shadow only if **all** hold on the holdout:
    (minimum effect).
 2. The paired diff (candidate − baseline) is negative in **each of the 3 weekly holdout folds**,
    against both persistence and the smoother.
-3. No station has MAE worse than persistence by more than **5%** at +24 h. Report a bootstrap CI
-   (same blocks) for each station's relative difference; the gate fails on the point estimate;
-   the rule is to report the CI and flag every station whose CI includes +5%. Stations below the section 7 minimum are
-   listed; if more than 10% of the cohort is below it, the gate is `insufficient_data`.
+3. No station has MAE worse than persistence by more than **5%** at +24 h. The gate decides on
+   the **point estimate** only: it fails when a station's `MAE_model / MAE_persistence - 1` is
+   strictly above +5%. Each station's relative difference also gets a bootstrap CI (same blocks and
+   level); every station whose CI includes +5% is flagged in the report, but a flag alone does not
+   fail the gate. Stations below the section 7 minimum are listed; if more than 10% of the cohort
+   is below it, the gate is `insufficient_data`. Computed by `evaluate.py` (KAN-96) as
+   `scores["24"]["station_gate"]`.
 4. Serving-lag check passes: a test proves features at origin `t` use only `ts <= t−1h` and
    `available_at <= t`, and that the serving feature code is the shared module.
+   The runner proves the first half empirically (KAN-96, `serving_lag` in `evaluation.json`):
+   sampled predictions (48 origins per fold, all stations and horizons) are repeated on fresh
+   predictor instances with every row outside the allowed set added to the snapshot, once with
+   values shifted by +1000 and once by -999; any change fails the check and marks the run
+   `invalid`. **Only `status: pass` satisfies this gate**: `inconclusive` (a prediction not
+   reproducible on the same input, an exception on the widened input, or no samples) does not.
+   Predictors must therefore be deterministic and stateless between calls. The probe cannot see
+   data a model reads from outside its `train`/`snapshot` arguments (files, wall-clock time,
+   globals); that and the shared-module half stay code-review items.
 5. Registry manifest validates: the model loads through `models/serving.load_serving_model`
    (`feature_list`, `assumed_reporting_lag_hours`, training window, `snapshot_sha256`, artifact hash).
 6. Valid run (section 12), holdout minimums (section 7) met.
@@ -215,7 +227,9 @@ Tags (all required): `ticket`, `agent`, `model_name`, `model_family`, `feature_s
 Metrics (+24 h, plus `_6h`/`_12h` variants): `mae_24h`, `rmse_24h`, `skill_vs_persistence_24h`,
 `diff_vs_smoother_24h`, `diff_vs_smoother_24h_ci_low`, `diff_vs_smoother_24h_ci_high`,
 `diff_vs_persistence_24h_ci_low`, `diff_vs_persistence_24h_ci_high`, `dm_pvalue_vs_smoother_24h`,
-`spike_recall_24h`, `spike_precision_24h`, `n_pairs_24h`. Params: seed, `ci_level`, `H0`, `E`,
+`spike_recall_24h`, `spike_precision_24h`, `n_pairs_24h`. Gate checks (KAN-96, no `_6h`/`_12h`
+variants): `station_worst_rel_diff_24h`, `station_worst_rel_diff_ci_high_24h`,
+`stations_worse_than_limit_24h`, `serving_lag_checks`, `serving_lag_mismatches`. Params: seed, `ci_level`, `H0`, `E`,
 `fold_starts`, bootstrap B and seed. Undefined metrics are omitted, not zero.
 
 ## 12. What counts as a valid run

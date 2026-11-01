@@ -55,3 +55,4 @@ branch = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --cov=pm25_forecast --cov-report=term-missing"
+markers = ["full_probe: keep the production serving-lag probe sample size (KAN-96 tests)"]
