@@ -4,9 +4,12 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import pytest
 
-from pm25_forecast.backtest import Observation, Snapshot
-from pm25_forecast.experiments.evaluate import TrainSnapshot
-from pm25_forecast.experiments.timeseries import arima, ets, sarima
+# statsmodels lives in the experiments dependency group; the default CI install does not have it.
+pytest.importorskip("statsmodels")
+
+from pm25_forecast.backtest import Observation, Snapshot  # noqa: E402
+from pm25_forecast.experiments.evaluate import TrainSnapshot  # noqa: E402
+from pm25_forecast.experiments.timeseries import arima, ets, sarima  # noqa: E402
 
 START = datetime(2026, 9, 1, tzinfo=UTC)
 HOUR = timedelta(hours=1)
