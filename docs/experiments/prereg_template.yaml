@@ -1,0 +1,26 @@
+# Pre-registration (KAN-79). Copy to docs/experiments/prereg/<id>.yaml, fill in, commit BEFORE
+# any run that carries this id. One file per candidate. See docs/experiments/protocol.md section 9.
+id: e05-lgbm-direct-v1            # lowercase letters, digits, "-" and "_"; unique; logged as MLflow tag `prereg`
+ticket: KAN-85                    # Jira key of the experiment ticket
+hypothesis: >-
+  LightGBM direct with the base feature set lowers +24 h MAE versus the smoother
+  on the locked holdout.
+model_family: lightgbm            # MLflow tag `model_family`
+model: lgbm-direct                # MLflow tag `model_name`
+feature_set: base-v1              # MLflow tag `feature_set`
+params:                           # frozen hyper-parameters; no tuning after registration
+  num_leaves: 7
+  n_estimators: 150
+  objective: l1
+  seed: 20261101
+horizons: [6, 12, 24]             # subset of 6, 12, 24; 24 is mandatory
+expected_effect:
+  metric: diff_vs_smoother_24h    # MAE(model) - MAE(smoother); negative is better
+  direction: negative
+  magnitude: -0.2                 # expected value in ug/m3 (must be below 0)
+decision_rule: >-
+  Promote only if diff_vs_smoother_24h_ci_high < 0 and diff_vs_persistence_24h_ci_high < 0
+  on the holdout, and the station and serving gates in protocol section 10 pass.
+split: dev                        # dev | holdout
+final: false                      # true only for one of at most 3 holdout finalists
+author_agent: claude-data-scientist
