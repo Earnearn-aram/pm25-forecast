@@ -44,7 +44,10 @@ agent session or a different OS user writing at the same time; the two-writer ca
 - `invalid` is set by tooling only; `log_run` rejects it as a caller tag. Writing with the MLflow
   client or UI directly bypasses every check here; such runs are not valid evidence.
 - Required metrics: `mae_24h`, `rmse_24h`. All others of protocol section 11 (including
-  `n_pairs_24h`) are optional; undefined values are omitted, never logged as 0.
+  `n_pairs_24h`) are optional; undefined values are omitted, never logged as 0. The KAN-96 gate
+  metrics (`station_worst_rel_diff_24h`, `station_worst_rel_diff_ci_high_24h`,
+  `stations_worse_than_limit_24h`, `serving_lag_checks`, `serving_lag_mismatches`) are allowed
+  without `_6h`/`_12h` variants.
 
 ## Setup
 
