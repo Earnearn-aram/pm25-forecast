@@ -2,7 +2,7 @@
 
 Verdict: **PIVOT**. Weather forecasts do not lift any model past the smoother or past 15 % over
 persistence, so the KAN-75 success rule is not met. They do help LightGBM (about 0.31 ug/m3 lower
-+24 h MAE, CI below 0 in all 5 folds) but not the linear model, and the helped LightGBM is still no
++24 h MAE; CI below 0 overall, negative in all 5 folds) but not the linear model, and the helped LightGBM is still no
 better than the smoother. No live-ingestion ticket is written (it is for "go" only).
 
 ## 1. Question, hypothesis, decision rule (fixed before the runs)
