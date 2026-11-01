@@ -11,11 +11,11 @@ import pytest
 # scikit-learn lives in the experiments dependency group; the default CI install does not have it.
 pytest.importorskip("sklearn")
 
-from pm25_forecast.backtest import Observation, Snapshot  # noqa: E402
-from pm25_forecast.experiments import linear_models as lm  # noqa: E402
-from pm25_forecast.experiments.evaluate import TrainSnapshot  # noqa: E402
-from pm25_forecast.features import build_features  # noqa: E402
-from pm25_forecast.features.library_v2 import prepare_series  # noqa: E402
+from pm25_forecast.backtest import Observation, Snapshot
+from pm25_forecast.experiments import linear_models as lm
+from pm25_forecast.experiments.evaluate import TrainSnapshot
+from pm25_forecast.features import build_features
+from pm25_forecast.features.library_v2 import prepare_series
 
 T0 = datetime(2026, 8, 1, tzinfo=UTC)
 HOUR = timedelta(hours=1)
