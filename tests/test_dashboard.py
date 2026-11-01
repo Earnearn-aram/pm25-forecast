@@ -33,6 +33,7 @@ TOP_KEYS = {
     "quality",
     "drift",
     "models",
+    "coverage",
 }
 
 
@@ -144,7 +145,7 @@ def test_scored_build_json_shape_and_page(tmp_path):
     assert build(fake, tmp_path) == 0
     data = load(tmp_path)
     assert data.keys() >= TOP_KEYS
-    assert set(data["sections"]) == set(dashboard.SECTIONS)
+    assert set(data["sections"]) == {*dashboard.SECTIONS, "coverage"}
     assert all(v == "ok" for v in data["sections"].values())
     assert data["headline"] == {"state": "yes", "text": "Yes, by 50.0%", "skill_pct": 50.0}
     assert data["kpi"]["mae_challenger_24h"] == 5.0

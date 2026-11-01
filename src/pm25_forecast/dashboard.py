@@ -31,7 +31,8 @@ from typing import Any, Literal
 from pydantic import AwareDatetime, BaseModel, TypeAdapter, ValidationError
 
 from pm25_forecast.collector import ConfigError, open_db
-from pm25_forecast.drift import PSI_ALERT
+from pm25_forecast.drift import DATA_SOURCE_BREAK, PSI_ALERT
+from pm25_forecast.ingest.open_meteo import CAMS_MODEL_VERSION
 from pm25_forecast.models.baselines import HORIZONS_H, PERSISTENCE_MODEL_VERSION
 from pm25_forecast.monitoring.logs import configure_logging
 from pm25_forecast.score import ScoreRow, rolling_metrics
@@ -68,6 +69,8 @@ STATION_MAP: dict[str, tuple[float, float]] = {
     "02t": (13.732846, 100.487662),
 }
 SECTIONS = ("scores", "observations", "chart", "quality", "drift", "models")
+OPENAQ = "openaq"
+COVERAGE_HOURS = (24, 168)  # the two windows (last 24 h, last 7 days), in hours
 
 Status = Literal["ok", "warn", "fail"]
 RANK = {"ok": 0, "warn": 1, "fail": 2}
@@ -94,6 +97,20 @@ class DqRow(BaseModel):
     check_name: str
     status: Status
     value: float | None = None
+
+
+class CovObsRow(BaseModel):
+    station_id: str
+    ts: AwareDatetime
+
+
+class CovNewest(BaseModel):
+    ts: AwareDatetime | None = None
+
+
+class CovOpenaqRow(BaseModel):
+    station_id: str
+    n: int
 
 
 class DriftRow(BaseModel):
@@ -143,6 +160,40 @@ ORDER BY created_at DESC LIMIT 1
 SELECT_FIRST_ISSUE = """
 SELECT issue_time FROM predictions
 WHERE model_version = %(m)s AND issue_time >= %(since)s ORDER BY issue_time LIMIT 1
+"""
+SELECT_COV_OBS = """
+SELECT station_id, ts FROM observations
+WHERE source = %(source)s AND ts >= %(since)s AND ts <= %(now)s AND pm25 IS NOT NULL
+"""
+SELECT_COV_NEWEST_OBS = """
+SELECT max(ts) FROM observations
+WHERE source = %(source)s AND ts <= %(now)s AND pm25 IS NOT NULL
+"""
+SELECT_COV_OPENAQ = """
+SELECT station_id, count(*) FROM observations
+WHERE source = %(source)s AND ts < %(until)s AND pm25 IS NOT NULL GROUP BY station_id
+"""
+SELECT_COV_OPENAQ_EDGE = """
+SELECT ts FROM observations
+WHERE source = %(source)s AND ts < %(until)s AND pm25 IS NOT NULL
+AND station_id IN ({stations})
+ORDER BY ts {order} LIMIT 1
+"""
+SELECT_COV_FIRST_OBS = """
+SELECT ts FROM observations
+WHERE source = %(source)s AND ts <= %(now)s AND pm25 IS NOT NULL ORDER BY ts LIMIT 1
+"""
+SELECT_COV_FIRST_VINTAGE = """
+SELECT issue_time FROM predictions
+WHERE model_version = %(m)s AND issue_time <= %(now)s ORDER BY issue_time LIMIT 1
+"""
+SELECT_COV_VINTAGES = """
+SELECT issue_time FROM predictions
+WHERE model_version = %(m)s AND issue_time >= %(since)s AND issue_time <= %(now)s
+GROUP BY issue_time
+"""
+SELECT_COV_NEWEST_VINTAGE = """
+SELECT max(issue_time) FROM predictions WHERE model_version = %(m)s AND issue_time <= %(now)s
 """
 SET_READ_ONLY = "SET TRANSACTION READ ONLY"
 SET_TIMEOUT = "SET LOCAL statement_timeout = '30s'"
@@ -400,6 +451,143 @@ def _chart(rd: Reader, obs: list[ObsRow], challenger: str | None, now: datetime)
     }
 
 
+# --- source coverage (KAN-102) -------------------------------------------------------------------
+
+
+def _pct(covered: int, expected: int) -> float | None:
+    """Percent to one decimal, rounded down so that a gap never displays as 100%."""
+    if expected <= 0:
+        return None
+    return math.floor(min(covered / expected, 1.0) * 1000) / 10
+
+
+def _newest(rd: Reader, statement: str, params: dict[str, Any], now: datetime) -> dict[str, Any]:
+    rows = _rows(CovNewest, rd.query(statement, params))
+    ts = rows[0].ts if rows else None
+    age = None if ts is None else max(0, int((now - ts).total_seconds() // 60))
+    return {"newest_at": _iso(ts), "newest_age_min": age}
+
+
+def _cov_unavailable(reason: str) -> dict[str, Any]:
+    return {"available": False, "reason": reason}
+
+
+def _windows(end: datetime, first: datetime | None) -> dict[int, tuple[datetime, int]]:
+    """Per window: (start, hours). The start never precedes the first stored hour, so a source
+    that started collecting recently is measured since then, not against hours it never had."""
+    out: dict[int, tuple[datetime, int]] = {}
+    for hours in COVERAGE_HOURS:
+        start = end - timedelta(hours=hours - 1)
+        if first is not None:
+            start = max(start, _hour(first))
+        out[hours] = (start, max(0, int((end - start).total_seconds() // 3600) + 1))
+    return out
+
+
+def _first_ts(rd: Reader, statement: str, params: dict[str, Any]) -> datetime | None:
+    rows = _rows(CovNewest, rd.query(statement, params))
+    return rows[0].ts if rows else None
+
+
+def _cov_air4thai(rd: Reader, now: datetime) -> dict[str, Any]:
+    """Expected = every one of the pilot stations has a reading in every UTC hour of the window.
+
+    The window ends at the last hour whose reading is due (PIPELINE_GRACE after the hour); a
+    reading is a stored non-null PM2.5 value. Several rows in one hour count once.
+    """
+    end = _hour(now - PIPELINE_GRACE)
+    longest = max(COVERAGE_HOURS)
+    since = end - timedelta(hours=longest - 1)
+    rows = _rows(
+        CovObsRow,
+        rd.query(SELECT_COV_OBS, {"source": AIR4THAI, "since": since, "now": now}),
+    )
+    newest = _newest(rd, SELECT_COV_NEWEST_OBS, {"source": AIR4THAI, "now": now}, now)
+    if not rows and newest["newest_at"] is None:
+        return _cov_unavailable("no_rows")
+    first = _first_ts(rd, SELECT_COV_FIRST_OBS, {"source": AIR4THAI, "now": now})
+    cells = {(r.station_id, _hour(r.ts)) for r in rows if r.station_id in STATION_MAP}
+    out: dict[str, Any] = {"available": True, "stations": len(STATION_MAP), **newest}
+    for hours, (start, n) in _windows(end, first).items():
+        got = sum(1 for _sid, h in cells if start <= h <= end)
+        out[f"pct_{hours}h"] = _pct(got, n * len(STATION_MAP))
+    out["since"] = _iso(None if first is None else _hour(first))
+    out["clamped"] = first is not None and _hour(first) > end - timedelta(
+        hours=max(COVERAGE_HOURS) - 1
+    )
+    return out
+
+
+def _cov_openaq(rd: Reader, now: datetime) -> dict[str, Any]:
+    """Expected = every pilot station has a row in every hour from its first OpenAQ hour to
+    the Air4Thai era start (exclusive). OpenAQ is a history backfill only; nothing live."""
+    params = {"source": OPENAQ, "until": DATA_SOURCE_BREAK}
+    rows = [
+        r
+        for r in _rows(CovOpenaqRow, rd.query(SELECT_COV_OPENAQ, params))
+        if r.station_id in STATION_MAP
+    ]
+    if not rows:
+        return _cov_unavailable("no_rows")
+    ids = {f"s{i}": sid for i, sid in enumerate(STATION_MAP)}
+    marks = ", ".join(f"%({k})s" for k in ids)  # only our own placeholders are formatted in
+    edges = [
+        _rows(
+            CovNewest,
+            rd.query(SELECT_COV_OPENAQ_EDGE.format(order=o, stations=marks), {**params, **ids}),
+        )
+        for o in ("ASC", "DESC")
+    ]
+    if not edges[0] or not edges[1] or edges[0][0].ts is None or edges[1][0].ts is None:
+        return _cov_unavailable("no_rows")
+    first_ts, last_ts = edges[0][0].ts, edges[1][0].ts
+    first = _hour(first_ts)
+    span_h = int((DATA_SOURCE_BREAK - first).total_seconds() // 3600)
+    # count(*) equals distinct station-hours: the primary key is (station_id, ts) and OpenAQ
+    # rows are hour-aligned. _pct clamps at 100% in case that ever stops holding.
+    return {
+        "available": True,
+        "pct": _pct(sum(r.n for r in rows), span_h * len(STATION_MAP)),
+        "stations": len(STATION_MAP),
+        "first": _iso(first),
+        "last": _iso(last_ts),
+        "era_start": _iso(DATA_SOURCE_BREAK),
+    }
+
+
+def _cov_cams(rd: Reader, now: datetime) -> dict[str, Any]:
+    """Expected = one stored CAMS vintage (any station) for every UTC hour of the window, from
+    the first stored vintage (collection started late) to the last hour already due."""
+    end = _hour(now - PIPELINE_GRACE)
+    since = end - timedelta(hours=max(COVERAGE_HOURS) - 1)
+    params = {"m": CAMS_MODEL_VERSION, "since": since, "now": now}
+    issued = {_hour(r.ts) for r in _rows(CovNewest, rd.query(SELECT_COV_VINTAGES, params))}
+    newest = _newest(rd, SELECT_COV_NEWEST_VINTAGE, {"m": CAMS_MODEL_VERSION, "now": now}, now)
+    if not issued and newest["newest_at"] is None:
+        return _cov_unavailable("no_rows")
+    first = _first_ts(rd, SELECT_COV_FIRST_VINTAGE, {"m": CAMS_MODEL_VERSION, "now": now})
+    out: dict[str, Any] = {"available": True, **newest}
+    for hours, (start, n) in _windows(end, first).items():
+        out[f"pct_{hours}h"] = _pct(sum(1 for h in issued if start <= h <= end), n)
+    out["since"] = _iso(None if first is None else _hour(first))
+    out["clamped"] = first is not None and _hour(first) > end - timedelta(
+        hours=max(COVERAGE_HOURS) - 1
+    )
+    return out
+
+
+def _coverage(rd: Reader, now: datetime) -> dict[str, Any]:
+    """Each source on its own: a failing query gives that source 'not available', not a crash."""
+    result: dict[str, Any] = {}
+    for name, fn in (("air4thai", _cov_air4thai), ("openaq", _cov_openaq), ("cams", _cov_cams)):
+        try:
+            result[name] = fn(rd, now)
+        except Exception as exc:  # type only: driver messages can echo the connection string
+            logger.warning("dashboard coverage %s unavailable (%s)", name, type(exc).__name__)
+            result[name] = _cov_unavailable("query_failed")
+    return result
+
+
 def _worst(statuses: Sequence[str]) -> str:
     return max(statuses, key=lambda s: RANK.get(s, 0)) if statuses else "ok"
 
@@ -554,6 +742,9 @@ def _collect(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any
     quality = section("quality", lambda: _quality(rd, now))
     drift = section("drift", lambda: _drift(rd, challenger, now))
     models = section("models", lambda: _models(rd, challenger))
+    coverage = section("coverage", lambda: _coverage(rd, now))
+    if coverage and any(c.get("reason") == "query_failed" for c in coverage.values()):
+        sections["coverage"] = "degraded"
 
     chal24 = ((scores or {}).get("challenger") or {}).get(str(HEADLINE_H))
     pers24 = ((scores or {}).get("persistence") or {}).get(str(HEADLINE_H))
@@ -579,6 +770,7 @@ def _collect(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any
         "quality": quality,
         "drift": drift,
         "models": models,
+        "coverage": coverage,
     }
     data["status"] = _overall(data)
     return data
@@ -1031,6 +1223,30 @@ def _section_quality(data: dict[str, Any]) -> str:
     return f'<div class="card grow"><h2>Data quality by station</h2>{body}</div>'
 
 
+DRIFT_SHORT = ("Not comparable yet", "ยังเปรียบเทียบไม่ได้")
+DRIFT_ERA = (
+    "Not comparable yet: this model was trained on data from before the current data source "
+    f"({DATA_SOURCE_BREAK:%d %b %Y}), so there is no matching reference. "
+    "It will show once a model trained on the new data is live.",
+    f"ยังเปรียบเทียบไม่ได้: โมเดลนี้ฝึกจากข้อมูลก่อนเปลี่ยนแหล่งข้อมูลปัจจุบัน ({DATA_SOURCE_BREAK:%Y-%m-%d} UTC) "
+    "จึงไม่มีข้อมูลอ้างอิงที่ตรงกัน จะแสดงผลเมื่อมีโมเดลที่ฝึกด้วยข้อมูลใหม่ใช้งานอยู่",
+)
+DRIFT_CAMS = (
+    "cams_pm25: not comparable yet, the CAMS history is still too short for a reference.",
+    "cams_pm25: ยังเปรียบเทียบไม่ได้ เพราะประวัติ CAMS ยังสั้นเกินไปสำหรับข้อมูลอ้างอิง",
+)
+DRIFT_NO_PSI = (
+    "Not comparable yet: too little data in the reference or recent window.",
+    "ยังเปรียบเทียบไม่ได้: ข้อมูลในช่วงอ้างอิงหรือช่วงล่าสุดน้อยเกินไป",
+)
+
+
+def _drift_reason(f: dict[str, Any]) -> tuple[str, str]:
+    if f["status"] != "insufficient":
+        return DRIFT_NO_PSI
+    return DRIFT_CAMS if f["name"] == "cams_pm25" else DRIFT_ERA
+
+
 def _section_drift(data: dict[str, Any]) -> str:
     d = data["drift"]
     if d is None:
@@ -1039,10 +1255,11 @@ def _section_drift(data: dict[str, Any]) -> str:
         body = '<p class="muted small">Waiting for the first daily drift check.</p>'
     else:
         rows = []
+        reasons: dict[tuple[str, str], None] = {}
         for f in d["features"]:
             psi = f["psi"]
             if psi is None:
-                bar, text = "", "n/a"
+                bar, text = "", None
             else:
                 width = min(psi / PSI_BAR_MAX, 1) * 100
                 cls = "fill alert" if f["alert"] else "fill plain"
@@ -1050,11 +1267,16 @@ def _section_drift(data: dict[str, Any]) -> str:
                 suffix = " Alert" if f["alert"] else " Warning" if f["status"] == "warn" else ""
                 text = f"{psi:.2f}" + suffix
             tick = '<div class="tick"></div>'
+            shown = _bi(*DRIFT_SHORT) if text is None else e(text)
             rows.append(
                 f'<div class="drow"><span class="name">{e(f["name"])}</span>'
-                f'<div class="track">{bar}{tick}</div><span class="psi">{e(text)}</span></div>'
+                f'<div class="track">{bar}{tick}</div><span class="psi">{shown}</span></div>'
             )
-        body = "".join(rows)
+            if text is None:
+                reasons.setdefault(_drift_reason(f), None)
+        body = "".join(rows) + "".join(
+            _bi(en, th, tag="p", cls="muted small") for en, th in reasons
+        )
     return (
         '<div class="card grow"><h2>Drift \u00b7 last 7 days vs training data</h2>'
         f"{body}"
@@ -1125,13 +1347,129 @@ def _section_how() -> str:
     )
 
 
-def _section_story() -> str:
+SOURCE_INFO = (
+    (
+        "air4thai",
+        "Air4Thai",
+        "Station PM2.5 readings. Collection runs up to every 20 minutes; "
+        "Air4Thai backfill runs daily.",
+        "ข้อมูล PM2.5 จากสถานี เก็บข้อมูลสูงสุดทุก 20 นาที และเติมข้อมูลย้อนหลังทุกวัน",
+    ),
+    (
+        "openaq",
+        "OpenAQ",
+        "Historical PM2.5 backfill, run manually. History only, not live.",
+        "เติมข้อมูล PM2.5 ย้อนหลังด้วยตนเอง เป็นข้อมูลย้อนหลังเท่านั้น ไม่ใช่ข้อมูลสด",
+    ),
+    (
+        "cams",
+        "Open-Meteo / CAMS",
+        "CAMS forecast vintages collected up to every 20 minutes. "
+        "Provider update schedules can differ.",
+        "เก็บชุดพยากรณ์ CAMS สูงสุดทุก 20 นาที รอบอัปเดตของผู้ให้บริการอาจแตกต่างกัน",
+    ),
+)
+REASONS = {
+    "no_rows": ("no rows stored yet", "ยังไม่มีข้อมูลในฐานข้อมูล"),
+    "query_failed": ("the database query failed", "คำสั่งค้นฐานข้อมูลล้มเหลว"),
+    "section": ("the coverage query failed", "คำสั่งค้นความครบของข้อมูลล้มเหลว"),
+}
+
+
+def _age_text(minutes: int | None) -> tuple[str, str]:
+    if minutes is None:
+        return "no reading", "ไม่มีข้อมูล"
+    if minutes < 60:
+        return f"{minutes} min ago", f"{minutes} นาทีก่อน"
+    if minutes < 48 * 60:
+        h, m = divmod(minutes, 60)
+        return f"{h} h {m} min ago", f"{h} ชม. {m} นาทีก่อน"
+    return f"{minutes // 1440} days ago", f"{minutes // 1440} วันก่อน"
+
+
+def _pct_text(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1f}%"
+
+
+def _day(iso: str | None) -> str:
+    return "?" if iso is None else f"{datetime.fromisoformat(iso):%Y-%m-%d %H:%M} UTC"
+
+
+def _bi(en: str, th: str, tag: str = "span", cls: str = "") -> str:
+    c = f' class="{cls}"' if cls else ""
+    return f'<{tag}{c} data-en="{e(en)}" data-th="{e(th)}">{e(en)}</{tag}>'
+
+
+def _coverage_texts(key: str, c: dict[str, Any]) -> tuple[tuple[str, str], tuple[str, str]]:
+    """(headline, definition-and-details) as (English, Thai) pairs for one source."""
+    if not c.get("available"):
+        en, th = REASONS.get(c.get("reason", ""), REASONS["query_failed"])
+        return (f"not available ({en})", f"ไม่พร้อมใช้งาน ({th})"), ("", "")
+    if key == "openaq":
+        pct = _pct_text(c["pct"])
+        span = f"{_day(c['first'])} to {_day(c['last'])}"
+        span_th = f"{_day(c['first'])} ถึง {_day(c['last'])}"
+        return (
+            (f"{pct} of history", f"{pct} ของช่วงประวัติ"),
+            (
+                f" Coverage: share of station-hours with an OpenAQ row, for {c['stations']} "
+                f"stations, from the first OpenAQ hour to {_day(c['era_start'])} (when "
+                f"Air4Thai takes over). Range covered: {span}. OpenAQ is history only, "
+                "not live.",
+                f" ความครบ: สัดส่วนสถานี-ชั่วโมงที่มีข้อมูล OpenAQ ของ {c['stations']} สถานี "
+                f"ตั้งแต่ชั่วโมงแรกของ OpenAQ ถึง {_day(c['era_start'])} (ก่อน Air4Thai เริ่ม) "
+                f"ช่วงที่ครอบคลุม: {span_th} OpenAQ เป็นข้อมูลย้อนหลังเท่านั้น ไม่ใช่ข้อมูลสด",
+            ),
+        )
+    a24, a7 = _pct_text(c["pct_24h"]), _pct_text(c["pct_168h"])
+    age_en, age_th = _age_text(c["newest_age_min"])
+    head = (f"{a24} last 24 h · {a7} last 7 d", f"{a24} 24 ชม. · {a7} 7 วัน")
+    if key == "air4thai":
+        n = c["stations"]
+        since_en = f" Collected since {_day(c['since'])}." if c.get("clamped") else ""
+        since_th = f" เก็บตั้งแต่ {_day(c['since'])}" if c.get("clamped") else ""
+        return head, (
+            (
+                f" Coverage: share of expected station-hours that have a reading. Expected = "
+                f"{n} stations x 1 reading per UTC hour (24 h = {24 * n}, "
+                f"a full 7 days = {168 * n}); "
+                f"the window ends at the last hour already due.{since_en} "
+                f"Newest reading: {age_en}.",
+                f" ความครบ: สัดส่วนสถานี-ชั่วโมงที่คาดไว้ซึ่งมีค่าตรวจวัด ที่คาดไว้ = {n} สถานี "
+                f"x 1 ค่าต่อชั่วโมง UTC (24 ชม. = {24 * n}, 7 วัน = {168 * n}) "
+                f"ช่วงสิ้นสุดที่ชั่วโมงล่าสุดที่ถึงกำหนดแล้ว{since_th} ค่าล่าสุด: {age_th}",
+            )
+        )
+    return head, (
+        (
+            " Coverage: share of the hourly issue times (UTC) in the window that have at "
+            "least one stored CAMS forecast vintage. Counted since collection started: "
+            f"collected since {_day(c['since'])}. Newest vintage: {age_en}.",
+            " ความครบ: สัดส่วนชั่วโมง (UTC) ในช่วงเวลาที่มีชุดพยากรณ์ CAMS ที่บันทึกไว้อย่างน้อยหนึ่งชุด "
+            f"นับตั้งแต่เริ่มเก็บข้อมูล: เก็บตั้งแต่ {_day(c['since'])} ชุดล่าสุด: {age_th}",
+        )
+    )
+
+
+def _source_list(coverage: dict[str, Any] | None) -> str:
+    items = []
+    for key, name, desc_en, desc_th in SOURCE_INFO:
+        c = (coverage or {}).get(key) or _cov_unavailable("section")
+        (h_en, h_th), (d_en, d_th) = _coverage_texts(key, c)
+        items.append(
+            f"<details><summary>{e(name)}{_bi(h_en, h_th, cls='source-coverage')}</summary>"
+            f"{_bi(desc_en + d_en, desc_th + d_th, tag='p')}</details>"
+        )
+    return '<div class="source-list">' + "".join(items) + "</div>"
+
+
+def _section_story(data: dict[str, Any]) -> str:
     return """<section class="story card">
 <h2 data-en="Behind the forecast" data-th="เบื้องหลังการพยากรณ์">Behind the forecast</h2>
 <div class="story-grid">
 <article><h3 data-en="Data sources" data-th="แหล่งข้อมูล">Data sources</h3>
 <p data-en="Air4Thai provides readings; OpenAQ backfills history; Open-Meteo provides CAMS forecasts." data-th="Air4Thai ให้ค่าตรวจวัด OpenAQ เติมข้อมูลย้อนหลัง และ Open-Meteo ให้ค่าพยากรณ์ CAMS">Air4Thai provides readings; OpenAQ backfills history; Open-Meteo provides CAMS forecasts.</p>
-<div class="source-list"><details><summary>Air4Thai<span class="source-unmeasured" data-en="Coverage not measured" data-th="ยังไม่วัดความครบ">Coverage not measured</span></summary><p data-en="Station PM2.5 readings. Collection runs up to every 20 minutes; Air4Thai backfill runs daily." data-th="ข้อมูล PM2.5 จากสถานี เก็บข้อมูลสูงสุดทุก 20 นาที และเติมข้อมูลย้อนหลังทุกวัน">Station PM2.5 readings. Collection runs up to every 20 minutes; Air4Thai backfill runs daily.</p></details><details><summary>OpenAQ<span class="source-unmeasured" data-en="Coverage not measured" data-th="ยังไม่วัดความครบ">Coverage not measured</span></summary><p data-en="Historical PM2.5 backfill, run manually. Stored source labels do not prove complete source coverage." data-th="เติมข้อมูล PM2.5 ย้อนหลังด้วยตนเอง ป้ายแหล่งข้อมูลในฐานข้อมูลไม่ได้ยืนยันความครบของข้อมูลต้นทาง">Historical PM2.5 backfill, run manually. Stored source labels do not prove complete source coverage.</p></details><details><summary>Open-Meteo / CAMS<span class="source-unmeasured" data-en="Coverage not measured" data-th="ยังไม่วัดความครบ">Coverage not measured</span></summary><p data-en="CAMS forecast vintages collected up to every 20 minutes. Provider update schedules can differ." data-th="เก็บชุดพยากรณ์ CAMS สูงสุดทุก 20 นาที รอบอัปเดตของผู้ให้บริการอาจแตกต่างกัน">CAMS forecast vintages collected up to every 20 minutes. Provider update schedules can differ.</p></details></div></article>
+@@SOURCES@@</div></article>
 <article><h3 data-en="Time-safe inputs" data-th="ข้อมูลเข้า ณ เวลาพยากรณ์">Time-safe inputs</h3>
 <p data-en="Features use only information available by forecast time. Training and serving share the same feature builder." data-th="ใช้เฉพาะข้อมูลที่มี ณ เวลาพยากรณ์ และใช้วิธีสร้างตัวแปรเดียวกันทั้งตอนฝึกและใช้งาน">Features use only information available by forecast time. Training and serving share the same feature builder.</p><div class="feature-timeline" role="img" aria-label="Past features are available at forecast time; predictions extend to six, twelve and twenty-four hours"><div class="feature-point"><i></i><b data-en="Past" data-th="อดีต">Past</b><small data-en="Available inputs" data-th="ข้อมูลที่มี">Available inputs</small></div><div class="feature-point"><i></i><b data-en="Now" data-th="ตอนนี้">Now</b><small data-en="Issue time" data-th="เวลาพยากรณ์">Issue time</small></div><div class="feature-point"><i></i><b>+6h</b></div><div class="feature-point"><i></i><b>+12h</b></div><div class="feature-point"><i></i><b>+24h</b></div></div><p class="story-note" data-en="Up to every 20 minutes; issue times are hourly. Model horizons vary." data-th="ทำงานสูงสุดทุก 20 นาที เวลาออกพยากรณ์เป็นรายชั่วโมง ระยะพยากรณ์ขึ้นอยู่กับโมเดล">Up to every 20 minutes; issue times are hourly. Model horizons vary.</p></article>
 <article><h3 data-en="Why five stations?" data-th="ทำไมเลือกห้าสถานี?">Why five stations?</h3>
@@ -1147,7 +1485,7 @@ def _section_story() -> str:
 <a href="https://lightgbm.readthedocs.io/" data-en="LightGBM documentation ↗" data-th="เอกสาร LightGBM ↗">LightGBM documentation ↗</a></article>
 <article><h3 data-en="How we evaluate" data-th="วิธีประเมินผล">How we evaluate</h3>
 <p data-en="MAE is average absolute error. Skill compares challenger and baseline MAE on matched station-hours; above zero favors the challenger." data-th="MAE คือค่าเฉลี่ยความคลาดเคลื่อนสัมบูรณ์ Skill เปรียบเทียบ MAE ของสองโมเดลในสถานีและเวลาเดียวกัน ค่าบวกหมายถึงโมเดลท้าชิงแม่นกว่า">MAE is average absolute error. Skill compares challenger and baseline MAE on matched station-hours; above zero favors the challenger.</p></article>
-</div></section>"""  # noqa: E501
+</div></section>""".replace("@@SOURCES@@", _source_list(data.get("coverage")))  # noqa: E501
 
 
 def render_html(data: dict[str, Any]) -> str:
@@ -1260,7 +1598,7 @@ def render_html(data: dict[str, Any]) -> str:
 <section class="row">{_section_quality(data)}{_section_drift(data)}</section>
 {_section_models(data)}
 {_section_how()}
-{_section_story()}
+{_section_story(data)}
 <footer>GitHub Actions \u00b7 Neon Postgres \u00b7 cron-job.org \u00b7 $0/month. Data: Air4Thai (Pollution Control Department, Thailand), OpenAQ, CAMS via Open-Meteo.</footer>
 </main>
 </body>

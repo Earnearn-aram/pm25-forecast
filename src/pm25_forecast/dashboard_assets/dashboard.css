@@ -735,7 +735,9 @@ html[lang="th"] .status {
 @media (prefers-reduced-motion: reduce) { .feature-point i { animation: none; opacity: 1; } }
 .source-list summary { display: flex; justify-content: space-between; gap: 8px; }
 .source-list summary::before { content: "ⓘ"; color: var(--accent); margin-right: 2px; }
-.source-unmeasured { color: var(--muted); font-size: 13px; margin-left: auto; }
+.source-list summary { flex-wrap: wrap; }
+.source-coverage { color: var(--text); font-size: 13px; margin-left: auto; text-align: right; overflow-wrap: anywhere; }
+@media (max-width: 520px) { .source-coverage { flex-basis: 100%; margin-left: 0; text-align: left; } }
 .feature-timeline::after { content: ""; position: absolute; top: 3px; left: 5px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent-hover); box-shadow: 0 0 8px var(--accent); animation: feature-travel 6s ease-in-out infinite; pointer-events: none; }
 .feature-point:first-child i { animation-delay: .8s; }.feature-point:nth-child(2) i { animation-delay: 0s; }
 @keyframes feature-travel { 0%,8% { left: 5px; opacity: 0; } 12% { opacity: 1; } 72% { left: calc(100% - 10px); opacity: 1; } 82%,100% { left: calc(100% - 10px); opacity: 0; } }
