@@ -33,14 +33,17 @@ validity reasons) is `evaluation.json`, attached to the MLflow run as an artifac
 # my_models/lgbm.py  (importable from the working directory or installed)
 from pm25_forecast.experiments.evaluate import TrainSnapshot
 
-def fit(train: TrainSnapshot, params: dict):      # `params` is optional: it receives prereg.params
+
+def fit(train: TrainSnapshot, params: dict):  # `params` is optional: it receives prereg.params
     # train.observations / train.vintages: only rows with ts/issue_time <= train.refit_time and
     # available_at <= train.refit_time. Build (origin, origin+h) pairs from them with
     # pm25_forecast.features (do not write feature code of your own) and require origin + h <= refit_time.
     model = ...  # fit here
+
     def predict(snapshot, horizon: int) -> float | None:
         feats = snapshot.features(snapshot.prediction_time + timedelta(hours=horizon))
         return None if all(v is None for v in feats.values()) else float(model.predict(feats))
+
     return predict
 ```
 
