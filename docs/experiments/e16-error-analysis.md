@@ -38,7 +38,7 @@ Bias is forecast minus observed. Versus the smoother, ridge differs by -2.24 in 
 | flat | 3144 | 3.89 | 3.68 | 3.53 | 3.57 | -0.50 | -0.99 |
 | rising | 529 | 6.13 | 4.65 | 4.43 | 4.28 | +1.45 | -0.51 |
 
-After a rise in the last 6 h persistence has MAE 6.13 against 4.65 for the smoother and 4.28 for ridge, and after a fall 5.00 against 4.22 and 4.34. The remaining ex-ante differences between smoother, climatology and ridge are 0.1 to 0.4 ug/m3, and the smoother and ridge biases there are +1.45 and -0.51 (rising), so most of the gap to persistence is closed by shrinkage alone. No CIs were computed for the ex-ante groups.
+After a rise in the last 6 h persistence has MAE 6.13 against 4.65 for the smoother and 4.28 for ridge, and after a fall 5.00 against 4.22 and 4.34. The remaining ex-ante differences between smoother, climatology and ridge are 0.1 to 0.4 ug/m3, and the smoother and ridge biases there are +1.45 and -0.51 (rising), so most of the gap to persistence is likely closed by shrinkage alone (an interpretation, not shown here). No CIs were computed for the ex-ante groups.
 
 ![rising and falling](figures/e16-rising-falling.png)
 
