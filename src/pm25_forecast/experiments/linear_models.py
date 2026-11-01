@@ -27,9 +27,10 @@ Diagnostics (chosen strength, standardised coefficients per fold) are appended t
 
 Deviation note: the first set of KAN-84 runs used an inner-CV purge that was 1 h short
 (``origin + h <= start`` instead of ``origin + (h + 1) h <= start``; a label at target ``t`` is
-available at ``t + 1 h``). Those runs are superseded by the re-run with the corrected purge. The same re-run also fixes
-``predict``, which took the last ``LOOKBACK_H`` snapshot rows by position (the KAN-96 serving-lag
-probe showed that rows added after the origin then displaced the history); it now filters by time.
+available at ``t + 1 h``). Those runs are superseded by the re-run with the corrected purge.
+The same re-run also fixes ``predict``, which took the last ``LOOKBACK_H`` snapshot rows by
+position (the KAN-96 serving-lag probe showed that rows added after the origin then displaced
+the history); it now filters by time.
 """
 
 from __future__ import annotations
