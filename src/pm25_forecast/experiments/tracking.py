@@ -69,7 +69,17 @@ _METRIC_BASES = (
     "spike_precision",
     "n_pairs",
 )
-ALLOWED_METRICS = frozenset(f"{base}_{h}h" for base in _METRIC_BASES for h in HORIZONS)
+# Promotion-gate checks of protocol section 10.3 / 10.4 (KAN-96): +24 h only, no 6h/12h variants.
+_GATE_METRICS = (
+    "station_worst_rel_diff_24h",
+    "station_worst_rel_diff_ci_high_24h",
+    "stations_worse_than_limit_24h",
+    "serving_lag_checks",
+    "serving_lag_mismatches",
+)
+ALLOWED_METRICS = frozenset(
+    [f"{base}_{h}h" for base in _METRIC_BASES for h in HORIZONS] + list(_GATE_METRICS)
+)
 # Section 11 does not mark any metric required, so only the two headline errors are; the rest
 # (including n_pairs_24h) may be undefined and are then omitted, never zero.
 REQUIRED_METRICS = ("mae_24h", "rmse_24h")

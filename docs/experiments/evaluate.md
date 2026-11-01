@@ -89,6 +89,27 @@ directory or other data yourself.
 - **Other**: spike recall/precision (> 37.5, null below 50 observed spikes), MAE by station and
   by target UTC hour, validity reasons (`invalid` tag when any).
 
+## Promotion-gate checks (KAN-96)
+
+Both are computed on every run and written to `evaluation.json`; the runner never decides promotion.
+
+- **Gate 10.3, station vs persistence** (`scores["24"]["station_gate"]`, +24 h only): per station
+  `rel_diff = MAE_model / MAE_persistence - 1` with a 72 h block-bootstrap CI (same blocks, seed and
+  level as the pooled comparison; ratio of sums). `status` is `fail` if any station's point estimate is
+  strictly above +5%, `insufficient_data` if more than 10% of the cohort has fewer than 250 pairs,
+  else `pass`. Stations whose CI contains +5% are in `ci_includes_limit`. Metrics:
+  `station_worst_rel_diff_24h`, `station_worst_rel_diff_ci_high_24h`, `stations_worse_than_limit_24h`.
+- **Gate 10.4, serving lag** (`serving_lag`): 48 sampled origins per fold are re-run on two fresh
+  predictor instances (the live one is never used, so poisoned rows cannot corrupt it and a cache
+  cannot hide a leak): first on the original snapshot (must reproduce the live prediction), then on
+  snapshots with all rows that violate the lag (and vintages issued/available after the origin)
+  added, shifted by +1000 and by -999. Same prediction required: `pass`; a change is `fail` (run
+  tagged `invalid`); non-reproducible predictions, exceptions or no samples are `inconclusive`.
+  **Only `pass` satisfies gate 10.4**; the CLI summary says so. Predictors must be deterministic and
+  stateless between calls. Metrics: `serving_lag_checks`, `serving_lag_mismatches`. Not detected: a
+  model reading data from outside `train`/`snapshot` (files, wall-clock, globals); review it.
+  The probe adds two refits per fold and about 4x the model calls on the sampled origins.
+
 A model identical to a baseline has all-zero paired differences against it: its CI and DM are
 omitted (the JSON says so), never logged as 0.
 
