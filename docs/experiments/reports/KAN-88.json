@@ -1,0 +1,22 @@
+{
+ "best": {
+  "mae": 3.8381767841400634,
+  "name": "e11-ridge-base"
+ },
+ "dirty": false,
+ "finding": "No variant beats the smoother: all 6 paired 95% CIs include zero.",
+ "n_variants": 6,
+ "plots": [
+  "mae",
+  "paired",
+  "folds",
+  "breakdown"
+ ],
+ "snapshots": [
+  "a00cfc9edd4c"
+ ],
+ "status": "merged",
+ "ticket": "KAN-88",
+ "title": "E11: weather-forecast features (KAN-88)",
+ "verdict": "PIVOT"
+}

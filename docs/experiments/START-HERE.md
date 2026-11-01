@@ -52,6 +52,7 @@ Note: Codex keeps `.git` read-only inside the sandbox even in a writable root. I
 
 5. Copy `notebooks/_template_experiment_report.ipynb`, fill the 8 sections from the run, and render it:
    `uv run --group experiments python -m pm25_forecast.experiments.tracking render-report <notebook> --run-id <id>`.
+   Then make the HTML report for the ticket (plots, explanations, your `e*.md` narrative): `uv run --group experiments python -m pm25_forecast.experiments.report --ticket KAN-<n> --status "in review"`, then `... report index`, and commit `docs/experiments/reports/`. Put a `Verdict: **...**` line under the title of your `e*.md`; the index shows it. Reports hold aggregates only and are built from dev runs.
 6. Update the leaderboard: `... tracking leaderboard --format md`, commit `docs/experiments/leaderboard.md`.
 7. Before pushing, all of these must pass: `uv sync --locked`, `uv run ruff check`, `uv run ruff format --check`, `uv run pytest`, `uv run pre-commit run --all-files`.
 8. Open the PR. The description lists the acceptance criteria met and how, what you skipped and why, and the MLflow run ids. Add a Jira comment with the result in three lines: question, answer, run ids.
@@ -81,6 +82,7 @@ KAN-83, KAN-84, KAN-85, KAN-87, KAN-90, KAN-91, KAN-93. KAN-84 may need the feat
 | Best run per experiment, ranked | `docs/experiments/leaderboard.md` on `main` (updated by each PR) |
 | Every run, metrics, charts, artifacts | `uv run --group experiments mlflow ui --backend-store-uri "sqlite:///$HOME/pm25-experiments/mlflow/mlflow.db"`, then open http://127.0.0.1:5000 and pick an experiment named `kan78/...` |
 | The written report for one run | In MLflow: open the run, tab Artifacts, `report.html`. Same file at `report/report.html` after rendering |
+| One readable report per experiment, with plots and explanations (start here) | Open `docs/experiments/reports/index.html` in a browser, then click the ticket. Each file works offline |
 | Which ticket is at what stage | Jira KAN-78 sub-tasks |
 
 How to read a leaderboard row: `mae_24h` is the average error in µg/m³ (lower is better). `skill vs persistence` is the percentage improvement over "tomorrow equals now". A model only counts as better when its paired confidence interval vs both baselines is entirely below zero (see the run's `evaluation.json`). DIRTY means the run used uncommitted code and cannot be trusted for a decision.

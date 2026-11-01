@@ -1,0 +1,23 @@
+{
+ "best": {
+  "mae": 3.867762770249758,
+  "name": "e12-full-l2-delta"
+ },
+ "dirty": false,
+ "finding": "No variant beats the smoother: all 12 paired 95% CIs include zero.",
+ "n_variants": 12,
+ "plots": [
+  "mae",
+  "paired",
+  "folds",
+  "breakdown",
+  "ablation"
+ ],
+ "snapshots": [
+  "a00cfc9edd4c"
+ ],
+ "status": "in review (PR open)",
+ "ticket": "KAN-89",
+ "title": "E12 Gradient boosting: pooled LightGBM (KAN-89)",
+ "verdict": "Nothing beats the smoother."
+}

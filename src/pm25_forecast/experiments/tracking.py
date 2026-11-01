@@ -385,6 +385,7 @@ def collect_leaderboard(*, split: str = "dev") -> list[dict[str, Any]]:
             rows.append(
                 {
                     "experiment": exp.name,
+                    "ticket": t.get("ticket", ""),
                     "run": f"{run.info.run_name} ({run.info.run_id[:8]})",
                     "mae": m.get("mae_24h"),
                     "rmse": m.get("rmse_24h"),
