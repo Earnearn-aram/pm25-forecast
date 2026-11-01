@@ -1,3 +1,4 @@
+<!-- Rules below are copied from CLAUDE.md, which is the source: update both together. -->
 # Working rules for agents in this repo
 
 Project: Bangkok PM2.5 24h forecast (MLOps portfolio). Plan and diagrams live in Confluence (space EARN); tickets in Jira project KAN.

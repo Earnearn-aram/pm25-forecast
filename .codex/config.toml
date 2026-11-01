@@ -1,8 +1,11 @@
 # Codex app config for this repo (KAN-95). Read docs/experiments/START-HERE.md first.
+# Keys checked against developers.openai.com/codex/config-reference (2026-11-01).
 sandbox_mode = "workspace-write"
 
 [sandbox_workspace_write]
-# uv sync, git push and gh need the network.
+# uv sync, git push and gh need the network. If it still fails on macOS, see
+# github.com/openai/codex issue 10390 and ask Boss to approve the command.
 network_access = true
 # Shared MLflow store and frozen snapshots live outside the repo (see START-HERE).
-writable_roots = ["~/pm25-experiments", "~/.cache/uv"]
+# Absolute paths: do not rely on `~` being expanded.
+writable_roots = ["/Users/earn/pm25-experiments", "/Users/earn/.cache/uv"]

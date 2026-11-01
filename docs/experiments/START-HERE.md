@@ -15,7 +15,13 @@ cp .env.example .env            # leave MLFLOW_* blank to use the shared default
 ls ~/pm25-experiments/snapshots/e02-v1   # the frozen dataset; must exist (see section 3)
 ```
 
+If the snapshot is missing or its hash check fails, stop, comment on the ticket and move on. Never re-export it (that needs the production database) and never use a different snapshot (`protocol.md` section 3).
+
+Codex must trust this project for `.codex/config.toml` to load (Boss: accept the trust prompt once, or copy the settings into `~/.codex/config.toml`).
+
 Work in your own git worktree or clone per ticket. Branch `kan-<n>/<short-name>`, commits `KAN-<n>: <summary>`, one ticket = one PR. Never push to or merge `main`.
+
+Note: Codex keeps `.git` read-only inside the sandbox even in a writable root. If `git commit`, `git branch` or `git push` is refused, approve the command in the Codex app (Boss) rather than working around it.
 
 ## 3. Where things are
 
@@ -33,15 +39,15 @@ Work in your own git worktree or clone per ticket. Branch `kan-<n>/<short-name>`
 ## 4. How to do a ticket
 
 1. Read the ticket and `protocol.md` sections 4 to 12.
-2. Copy `prereg_template.yaml` to `docs/experiments/prereg/<id>.yaml`, fill in the hypothesis and decision rule **before running**, and commit it.
-3. Write the model factory (see "Writing a model" in `evaluate.md`). Feature logic goes in `src/pm25_forecast/features/`, not in your model file. Experiment-only code goes in `src/pm25_forecast/experiments/`.
+2. `mkdir -p docs/experiments/prereg`, copy `prereg_template.yaml` to `docs/experiments/prereg/<id>.yaml` (id matches `[a-z0-9_-]+`) and fill it in **before running**: hypothesis and decision rule, `ticket: KAN-<n>`, `author_agent: codex`, `split: dev`, `final: false`. Commit it before the run, and keep the git tree clean, or the run is tagged DIRTY.
+3. Write the model factory (see "Writing a model" in `evaluate.md`; `src/pm25_forecast/experiments/examples/ridge_linear.py` is a complete example). Fit one model per station, keyed on `snapshot.station_id`. `pm25_latest` is `None` when the newest reading is older than 3 h: return `None`, never impute. Feature logic goes in `src/pm25_forecast/features/`, not in your model file. Experiment-only code goes in `src/pm25_forecast/experiments/`.
 4. Run it through the runner (never write your own scoring loop):
 
    ```bash
    uv run --group experiments python -m pm25_forecast.experiments.evaluate \
        --prereg docs/experiments/prereg/<id>.yaml \
        --snapshot ~/pm25-experiments/snapshots/e02-v1 \
-       --model <module>:<factory> --ticket KAN-<n> --agent codex
+       --model <module>:<factory>
    ```
 
 5. Copy `notebooks/_template_experiment_report.ipynb`, fill the 8 sections from the run, and render it:
@@ -59,7 +65,9 @@ KAN-83, KAN-84, KAN-85, KAN-87, KAN-90, KAN-91, KAN-93. KAN-84 may need the feat
 ## 6. Hard rules
 
 - The final holdout is locked. Never pass `--holdout`; the final-selection ticket (KAN-94) does that.
-- No new dependency except `scikit-learn` and `statsmodels` (add with `uv add --group experiments`, commit the lock). Anything else needs a ticket comment first.
+- No new dependency except `scikit-learn` and `statsmodels`. Neither is installed yet: add with `uv add --group experiments <name>`; this changes `pyproject.toml` and `uv.lock`, which go in the same PR as the ticket that needs it (`uv sync --locked` fails until the lock is committed). `lightgbm` is already a main dependency. Anything else needs a ticket comment first.
+- Run the push-gate commands exactly as written in step 7 (plain `uv run`, no `--group`, after `uv sync --locked --group experiments`).
+- Never run `leaderboard --holdout`.
 - All timestamps are UTC and timezone-aware. Forecast origin t uses only data with `ts <= t - 1h` and `available_at <= t`.
 - No live API or database calls in tests; use fixtures under `tests/fixtures/`.
 - Never commit secrets, raw data or exports. Do not touch `.github/workflows/`, Neon, the dashboard or production.
