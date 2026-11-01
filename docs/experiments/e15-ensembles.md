@@ -1,6 +1,6 @@
 # E15 Ensembles of the family-best models (KAN-92)
 
-Verdict: **NO CONFIRMED WIN, ONE LEAD.** No ensemble meets the preregistered rule. The stacker is worse than the smoother, and equal and inverse-error averages of all five family-best models are indistinguishable from each other (3.734 and 3.736) with CIs that include zero. The only ensemble whose 72 h CI is entirely below zero against both baselines is the plain blend of the smoother and the E12 LightGBM (mae_24h 3.731, diff vs smoother -0.137 ug/m3, 95% CI [-0.21, -0.03], 99% CI [-0.24, -0.00]), but it is fragile (the 24 h-block CI reaches +0.01), its point estimate is above the -0.15 minimum effect, and it comes from a dev-only, selection-biased pool. Dev split only; the holdout was never touched.
+Verdict: **NO CONFIRMED WIN, ONE LEAD.** No ensemble meets the preregistered rule. The stacker is worse than the smoother, and equal and inverse-error averages of all five family-best models are indistinguishable from each other (3.734 and 3.736) with CIs that include zero. The only ensemble whose 72 h CI is entirely below zero against both baselines is the plain blend of the smoother and the E12 LightGBM (mae_24h 3.731, diff vs smoother -0.137 ug/m3, 95% CI [-0.21, -0.03], 99% CI [-0.245, -0.004]), but it is fragile (the 24 h-block CI reaches +0.01), its point estimate is above the -0.15 minimum effect, and it comes from a dev-only, selection-biased pool. Dev split only; the holdout was never touched.
 
 ## 1. Question, rule, shortlist (fixed in git before the runs)
 
@@ -64,8 +64,8 @@ Serving-lag probe (gate 10.4): `pass` for all 5 variants and the Bonferroni run,
 
 ## 6. Shortlist (at most 3) and the two that would be registered
 
-1. **e15-smoother-gbm: finalist 1.** Lowest dev MAE of everything tried (3.731), the only candidate with a 72 h CI below zero against both baselines at the 95% and the 99% level, negative in 5/5 folds, both gates pass. Cheap to serve (the smoother already exists; the GBM needs the shared v2 feature module and no cross-station state). Cost of being wrong: it is fragile and below the -0.15 floor, so a holdout pass needs a larger effect than dev showed.
-2. **e15-ridge-clim: finalist 2.** Same MAE class as the five-member averages (3.741) with only two members that serve from own-station history (the pooled ridge on `fs_v2_core`, same-hour climatology), no weather feed, no ARIMA, no GBM. It is the cheapest ensemble to serve and is what the 5-member averages reduce to (equal5 is 0.007 better, inside noise). Its dev CI includes zero (95% [-0.34, +0.13]), so it is registered as the simple alternative, not as a win.
+1. **e15-smoother-gbm: finalist 1** (fragile and below the -0.15 promotion floor, see above). Lowest dev MAE of everything tried (3.731), the only candidate with a 72 h CI below zero against both baselines at the 95% and the 99% level, negative in 5/5 folds, both gates pass. Cheap to serve (the smoother already exists; the GBM needs the shared v2 feature module and no cross-station state). Cost of being wrong: it is fragile and below the -0.15 floor, so a holdout pass needs a larger effect than dev showed.
+2. **e15-ridge-clim: finalist 2.** Same MAE class as the five-member averages (3.741); it is picked for serving simplicity, not for a measured gain: it is not better than the plain ridge control on dev (3.741 vs 3.757, overlapping CIs) with only two members that serve from own-station history (the pooled ridge on `fs_v2_core`, same-hour climatology), no weather feed, no ARIMA, no GBM. It is the cheapest ensemble to serve and is what the 5-member averages reduce to (equal5 is 0.007 better, inside noise). Its dev CI includes zero (95% [-0.34, +0.13]), so it is registered as the simple alternative, not as a win.
 3. **e06-ridge-pool-raw-chg alone (not registered; control).** Best single model (3.757, -0.110 [-0.31, +0.13], gates and probe pass, 3,275 probe checks in E06). It answers whether blending adds anything beyond the ridge; the dev numbers say it adds at most 0.02. It would only be scored if Boss wants a third look.
 
 Not shortlisted: equal5 and invmae5 (no better than ridge-clim by a margin that matters, and they need live weather forecasts, ARIMA and GBM; E11 already said the weather ingestion ticket is not justified), stack5 (worse than the smoother), and every single non-ridge member (the smoother is at least as good).
@@ -74,7 +74,7 @@ If the holdout is used, `finalists` = 2 sets the level to 97.5% (`1 - 0.05/2`); 
 
 ## 7. Caveats
 
-- All numbers are dev, unadjusted except where stated; selection of members (about 80 earlier dev runs) is not corrected. The holdout was not read.
+- All numbers are dev, unadjusted except where stated; selection of members (about 80 earlier dev runs; the prereg's 'about 100' is a rounder estimate of the same set, the preregistration text is left unedited) is not corrected. The holdout was not read.
 - Weights are fitted on one season (about 8 to 11 weeks) and 5 stations; the stacker result may differ with more data.
 - Weights and the stacker are frozen at the weekly refit; a version that updates weights hourly from newly matured targets was not tried (it would need predictions of past origins from models fitted before them).
 - Serving: no production wrapper exists for a multi-model blend; `models/serving.load_serving_model` and the registry manifest (gate 10.5) would need an ensemble artefact.
@@ -89,3 +89,5 @@ Code: `src/pm25_forecast/experiments/ensembles.py` (factory), `kan92_analyze.py`
         --model pm25_forecast.experiments.ensembles:fit
 
 Bonferroni run: the same command for `e15-smoother-gbm` with `--finalists 5 --run-name e15-smoother-gbm-bonf5 --experiment kan78/e15-smoother-gbm-bonf5`. Tables: `uv run --group experiments python -m pm25_forecast.experiments.kan92_analyze`. Total tracked dev runs for this ticket: 6 (5 variants, 1 Bonferroni). Before the logged runs, a pipeline check (no scoring, no choice made from it) timed each member and compared a fresh instance with the live one on a handful of origins; it is what exposed the GBM memo and the ARIMA chain.
+
+Note on the Bonferroni run: the prereg files say `finalists: 1`; the corrected-CI run used `--finalists 5` on the command line (K = 5 ensemble variants). The `.results.apply` fix in timeseries.py (fallback branch) has no regression test of its own; the stateless reproducibility test exercises the surrounding path.
