@@ -20,18 +20,34 @@ prediction job fails loudly instead of feeding features in the wrong order.
 from __future__ import annotations
 
 import json
+import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
 import lightgbm as lgb
+import numpy as np
 
-from pm25_forecast.features import FEATURE_NAMES, MEAN_24H_NAME, SMOOTHER_FEATURE_NAMES
-from pm25_forecast.models.baselines import HORIZONS_H
+from pm25_forecast.features import (
+    FEATURE_NAMES,
+    MEAN_24H_NAME,
+    SMOOTHER_FEATURE_NAMES,
+    _rows,
+)
+from pm25_forecast.features.library_v2 import build_features_v2, prepare_series
+from pm25_forecast.models.baselines import HORIZONS_H, require_utc
+from pm25_forecast.models.ridge_bundle import RidgeSpec, is_ridge_bundle, parse_ridge_bundle
 from pm25_forecast.storage import registry
 
+logger = logging.getLogger(__name__)
+
 MIN_SERVING_LAG_H = 1
+MAX_MISSING_SHARE = 0.25  # train_mean: more missing features than this gives no forecast
+RIDGE_LATEST_LAGS = ("pm25_lag_1h", "pm25_lag_2h", "pm25_lag_3h")  # newest of these = "latest"
+RIDGE_LOOKBACK = timedelta(hours=80)  # fs_v2_* read at most 72 h before the origin
+HOUR = timedelta(hours=1)
 
 
 class ModelLoadError(ValueError):
@@ -89,6 +105,113 @@ class SmootherModel:
         if not math.isfinite(pred):
             raise ValueError(f"{self.model_version} +{horizon}h produced a non-finite prediction")
         return max(0.0, pred)
+
+
+@dataclass(frozen=True, eq=False)
+class RidgeModel:
+    """Pooled ridge, raw target, change-from-latest (KAN-100). One small ridge per horizon.
+
+    ``predict`` takes the shared feature mapping (``library_v2.build_features_v2`` output, which
+    must also hold ``RIDGE_LATEST_LAGS``) plus the station; ``forecast`` builds the features itself
+    from raw observations. A missing input gives None for that (station, horizon): with
+    ``missing_policy`` ``skip`` any missing feature; with ``train_mean`` (the default, the rule the
+    dev MAE was measured under) missing features are filled with the training mean, but never when
+    the latest reading is missing or more than ``MAX_MISSING_SHARE`` of the features are missing.
+    The imputed feature names are logged by ``forecast`` (and collected by ``predict`` if asked).
+    """
+
+    model_version: str
+    spec: RidgeSpec
+
+    @property
+    def feature_list(self) -> tuple[str, ...]:
+        return self.spec.features
+
+    @property
+    def horizons(self) -> tuple[int, ...]:
+        return tuple(self.spec.horizons)
+
+    @property
+    def stations(self) -> tuple[str, ...]:
+        return self.spec.stations
+
+    def predict(
+        self,
+        horizon: int,
+        features: Mapping[str, float | None],
+        station_id: str,
+        imputed: set[str] | None = None,
+    ) -> float | None:
+        fit = self.spec.horizons[horizon]
+        need = (*RIDGE_LATEST_LAGS, *self.feature_list)
+        missing = [name for name in need if name not in features]
+        if missing:
+            raise ModelLoadError(f"feature builder did not produce: {', '.join(missing)}")
+        if station_id not in self.spec.stations:
+            return None  # the model was not fitted for this station
+        latest = next((features[n] for n in RIDGE_LATEST_LAGS if features[n] is not None), None)
+        if latest is None:
+            return None
+        row = [features[name] for name in self.feature_list]
+        gaps = [n for n, v in zip(self.feature_list, row, strict=True) if v is None]
+        if gaps and (
+            self.spec.missing_policy == "skip" or len(gaps) / len(row) > MAX_MISSING_SHARE
+        ):
+            return None
+        if imputed is not None:
+            imputed.update(gaps)
+        onehot = [float(s == station_id) for s in self.spec.stations]
+        x = np.array([np.nan if v is None else float(v) for v in row] + onehot)
+        mean, scale = np.array(fit.mean), np.array(fit.scale)
+        z = (np.where(np.isnan(x), mean, x) - mean) / scale
+        pred = float(latest) + fit.intercept + float(z @ np.array(fit.coef))
+        if not math.isfinite(pred):
+            raise ValueError(f"{self.model_version} +{horizon}h produced a non-finite prediction")
+        return max(0.0, pred)
+
+    def forecast(
+        self,
+        observations: Iterable[Any],
+        station_id: str,
+        origin: datetime,
+        horizons: Sequence[int] | None = None,
+    ) -> dict[int, float | None]:
+        """Forecast ``origin + h`` for each served horizon from one station's raw observations.
+
+        Only readings with ``origin - 80 h <= ts <= origin - 1 h`` and ``available_at <= origin``
+        are used (the serving lag); anything newer is ignored, whatever the caller passes.
+        """
+        origin = require_utc(origin)
+        fields = (("ts",), ("pm25", "value"), ("available_at", "ingested_at"))
+        recent = []
+        for row in _rows(observations, fields):
+            ts, available_at = row["ts"], row["available_at"]
+            if ts is None:
+                continue
+            ts = require_utc(ts)
+            if not origin - RIDGE_LOOKBACK <= ts <= origin - HOUR:
+                continue
+            if available_at is not None and require_utc(available_at) > origin:
+                continue
+            recent.append((ts, row["pm25"], available_at))
+        prep = prepare_series({station_id: recent})
+        names = tuple(dict.fromkeys((*RIDGE_LATEST_LAGS, *self.feature_list)))
+        out: dict[int, float | None] = {}
+        imputed: set[str] = set()
+        # features are rebuilt per horizon (calendar features depend on the target hour)
+        for h in self.horizons if horizons is None else horizons:
+            feats = build_features_v2(
+                prep, station_id, origin, origin + h * HOUR, None, names=names
+            )
+            out[h] = self.predict(h, feats, station_id, imputed)
+        if imputed:
+            logger.warning(
+                "%s %s: filled missing features with the training mean: %s",
+                self.model_version,
+                station_id,
+                ", ".join(sorted(imputed)),
+            )
+        return out
 
 
 def parse_smoother_bundle(payload: Any) -> tuple[float, tuple[int, ...]]:
@@ -161,13 +284,7 @@ def load_serving_model(
         raise ModelLoadError(
             f"manifest features not produced by the shared feature builder: {', '.join(unknown)}"
         )
-    lag = manifest.get("assumed_reporting_lag_hours")
-    if lag is not None and (not isinstance(lag, int | float) or lag < MIN_SERVING_LAG_H):
-        raise ModelLoadError(
-            f"model was trained with assumed_reporting_lag_hours={lag!r}; the hourly job serves "
-            f"inputs at least {MIN_SERVING_LAG_H}h old (retrain with --lag-hours "
-            f"{MIN_SERVING_LAG_H})"
-        )
+    _check_lag(manifest)
     boosters = _parse_bundle(artifact)
     for horizon, booster in boosters.items():
         if tuple(booster.feature_name()) != feature_list:
@@ -178,7 +295,35 @@ def load_serving_model(
     return ServingModel(model_version, feature_list, boosters)
 
 
-def load_registered_model(con: Any, model_version: str) -> ServingModel | SmootherModel:
+def _check_lag(manifest: Mapping[str, Any]) -> None:
+    lag = manifest.get("assumed_reporting_lag_hours")
+    if lag is not None and (not isinstance(lag, int | float) or lag < MIN_SERVING_LAG_H):
+        raise ModelLoadError(
+            f"model was trained with assumed_reporting_lag_hours={lag!r}; the hourly job serves "
+            f"inputs at least {MIN_SERVING_LAG_H}h old (retrain with --lag-hours "
+            f"{MIN_SERVING_LAG_H})"
+        )
+
+
+def load_ridge_model(
+    model_version: str, artifact: bytes, manifest: Mapping[str, Any]
+) -> RidgeModel:
+    """Build a RidgeModel from a verified registry bundle; raise on any spec mismatch."""
+    if "assumed_reporting_lag_hours" not in manifest:
+        raise ModelLoadError("ridge manifest must declare assumed_reporting_lag_hours")
+    _check_lag(manifest)
+    try:
+        spec = parse_ridge_bundle(json.loads(artifact))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ModelLoadError(f"invalid ridge bundle: {exc}") from None
+    if list(spec.features) != list(manifest.get("feature_list") or ()):
+        raise ModelLoadError("ridge bundle features do not match manifest feature_list")
+    return RidgeModel(model_version, spec)
+
+
+def load_registered_model(
+    con: Any, model_version: str
+) -> ServingModel | SmootherModel | RidgeModel:
     """Read a content-verified bundle from the registry and prepare it for serving."""
     try:
         artifact, manifest = registry.read_model(con, model_version)
@@ -189,4 +334,6 @@ def load_registered_model(con: Any, model_version: str) -> ServingModel | Smooth
     if registry.is_smoother_bundle(artifact):
         beta, horizons = parse_smoother_bundle(json.loads(artifact))
         return SmootherModel(model_version, beta, horizons)
+    if is_ridge_bundle(artifact):
+        return load_ridge_model(model_version, artifact, manifest)
     return load_serving_model(model_version, artifact, manifest)

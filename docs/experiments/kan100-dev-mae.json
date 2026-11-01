@@ -1,0 +1,242 @@
+{
+ "1": {
+  "ridge": 2.706,
+  "persistence": 2.952,
+  "smoother": 2.695,
+  "diff_vs_persistence": -0.246,
+  "ci95_vs_persistence": [
+   -0.302,
+   -0.131
+  ]
+ },
+ "2": {
+  "ridge": 2.951,
+  "persistence": 3.322,
+  "smoother": 2.929,
+  "diff_vs_persistence": -0.371,
+  "ci95_vs_persistence": [
+   -0.46,
+   -0.206
+  ]
+ },
+ "3": {
+  "ridge": 3.097,
+  "persistence": 3.524,
+  "smoother": 3.081,
+  "diff_vs_persistence": -0.427,
+  "ci95_vs_persistence": [
+   -0.546,
+   -0.222
+  ]
+ },
+ "4": {
+  "ridge": 3.22,
+  "persistence": 3.668,
+  "smoother": 3.181,
+  "diff_vs_persistence": -0.448,
+  "ci95_vs_persistence": [
+   -0.604,
+   -0.202
+  ]
+ },
+ "5": {
+  "ridge": 3.304,
+  "persistence": 3.815,
+  "smoother": 3.307,
+  "diff_vs_persistence": -0.511,
+  "ci95_vs_persistence": [
+   -0.705,
+   -0.249
+  ]
+ },
+ "6": {
+  "ridge": 3.339,
+  "persistence": 3.875,
+  "smoother": 3.37,
+  "diff_vs_persistence": -0.536,
+  "ci95_vs_persistence": [
+   -0.777,
+   -0.239
+  ]
+ },
+ "7": {
+  "ridge": 3.395,
+  "persistence": 3.994,
+  "smoother": 3.471,
+  "diff_vs_persistence": -0.598,
+  "ci95_vs_persistence": [
+   -0.855,
+   -0.312
+  ]
+ },
+ "8": {
+  "ridge": 3.418,
+  "persistence": 4.046,
+  "smoother": 3.49,
+  "diff_vs_persistence": -0.628,
+  "ci95_vs_persistence": [
+   -0.909,
+   -0.324
+  ]
+ },
+ "9": {
+  "ridge": 3.462,
+  "persistence": 4.139,
+  "smoother": 3.574,
+  "diff_vs_persistence": -0.678,
+  "ci95_vs_persistence": [
+   -0.95,
+   -0.373
+  ]
+ },
+ "10": {
+  "ridge": 3.489,
+  "persistence": 4.254,
+  "smoother": 3.641,
+  "diff_vs_persistence": -0.765,
+  "ci95_vs_persistence": [
+   -1.033,
+   -0.456
+  ]
+ },
+ "11": {
+  "ridge": 3.511,
+  "persistence": 4.3,
+  "smoother": 3.676,
+  "diff_vs_persistence": -0.789,
+  "ci95_vs_persistence": [
+   -1.068,
+   -0.486
+  ]
+ },
+ "12": {
+  "ridge": 3.53,
+  "persistence": 4.302,
+  "smoother": 3.694,
+  "diff_vs_persistence": -0.772,
+  "ci95_vs_persistence": [
+   -1.106,
+   -0.454
+  ]
+ },
+ "13": {
+  "ridge": 3.553,
+  "persistence": 4.318,
+  "smoother": 3.719,
+  "diff_vs_persistence": -0.766,
+  "ci95_vs_persistence": [
+   -1.136,
+   -0.406
+  ]
+ },
+ "14": {
+  "ridge": 3.583,
+  "persistence": 4.322,
+  "smoother": 3.743,
+  "diff_vs_persistence": -0.739,
+  "ci95_vs_persistence": [
+   -1.133,
+   -0.375
+  ]
+ },
+ "15": {
+  "ridge": 3.621,
+  "persistence": 4.356,
+  "smoother": 3.778,
+  "diff_vs_persistence": -0.736,
+  "ci95_vs_persistence": [
+   -1.148,
+   -0.372
+  ]
+ },
+ "16": {
+  "ridge": 3.66,
+  "persistence": 4.427,
+  "smoother": 3.832,
+  "diff_vs_persistence": -0.767,
+  "ci95_vs_persistence": [
+   -1.157,
+   -0.414
+  ]
+ },
+ "17": {
+  "ridge": 3.67,
+  "persistence": 4.476,
+  "smoother": 3.871,
+  "diff_vs_persistence": -0.806,
+  "ci95_vs_persistence": [
+   -1.157,
+   -0.478
+  ]
+ },
+ "18": {
+  "ridge": 3.711,
+  "persistence": 4.478,
+  "smoother": 3.871,
+  "diff_vs_persistence": -0.768,
+  "ci95_vs_persistence": [
+   -1.097,
+   -0.442
+  ]
+ },
+ "19": {
+  "ridge": 3.701,
+  "persistence": 4.464,
+  "smoother": 3.879,
+  "diff_vs_persistence": -0.763,
+  "ci95_vs_persistence": [
+   -1.072,
+   -0.478
+  ]
+ },
+ "20": {
+  "ridge": 3.737,
+  "persistence": 4.397,
+  "smoother": 3.846,
+  "diff_vs_persistence": -0.659,
+  "ci95_vs_persistence": [
+   -0.934,
+   -0.388
+  ]
+ },
+ "21": {
+  "ridge": 3.691,
+  "persistence": 4.303,
+  "smoother": 3.819,
+  "diff_vs_persistence": -0.612,
+  "ci95_vs_persistence": [
+   -0.883,
+   -0.376
+  ]
+ },
+ "22": {
+  "ridge": 3.709,
+  "persistence": 4.254,
+  "smoother": 3.8,
+  "diff_vs_persistence": -0.546,
+  "ci95_vs_persistence": [
+   -0.794,
+   -0.319
+  ]
+ },
+ "23": {
+  "ridge": 3.747,
+  "persistence": 4.288,
+  "smoother": 3.85,
+  "diff_vs_persistence": -0.541,
+  "ci95_vs_persistence": [
+   -0.796,
+   -0.3
+  ]
+ },
+ "24": {
+  "ridge": 3.757,
+  "persistence": 4.311,
+  "smoother": 3.867,
+  "diff_vs_persistence": -0.554,
+  "ci95_vs_persistence": [
+   -0.833,
+   -0.311
+  ]
+ }
+}

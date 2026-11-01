@@ -45,8 +45,6 @@ from pathlib import Path
 from typing import IO, Any
 
 import numpy as np
-from sklearn.exceptions import ConvergenceWarning
-from sklearn.linear_model import Lasso
 
 from pm25_forecast.backtest import Observation, Predictor, Snapshot
 from pm25_forecast.experiments.evaluate import TrainSnapshot
@@ -142,6 +140,11 @@ def fit_linear(
     elif model == "ridge":
         w = np.linalg.solve(z.T @ z + n * strength * np.eye(z.shape[1]), z.T @ yc)
     elif model == "lasso":
+        # scikit-learn is in the experiments group only; import here so the ridge path (KAN-100
+        # training for production serving) works with the default dependencies.
+        from sklearn.exceptions import ConvergenceWarning
+        from sklearn.linear_model import Lasso
+
         alpha_max = float(np.max(np.abs(z.T @ yc)) / n)
         if alpha_max <= 0:
             return ybar, np.zeros(z.shape[1])
@@ -280,8 +283,14 @@ def _dump(variant: str) -> IO[str]:
     return _dumps[variant]
 
 
-def fit(train: TrainSnapshot, params: Mapping[str, Any] | None = None) -> Predictor:
-    spec = {**DEFAULTS, **(params or {})}
+def fit_models(
+    train: TrainSnapshot, spec: Mapping[str, Any]
+) -> tuple[dict[tuple[str, int], Fitted], tuple[str, ...], list[dict[str, Any]]]:
+    """Fit one model per (station, horizon): ``(models, stations, diagnostics log)``.
+
+    ``spec`` is ``DEFAULTS`` merged with the variant params. Shared by ``fit`` (the experiment)
+    and ``pm25_forecast.models.ridge`` (production training, KAN-100), so both fit identically.
+    """
     feature_set, scope = spec["feature_set"], spec["scope"]
     names = names_for(feature_set)
     stations = tuple(sorted(train.stations))
@@ -333,6 +342,14 @@ def fit(train: TrainSnapshot, params: Mapping[str, Any] | None = None) -> Predic
                     "scale": dict(zip(cols, map(float, std.scale), strict=True)),
                 }
             )
+    return models, stations, log
+
+
+def fit(train: TrainSnapshot, params: Mapping[str, Any] | None = None) -> Predictor:
+    spec = {**DEFAULTS, **(params or {})}
+    feature_set, scope = spec["feature_set"], spec["scope"]
+    models, stations, log = fit_models(train, spec)
+    onehot = {s: np.eye(len(stations))[i] for i, s in enumerate(stations)}
     handle = _dump(spec["variant"])
     for rec in log:
         handle.write(json.dumps(rec) + "\n")

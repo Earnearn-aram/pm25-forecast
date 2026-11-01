@@ -261,5 +261,54 @@ as the predict step would. `promote` is the manual champion flip; it needs `--co
 a version the serving loader rejects. The hourly baselines do not read the champion pointer yet;
 automatic champion/challenger selection is KAN-23.
 
+Ridge challenger (KAN-100, stage 1: servable, not yet wired into Predict). The KAN-84 best variant
+(`ridge-pool-raw-chg`: pooled ridge, raw target, prediction = latest reading + predicted change,
+`fs_v2_core`) is trained for every hour +1..+24 h (direct strategy, one small ridge per horizon;
+`--horizons` picks a subset). Training reuses `experiments.linear_models.fit_models` (the fit the
+experiment ran) and `features.library_v2`; serving (`models.serving.RidgeModel`) needs only numpy.
+Dev-split MAE per horizon (no holdout) and the 95% CI of the difference vs persistence are stored
+in the manifest (`metrics.dev_mae_by_horizon`, source `docs/experiments/kan100-dev-mae.json`). They
+were measured with training-mean imputation, which is now the default `missing_policy: train_mean`,
+and are optimistic: this is the best of about 25 variants chosen on dev, with no holdout. The ridge
+beat persistence at all 24 hours (every CI upper bound below zero, worst -0.13 at +1 h);
+`horizons_worse_than_persistence_dev` lists any hour where it did not (empty). Missing features are
+filled with the training mean (this keeps forecasts alive when `is_thai_holiday` is missing from
+2027-01-01, until KAN-106 extends the table), but there is no forecast without the latest reading
+(`pm25_lag_1h..3h`) or with more than 25% of the 20 features missing, and each run logs a warning
+naming the imputed features. `--missing-policy skip` (any missing feature gives no forecast) is
+available by flag. Training warns loudly if the holiday table does not cover the next 60 days. A
+forecast rebuilds features per horizon (120 calls per run), fine for now. Owner steps (`DATABASE_URL`
+set; add `--kan74-repaired` only once KAN-74 is confirmed fixed; keep `--out-dir` under `out/`):
+
+```sh
+uv sync --group experiments
+uv run python -m pm25_forecast.models.ridge --out-dir out/kan100 --version ridge-pool-raw-chg-v1 \
+    --dev-mae docs/experiments/kan100-dev-mae.json
+uv run python -m pm25_forecast.registry_cli register \
+    --artifact out/kan100/artifact.json --manifest out/kan100/manifest.json
+uv run python -m pm25_forecast.registry_cli check ridge-pool-raw-chg-v1
+```
+
+Stage 2 (Predict/Score/dashboard) with 24 horizons per model and station, 5 stations: 120 rows per
+model per run, 2,880 per day, about 260 k in the 90-day window per model. Needed changes:
+
+- `predict.py`: read 80 h of observations (now 24 h); stop keying features by `HORIZONS_H`
+  (`features[h]` would raise KeyError for other hours): for a `RidgeModel` call
+  `challenger.forecast(observations, station, issue_time)` and store `valid_time = issue + h`.
+  Summarise "no inputs" skips per station (up to 120 lines per run otherwise). To judge the ridge
+  against persistence at hours other than 6/12/24, persistence rows for +1..+24 must be written too.
+- `score.py`: scoring itself is horizon-agnostic (horizon = `valid_time - issue_time`; there is no
+  horizon column in `predictions`/`scores`). `rolling_metrics` defaults to `HORIZONS_H` and the run
+  summary and `scores.json` export loop over `HORIZONS_H`; both need the 1..24 list (and a
+  persistence reference at each hour). `scores` is never purged.
+- `quality.py`: freshness is the newest `issue_time` per model and station, so 24 horizons change
+  nothing and the 3 h warn / 6 h fail limits stay. Optional: a check of rows per run
+  (stations x served horizons).
+- `housekeeping.py`: the 90-day purge covers `predictions` only; volume is about 8 times a 3-horizon
+  model. Check the Neon storage budget before enabling; consider purging `scores` too.
+- `dashboard.py`: draws +6/+12/+24 only (`HORIZONS_H` in several places, the skill-by-horizon
+  card, future-line selection `valid_time - issue_time in HORIZONS_H`): separate ticket to draw
+  the hourly line.
+
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).
