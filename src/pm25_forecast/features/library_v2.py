@@ -33,8 +33,8 @@ DIFFS_H: tuple[int, ...] = (1, 24)
 BANGKOK_OFFSET = timedelta(hours=7)
 
 # Thai public holidays (including substitution days and cabinet special days), Bangkok local
-# dates; cross-checked 2026-11-01 against secondary lists of the Bank of Thailand calendar. Static table: years
-# outside HOLIDAY_YEARS give None for the holiday flag instead of a silent wrong 0.
+# dates; cross-checked 2026-11-01 against secondary lists of the Bank of Thailand calendar.
+# Static table: years outside HOLIDAY_YEARS give None for the holiday flag instead of a silent wrong 0.
 HOLIDAY_YEARS: frozenset[int] = frozenset({2026})
 THAI_HOLIDAYS: frozenset[date] = frozenset(
     date(2026, m, d)
