@@ -114,7 +114,7 @@ COMPONENT_PARAMS: dict[str, dict[str, Any]] = {
         "p_grid": [0, 1, 2, 3],
         "q_grid": [0, 1, 2],
         "maxiter": 50,
-        "stateless": True,  # runtime flag, not a model change (differs from E07 by about 1e-7)
+        "stateless": True,  # runtime flag, not a model change (E07 values within 1e-3)
     },
     # e11-lgbm-wx-d2 (KAN-88): LightGBM with weather forecasts issued 2 days ahead
     # (previous_day2: strictly available at the origin, protocol section 2)
