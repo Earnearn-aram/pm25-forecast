@@ -129,3 +129,18 @@ def test_lasso_zeroes_some_coefficients_and_logs_diagnostics(tmp_path):
     rec = json.loads((tmp_path / "lasso-t.jsonl").read_text().splitlines()[0])
     assert rec["nonzero"] < len(rec["coef_std"])
     assert "pm25" in max(rec["coef_std"], key=lambda k: abs(rec["coef_std"][k]))
+
+
+def test_prereg_grid_is_24_unique_valid_preregs():
+    from pm25_forecast.experiments import kan84_prereg as kp
+    from pm25_forecast.experiments.prereg import Prereg
+
+    specs = [kp.prereg_dict(*row) for row in kp.grid()]
+    assert len(specs) == 24
+    assert len({s["id"] for s in specs}) == 24
+    for s in specs:
+        p = Prereg.model_validate(s)
+        assert p.split == "dev" and not p.final and p.params["primary_ci_block_hours"] == 72
+    assert kp.prereg_dict("ridge", "pooled", "raw", "change", "fs_v2_full_nocross")["id"].endswith(
+        "-full"
+    )
