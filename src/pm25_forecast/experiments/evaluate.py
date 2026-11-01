@@ -60,7 +60,7 @@ BASELINE_NAMES = ("persistence", "seasonal_naive", "smoother")
 STATION_MAX_WORSE = 0.05  # gate 10.3: station MAE may exceed persistence by at most 5%
 MAX_LOW_STATION_SHARE = 0.10  # gate 10.3: more than 10% of the cohort below the minimum
 LAG_PROBE_ORIGINS_PER_FOLD = 48  # gate 10.4: sampled origins per weekly fold
-LAG_POISON = 1000.0  # added to every row the model must not see in the lag probe
+LAG_POISONS = (1000.0, -999.0)  # two distinct shifts added to every row the model must not see
 
 
 class EvaluationError(RuntimeError):
@@ -275,8 +275,11 @@ class LagProbe:
             "method": (
                 "each sampled prediction is repeated with every row of the station outside the "
                 "allowed set (ts > origin - 1 h or available_at > origin; vintages issued or "
-                "available after the origin) added with its value shifted by +1000; a model that "
-                "honours the serving lag must return the same value"
+                "available after the origin) added twice, with values shifted by +1000 and by "
+                "-999, on fresh predictor instances; a model that honours the serving lag must "
+                "return the same value as on the allowed rows (and the same value when repeated "
+                "on them). Only status "
+                "'pass' satisfies gate 10.4"
             ),
             "examples": self.examples[:5],
         }
@@ -288,62 +291,89 @@ def _same_prediction(a: float | None, b: float | None) -> bool:
     return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-9)
 
 
-def _probe_prediction(
+def _probe_error(probe: LagProbe, snap: Snapshot, horizon: int, message: str) -> None:
+    probe.errors += 1
+    if len(probe.examples) < 5:
+        probe.examples.append(
+            {
+                "station": snap.station_id,
+                "origin": snap.prediction_time.isoformat(),
+                "horizon": horizon,
+                "error": message[:200],
+            }
+        )
+
+
+def _wide_snapshots(
+    snap: Snapshot, all_obs: Sequence[Observation], all_vin: Sequence[Vintage]
+) -> list[Snapshot]:
+    """One snapshot per poison: the allowed rows plus every other row of the station, shifted."""
+    obs_ok = {(o.ts, o.available_at) for o in snap.observations}
+    vin_ok = {(v.issue_time, v.valid_time, v.available_at, v.model) for v in snap.vintages}
+    extra_obs = [o for o in all_obs if (o.ts, o.available_at) not in obs_ok]
+    extra_vin = [
+        v for v in all_vin if (v.issue_time, v.valid_time, v.available_at, v.model) not in vin_ok
+    ]
+    return [
+        _ProbeSnapshot(
+            snap.prediction_time,
+            snap.station_id,
+            tuple(
+                sorted(
+                    [*snap.observations, *(replace(o, value=o.value + k) for o in extra_obs)],
+                    key=lambda o: o.ts,
+                )
+            ),
+            tuple(
+                sorted(
+                    [*snap.vintages, *(replace(v, value=v.value + k) for v in extra_vin)],
+                    key=lambda v: v.issue_time,
+                )
+            ),
+        )
+        for k in LAG_POISONS
+    ]
+
+
+def _probe_group(
     probe: LagProbe,
-    predictor: Predictor,
+    again: Predictor,
+    widened: Predictor,
     snap: Snapshot,
-    horizon: int,
-    expected: float | None,
+    expected: Sequence[tuple[int, float | None]],
     all_obs: Sequence[Observation],
     all_vin: Sequence[Vintage],
 ) -> None:
-    """Repeat ``predictor(snap, horizon)`` on a snapshot extended with forbidden, poisoned rows."""
-    origin = snap.prediction_time
-    obs_ok = {(o.ts, o.available_at) for o in snap.observations}
-    vin_ok = {(v.issue_time, v.valid_time, v.available_at, v.model) for v in snap.vintages}
-    extra_obs = [
-        replace(o, value=o.value + LAG_POISON)
-        for o in all_obs
-        if (o.ts, o.available_at) not in obs_ok
-    ]
-    extra_vin = [
-        replace(v, value=v.value + LAG_POISON)
-        for v in all_vin
-        if (v.issue_time, v.valid_time, v.available_at, v.model) not in vin_ok
-    ]
-    wide = _ProbeSnapshot(
-        origin,
-        snap.station_id,
-        tuple(sorted([*snap.observations, *extra_obs], key=lambda o: o.ts)),
-        tuple(sorted([*snap.vintages, *extra_vin], key=lambda v: v.issue_time)),
-    )
-    probe.checked += 1
-    try:
-        got = predictor(wide, horizon)
-    except Exception as exc:  # any failure on the widened input is inconclusive
-        probe.errors += 1
-        if len(probe.examples) < 5:
-            probe.examples.append(
-                {
-                    "station": snap.station_id,
-                    "origin": origin.isoformat(),
-                    "horizon": horizon,
-                    "error": f"{type(exc).__name__}: {exc}"[:200],
-                }
-            )
-        return
-    if not _same_prediction(expected, got):
-        probe.mismatches += 1
-        if len(probe.examples) < 5:
-            probe.examples.append(
-                {
-                    "station": snap.station_id,
-                    "origin": origin.isoformat(),
-                    "horizon": horizon,
-                    "with_allowed_rows_only": expected,
-                    "with_forbidden_rows_added": got,
-                }
-            )
+    """Gate 10.4 for one (origin, station): ``expected`` are the live (horizon, prediction) pairs.
+
+    ``again`` and ``widened`` are fresh predictor instances (never the live one, which the
+    poisoned rows could corrupt). A prediction that is not reproduced on the original snapshot is
+    an error (the model is not deterministic or not stateless), not a leak.
+    """
+    wides = _wide_snapshots(snap, all_obs, all_vin)
+    for horizon, want in expected:
+        probe.checked += 1
+        try:
+            if not _same_prediction(want, again(snap, horizon)):
+                _probe_error(probe, snap, horizon, "prediction not reproducible on the same input")
+                continue
+            for wide in wides:
+                got = widened(wide, horizon)
+                if not _same_prediction(want, got):
+                    probe.mismatches += 1
+                    if len(probe.examples) < 5:
+                        probe.examples.append(
+                            {
+                                "station": snap.station_id,
+                                "origin": snap.prediction_time.isoformat(),
+                                "horizon": horizon,
+                                "with_allowed_rows_only": want,
+                                "with_forbidden_rows_added": got,
+                            }
+                        )
+                    break
+        except Exception as exc:  # any failure on the repeated/widened input is inconclusive
+            _probe_error(probe, snap, horizon, f"{type(exc).__name__}: {exc}")
 
 
 # ---- walk-forward --------------------------------------------------------------------------
@@ -409,6 +439,7 @@ def _walk_forward(
             ),
         )
         predictor = _call_factory(fit, train, params)
+        again = widened = None  # fresh instances for the probe, never the live predictor
         origin = refit
         last_origin = fold_end - min_h * HOUR
         probe_at: set[datetime] = set()
@@ -418,6 +449,8 @@ def _walk_forward(
                 n_origins, size=min(LAG_PROBE_ORIGINS_PER_FOLD, n_origins), replace=False
             )
             probe_at = {origin + int(i) * HOUR for i in picks}
+            again = _call_factory(fit, train, params)
+            widened = _call_factory(fit, train, params)
         while origin < last_origin:
             hs = [h for h in horizons if fold_start <= origin + h * HOUR < fold_end]
             for s in stations:
@@ -443,12 +476,10 @@ def _walk_forward(
                         if v.available_at <= origin
                     ),
                 )
-                for h, actual in todo:
-                    pred = predictor(snap, h)
-                    if probe is not None and origin in probe_at:
-                        _probe_prediction(
-                            probe, predictor, snap, h, pred, sorted_obs[s], sorted_vin[s]
-                        )
+                live = [(h, predictor(snap, h)) for h, _ in todo]
+                if probe is not None and again and widened and origin in probe_at:
+                    _probe_group(probe, again, widened, snap, live, sorted_obs[s], sorted_vin[s])
+                for (h, actual), (_, pred) in zip(todo, live, strict=True):
                     if pred is None:
                         counters["candidate_none"] += 1
                         pred = math.nan
@@ -976,6 +1007,7 @@ def _summary(result: Mapping[str, Any]) -> str:
     lines.append(
         f"serving-lag check: {lag['status']} ({lag['mismatches']} mismatches / "
         f"{lag['checked']} checks)"
+        + ("" if lag["status"] == "pass" else "; gate 10.4 NOT satisfied (only 'pass' counts)")
     )
     if result["invalid_reasons"]:
         lines.append("INVALID: " + "; ".join(result["invalid_reasons"]))

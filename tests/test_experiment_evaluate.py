@@ -226,7 +226,8 @@ def test_no_leakage_into_fit_or_predict(obs):
 
     ev.run_evaluation(obs, [], fit=spy, horizons=(24,))
     plan = ev.make_plan(LAST, "dev")
-    assert seen["fits"] == [start - 24 * HOUR for start, _ in plan.folds]  # one refit per week
+    # one refit per week for the live model (+2 fresh instances per fold for the lag probe)
+    assert seen["fits"][0::3] == [start - 24 * HOUR for start, _ in plan.folds]
     assert seen["calls"] > 1000
 
 
@@ -715,6 +716,50 @@ def test_lag_probe_is_inconclusive_when_the_model_rejects_extra_rows(obs):
     lag = r["serving_lag"]
     assert lag["status"] == "inconclusive" and lag["errors"] > 0 and lag["mismatches"] == 0
     assert r["invalid_reasons"] == []
+
+
+def test_lag_probe_treats_a_noisy_model_as_inconclusive_not_leaky(obs):
+    rng = np.random.default_rng(7)
+
+    def noisy(train):
+        return lambda snap, horizon: 20.0 + float(rng.normal())
+
+    r = ev.run_evaluation(obs, [], fit=noisy, horizons=(24,))
+    lag = r["serving_lag"]
+    assert lag["status"] == "inconclusive" and lag["mismatches"] == 0 and lag["errors"] > 0
+    assert r["invalid_reasons"] == []
+
+
+def test_lag_probe_never_touches_the_live_predictor(obs):
+    """Fresh instances answer the probe: a cache keyed by (station, origin) cannot hide a leak,
+    and poisoned rows cannot corrupt the live model's state."""
+    live_seen = []
+
+    def cached_leaky(train):
+        cache = {}
+
+        def predict(snap, horizon):
+            key = (snap.station_id, snap.prediction_time, horizon)
+            if key not in cache:
+                cache[key] = max(snap.observations, key=lambda o: o.ts).value
+            return cache[key]
+
+        live_seen.append(cache)
+        return predict
+
+    r = ev.run_evaluation(obs, [], fit=cached_leaky, horizons=(24,))
+    assert r["serving_lag"]["status"] == "fail"
+    # the live instance (first of each fold's three) only ever saw allowed rows
+    assert all(v <= 200 for cache in live_seen[0::3] for v in cache.values())
+
+
+def test_lag_probe_runtime_with_a_nontrivial_model(obs):
+    from pm25_forecast.experiments.examples import ridge_linear
+
+    start = time.perf_counter()
+    r = ev.run_evaluation(obs, [], fit=ridge_linear.fit, horizons=(6, 12, 24))
+    assert r["serving_lag"]["status"] == "pass"
+    assert time.perf_counter() - start < 240
 
 
 def test_lag_probe_is_deterministic(obs):
