@@ -1,0 +1,35 @@
+# KAN-87 (E10). Committed before any run. Dev split only; never the holdout.
+id: e10-lgbm-base
+ticket: KAN-87
+hypothesis: >-
+  No-CAMS twin of the CAMS model: same rows (the rows where all CAMS features exist), fs_v2_core features only. Reference for the CAMS increment.
+model_family: lightgbm
+model: lgbm_base
+feature_set: fs_v2_core
+params:
+  objective: l1
+  num_leaves: 7
+  learning_rate: 0.05
+  n_estimators: 150
+  min_child_samples: 50
+  feature_fraction: 0.9
+  seed: 20261101
+  n_seeds: 5
+horizons: [24]
+expected_effect:
+  metric: cams_increment_vs_matched_no_cams_24h
+  direction: negative
+  magnitude: -0.1
+decision_rule: >-
+  Dev exploration, nothing goes to the holdout from this ticket. Report coverage first (share of +24 h
+  origins with a usable CAMS vintage and with all four CAMS features). The comparison is evaluated only
+  if the matched-rows set meets the protocol minimums (section 7: at least 3 dev folds of 600 pairs).
+  If not, the verdict is NOT EVALUABLE (reported as no-go for now), never a result. If evaluable:
+  primary comparison is the +24 h MAE increment of the CAMS model over its matched no-CAMS twin
+  (72 h block CI, 97.5% via Bonferroni over the 2 families); also reported against the smoother.
+  GO if the increment CI is entirely below 0 for at least one family and the model beats the smoother
+  with a CI entirely below 0. PIVOT if only the point estimate is negative. STOP otherwise.
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist
