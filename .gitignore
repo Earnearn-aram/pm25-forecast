@@ -36,3 +36,4 @@ mlruns/
 
 # Rendered experiment reports (KAN-81)
 /report/
+out/
