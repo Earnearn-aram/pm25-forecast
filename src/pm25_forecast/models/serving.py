@@ -27,7 +27,7 @@ from typing import Any
 
 import lightgbm as lgb
 
-from pm25_forecast.features import FEATURE_NAMES
+from pm25_forecast.features import FEATURE_NAMES, MEAN_24H_NAME, SMOOTHER_FEATURE_NAMES
 from pm25_forecast.models.baselines import HORIZONS_H
 from pm25_forecast.storage import registry
 
@@ -62,6 +62,50 @@ class ServingModel:
         if not math.isfinite(pred):
             raise ValueError(f"{self.model_version} +{horizon}h produced a non-finite prediction")
         return max(0.0, pred)
+
+
+@dataclass(frozen=True)
+class SmootherModel:
+    """``latest + beta * (mean24 - latest)`` (KAN-76); same serving surface as ``ServingModel``."""
+
+    model_version: str
+    beta: float
+    served_horizons: tuple[int, ...]
+    feature_list: tuple[str, ...] = SMOOTHER_FEATURE_NAMES
+
+    @property
+    def horizons(self) -> tuple[int, ...]:
+        return self.served_horizons
+
+    def predict(self, horizon: int, features: Mapping[str, float | None]) -> float | None:
+        """None when there is no latest reading; a missing 24 h mean falls back to the latest."""
+        missing = [name for name in self.feature_list if name not in features]
+        if missing:
+            raise ModelLoadError(f"feature builder did not produce: {', '.join(missing)}")
+        latest, mean = features["pm25_latest"], features[MEAN_24H_NAME]
+        if latest is None:
+            return None
+        pred = float(latest) if mean is None else latest + self.beta * (mean - latest)
+        if not math.isfinite(pred):
+            raise ValueError(f"{self.model_version} +{horizon}h produced a non-finite prediction")
+        return max(0.0, pred)
+
+
+def parse_smoother_bundle(payload: Any) -> tuple[float, tuple[int, ...]]:
+    """Validate the ``smoother`` section of a bundle: beta in [0, 1] and served horizons."""
+    spec = payload.get("smoother") if isinstance(payload, dict) else None
+    if not isinstance(spec, dict) or set(spec) != {"beta", "horizons"}:
+        raise ModelLoadError("smoother bundle needs exactly beta and horizons")
+    beta, horizons = spec["beta"], spec["horizons"]
+    if isinstance(beta, bool) or not isinstance(beta, int | float) or not 0 <= beta <= 1:
+        raise ModelLoadError("smoother beta must be a number in [0, 1]")
+    if (
+        not isinstance(horizons, list)
+        or not horizons
+        or any(isinstance(h, bool) or h not in HORIZONS_H for h in horizons)
+    ):
+        raise ModelLoadError(f"smoother horizons must be a non-empty subset of {HORIZONS_H}")
+    return float(beta), tuple(sorted(set(horizons)))
 
 
 def _booster(model_text: Any, label: str) -> lgb.Booster:
@@ -134,7 +178,7 @@ def load_serving_model(
     return ServingModel(model_version, feature_list, boosters)
 
 
-def load_registered_model(con: Any, model_version: str) -> ServingModel:
+def load_registered_model(con: Any, model_version: str) -> ServingModel | SmootherModel:
     """Read a content-verified bundle from the registry and prepare it for serving."""
     try:
         artifact, manifest = registry.read_model(con, model_version)
@@ -142,4 +186,7 @@ def load_registered_model(con: Any, model_version: str) -> ServingModel:
         raise ModelLoadError(str(exc)) from None
     except ValueError as exc:
         raise ModelLoadError(f"registry integrity check failed: {exc}") from None
+    if registry.is_smoother_bundle(artifact):
+        beta, horizons = parse_smoother_bundle(json.loads(artifact))
+        return SmootherModel(model_version, beta, horizons)
     return load_serving_model(model_version, artifact, manifest)
