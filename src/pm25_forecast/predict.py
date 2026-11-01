@@ -11,7 +11,8 @@ Per run, for every station in STATION_LOCATIONS: read stored data, make baseline
   them. Old ``cams`` rows stay and expire under the 90-day retention. The stored ``cams_global``
   vintages are still read, only to build the ``cams_pm25`` feature for the challenger.
 * Missing inputs are skipped and logged, never filled in. They are listed in the run summary.
-* Challenger (KAN-29, shadow mode): when ``CHALLENGER_MODEL_VERSION`` is set, that registered
+* Challenger (KAN-29, shadow mode; KAN-76: LightGBM or smoother bundle): when
+  ``CHALLENGER_MODEL_VERSION`` is set, that registered
   model is read from the registry once per run (content-verified, KAN-16) and its predictions are
   stored next to the baselines under its own model_version. Nothing reads them for decisions yet;
   KAN-20 scores them. A missing model, a bad bundle or a feature-spec mismatch fails the run
@@ -33,7 +34,7 @@ from typing import Any
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
 from pm25_forecast.collector import ConfigError, default_run_id, open_db
-from pm25_forecast.features import build_features
+from pm25_forecast.features import MEAN_24H_NAME, build_features, mean_24h
 from pm25_forecast.ingest.open_meteo import CAMS_MODEL_VERSION
 from pm25_forecast.models.baselines import (
     CAMS_PASSTHROUGH_MODEL_VERSION,
@@ -43,7 +44,12 @@ from pm25_forecast.models.baselines import (
     Forecast,
     valid_times,
 )
-from pm25_forecast.models.serving import ModelLoadError, ServingModel, load_registered_model
+from pm25_forecast.models.serving import (
+    ModelLoadError,
+    ServingModel,
+    SmootherModel,
+    load_registered_model,
+)
 from pm25_forecast.monitoring.alerts import make_alert, safe_alert
 from pm25_forecast.monitoring.logs import configure_logging, log_summary
 from pm25_forecast.settings import Settings, get_settings
@@ -152,8 +158,12 @@ def build_station_rows(
     raw_vintages = [
         (c.issue_time, c.valid_time, c.pm25_pred, CAMS_MODEL_VERSION) for c in cams_rows
     ]
+    mean24 = mean_24h(raw_observations, issue_time)  # smoother input (KAN-76), same for all h
     features = {
-        horizon: build_features(raw_observations, raw_vintages, issue_time, target)
+        horizon: {
+            **build_features(raw_observations, raw_vintages, issue_time, target),
+            MEAN_24H_NAME: mean24,
+        }
         for horizon, target in targets.items()
     }
     if features_out is not None:
@@ -178,7 +188,7 @@ def build_station_rows(
 
 
 def build_challenger_rows(
-    challenger: ServingModel,
+    challenger: ServingModel | SmootherModel,
     station_features: dict[str, dict[int, dict[str, float | None]]],
     issue_time: datetime,
     run_id: str,
@@ -241,7 +251,7 @@ def run(
         raise ConfigError("CHALLENGER_MODEL_VERSION must differ from the baseline model versions")
 
     with open_db(connect, settings.database_url.get_secret_value()) as con:
-        challenger: ServingModel | None = None
+        challenger: ServingModel | SmootherModel | None = None
         if challenger_version is not None:
             try:
                 challenger = load_registered_model(con, challenger_version)
