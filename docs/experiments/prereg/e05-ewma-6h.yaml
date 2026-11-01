@@ -1,0 +1,23 @@
+id: e05-ewma-6h
+ticket: KAN-83
+hypothesis: Exponentially weighted recent observations improve 24 hour MAE against
+  the fixed smoother.
+model_family: ewma
+model: ewma-6h
+feature_set: decayed-pm25
+params:
+  half_life_hours: 6
+horizons:
+- 6
+- 12
+- 24
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.15
+decision_rule: Compare dev MAE and paired 72 hour CI against smoother; select best
+  valid MAE without holdout.
+split: dev
+final: false
+finalists: 1
+author_agent: codex
