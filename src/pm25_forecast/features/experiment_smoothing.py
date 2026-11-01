@@ -46,3 +46,16 @@ def exponential_mean(
         numerator += weight * o.value
         denominator += weight
     return numerator / denominator if denominator else None
+
+
+def same_hour_mean(
+    observations: tuple[Observation, ...], origin: datetime, target: datetime, days: int
+) -> float | None:
+    """Mean at target's UTC hour in the preceding days, with the serving lag."""
+    if days <= 0:
+        raise ValueError("days must be positive")
+    target = require_utc(target)
+    values = [
+        v for ts, v in rolling_values(observations, origin, days * 24) if ts.hour == target.hour
+    ]
+    return sum(values) / len(values) if values else None

@@ -86,3 +86,26 @@ def beta_smoother(train: TrainSnapshot, params: Mapping[str, Any]) -> Predictor:
         return latest if mean is None else latest + beta * (mean - latest)
 
     return predict
+
+
+def climatology(train: TrainSnapshot, params: Mapping[str, Any]) -> Predictor:
+    """Station-specific same-hour mean, optionally blended with persistence."""
+    from pm25_forecast.features.experiment_smoothing import same_hour_mean
+
+    days = int(params["days"])
+    weight = float(params["persistence_weight"])
+    stations = set(train.stations)
+
+    def predict(snapshot: Snapshot, horizon: int) -> float | None:
+        if snapshot.station_id not in stations:
+            return None
+        origin = snapshot.prediction_time
+        target = origin + timedelta(hours=horizon)
+        recent = snapshot.observations[-days * 24 :]
+        latest = build_features(recent[-3:], (), origin, target)["pm25_latest"]
+        if latest is None:
+            return None
+        mean = same_hour_mean(recent, origin, target, days)
+        return None if mean is None else weight * latest + (1 - weight) * mean
+
+    return predict
