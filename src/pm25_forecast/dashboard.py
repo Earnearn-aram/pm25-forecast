@@ -176,7 +176,16 @@ WHERE source = %(source)s AND ts < %(until)s AND pm25 IS NOT NULL GROUP BY stati
 SELECT_COV_OPENAQ_EDGE = """
 SELECT ts FROM observations
 WHERE source = %(source)s AND ts < %(until)s AND pm25 IS NOT NULL
+AND station_id IN ({stations})
 ORDER BY ts {order} LIMIT 1
+"""
+SELECT_COV_FIRST_OBS = """
+SELECT ts FROM observations
+WHERE source = %(source)s AND ts <= %(now)s AND pm25 IS NOT NULL ORDER BY ts LIMIT 1
+"""
+SELECT_COV_FIRST_VINTAGE = """
+SELECT issue_time FROM predictions
+WHERE model_version = %(m)s AND issue_time <= %(now)s ORDER BY issue_time LIMIT 1
 """
 SELECT_COV_VINTAGES = """
 SELECT issue_time FROM predictions
@@ -463,6 +472,23 @@ def _cov_unavailable(reason: str) -> dict[str, Any]:
     return {"available": False, "reason": reason}
 
 
+def _windows(end: datetime, first: datetime | None) -> dict[int, tuple[datetime, int]]:
+    """Per window: (start, hours). The start never precedes the first stored hour, so a source
+    that started collecting recently is measured since then, not against hours it never had."""
+    out: dict[int, tuple[datetime, int]] = {}
+    for hours in COVERAGE_HOURS:
+        start = end - timedelta(hours=hours - 1)
+        if first is not None:
+            start = max(start, _hour(first))
+        out[hours] = (start, max(0, int((end - start).total_seconds() // 3600) + 1))
+    return out
+
+
+def _first_ts(rd: Reader, statement: str, params: dict[str, Any]) -> datetime | None:
+    rows = _rows(CovNewest, rd.query(statement, params))
+    return rows[0].ts if rows else None
+
+
 def _cov_air4thai(rd: Reader, now: datetime) -> dict[str, Any]:
     """Expected = every one of the pilot stations has a reading in every UTC hour of the window.
 
@@ -479,12 +505,16 @@ def _cov_air4thai(rd: Reader, now: datetime) -> dict[str, Any]:
     newest = _newest(rd, SELECT_COV_NEWEST_OBS, {"source": AIR4THAI, "now": now}, now)
     if not rows and newest["newest_at"] is None:
         return _cov_unavailable("no_rows")
+    first = _first_ts(rd, SELECT_COV_FIRST_OBS, {"source": AIR4THAI, "now": now})
     cells = {(r.station_id, _hour(r.ts)) for r in rows if r.station_id in STATION_MAP}
     out: dict[str, Any] = {"available": True, "stations": len(STATION_MAP), **newest}
-    for hours in COVERAGE_HOURS:
-        start = end - timedelta(hours=hours - 1)
+    for hours, (start, n) in _windows(end, first).items():
         got = sum(1 for _sid, h in cells if start <= h <= end)
-        out[f"pct_{hours}h"] = _pct(got, hours * len(STATION_MAP))
+        out[f"pct_{hours}h"] = _pct(got, n * len(STATION_MAP))
+    out["since"] = _iso(None if first is None else _hour(first))
+    out["clamped"] = first is not None and _hour(first) > end - timedelta(
+        hours=max(COVERAGE_HOURS) - 1
+    )
     return out
 
 
@@ -499,8 +529,13 @@ def _cov_openaq(rd: Reader, now: datetime) -> dict[str, Any]:
     ]
     if not rows:
         return _cov_unavailable("no_rows")
+    ids = {f"s{i}": sid for i, sid in enumerate(STATION_MAP)}
+    marks = ", ".join(f"%({k})s" for k in ids)  # only our own placeholders are formatted in
     edges = [
-        _rows(CovNewest, rd.query(SELECT_COV_OPENAQ_EDGE.format(order=o), params))
+        _rows(
+            CovNewest,
+            rd.query(SELECT_COV_OPENAQ_EDGE.format(order=o, stations=marks), {**params, **ids}),
+        )
         for o in ("ASC", "DESC")
     ]
     if not edges[0] or not edges[1] or edges[0][0].ts is None or edges[1][0].ts is None:
@@ -508,6 +543,8 @@ def _cov_openaq(rd: Reader, now: datetime) -> dict[str, Any]:
     first_ts, last_ts = edges[0][0].ts, edges[1][0].ts
     first = _hour(first_ts)
     span_h = int((DATA_SOURCE_BREAK - first).total_seconds() // 3600)
+    # count(*) equals distinct station-hours: the primary key is (station_id, ts) and OpenAQ
+    # rows are hour-aligned. _pct clamps at 100% in case that ever stops holding.
     return {
         "available": True,
         "pct": _pct(sum(r.n for r in rows), span_h * len(STATION_MAP)),
@@ -519,18 +556,23 @@ def _cov_openaq(rd: Reader, now: datetime) -> dict[str, Any]:
 
 
 def _cov_cams(rd: Reader, now: datetime) -> dict[str, Any]:
-    """Expected = one stored CAMS vintage (any station) for every UTC hour of the window."""
-    end = _hour(now)
+    """Expected = one stored CAMS vintage (any station) for every UTC hour of the window, from
+    the first stored vintage (collection started late) to the last hour already due."""
+    end = _hour(now - PIPELINE_GRACE)
     since = end - timedelta(hours=max(COVERAGE_HOURS) - 1)
     params = {"m": CAMS_MODEL_VERSION, "since": since, "now": now}
     issued = {_hour(r.ts) for r in _rows(CovNewest, rd.query(SELECT_COV_VINTAGES, params))}
     newest = _newest(rd, SELECT_COV_NEWEST_VINTAGE, {"m": CAMS_MODEL_VERSION, "now": now}, now)
     if not issued and newest["newest_at"] is None:
         return _cov_unavailable("no_rows")
+    first = _first_ts(rd, SELECT_COV_FIRST_VINTAGE, {"m": CAMS_MODEL_VERSION, "now": now})
     out: dict[str, Any] = {"available": True, **newest}
-    for hours in COVERAGE_HOURS:
-        start = end - timedelta(hours=hours - 1)
-        out[f"pct_{hours}h"] = _pct(sum(1 for h in issued if start <= h <= end), hours)
+    for hours, (start, n) in _windows(end, first).items():
+        out[f"pct_{hours}h"] = _pct(sum(1 for h in issued if start <= h <= end), n)
+    out["since"] = _iso(None if first is None else _hour(first))
+    out["clamped"] = first is not None and _hour(first) > end - timedelta(
+        hours=max(COVERAGE_HOURS) - 1
+    )
     return out
 
 
@@ -1184,9 +1226,9 @@ def _section_quality(data: dict[str, Any]) -> str:
 DRIFT_SHORT = ("Not comparable yet", "ยังเปรียบเทียบไม่ได้")
 DRIFT_ERA = (
     "Not comparable yet: this model was trained on data from before the current data source "
-    "(31 Jul 2026), so there is no matching reference. It will show once a model trained on "
-    "the new data is live.",
-    "ยังเปรียบเทียบไม่ได้: โมเดลนี้ฝึกจากข้อมูลก่อนเปลี่ยนแหล่งข้อมูลปัจจุบัน (31 ก.ค. 2569) "
+    f"({DATA_SOURCE_BREAK:%d %b %Y}), so there is no matching reference. "
+    "It will show once a model trained on the new data is live.",
+    f"ยังเปรียบเทียบไม่ได้: โมเดลนี้ฝึกจากข้อมูลก่อนเปลี่ยนแหล่งข้อมูลปัจจุบัน ({DATA_SOURCE_BREAK:%Y-%m-%d} UTC) "
     "จึงไม่มีข้อมูลอ้างอิงที่ตรงกัน จะแสดงผลเมื่อมีโมเดลที่ฝึกด้วยข้อมูลใหม่ใช้งานอยู่",
 )
 DRIFT_CAMS = (
@@ -1384,22 +1426,27 @@ def _coverage_texts(key: str, c: dict[str, Any]) -> tuple[tuple[str, str], tuple
     head = (f"{a24} last 24 h · {a7} last 7 d", f"{a24} 24 ชม. · {a7} 7 วัน")
     if key == "air4thai":
         n = c["stations"]
+        since_en = f" Collected since {_day(c['since'])}." if c.get("clamped") else ""
+        since_th = f" เก็บตั้งแต่ {_day(c['since'])}" if c.get("clamped") else ""
         return head, (
             (
                 f" Coverage: share of expected station-hours that have a reading. Expected = "
-                f"{n} stations x 1 reading per UTC hour (24 h = {24 * n}, 7 days = {168 * n}); "
-                f"the window ends at the last hour already due. Newest reading: {age_en}.",
+                f"{n} stations x 1 reading per UTC hour (24 h = {24 * n}, "
+                f"a full 7 days = {168 * n}); "
+                f"the window ends at the last hour already due.{since_en} "
+                f"Newest reading: {age_en}.",
                 f" ความครบ: สัดส่วนสถานี-ชั่วโมงที่คาดไว้ซึ่งมีค่าตรวจวัด ที่คาดไว้ = {n} สถานี "
                 f"x 1 ค่าต่อชั่วโมง UTC (24 ชม. = {24 * n}, 7 วัน = {168 * n}) "
-                f"ช่วงสิ้นสุดที่ชั่วโมงล่าสุดที่ถึงกำหนดแล้ว ค่าล่าสุด: {age_th}",
+                f"ช่วงสิ้นสุดที่ชั่วโมงล่าสุดที่ถึงกำหนดแล้ว{since_th} ค่าล่าสุด: {age_th}",
             )
         )
     return head, (
         (
             " Coverage: share of the hourly issue times (UTC) in the window that have at "
-            f"least one stored CAMS forecast vintage. Newest vintage: {age_en}.",
+            "least one stored CAMS forecast vintage. Counted since collection started: "
+            f"collected since {_day(c['since'])}. Newest vintage: {age_en}.",
             " ความครบ: สัดส่วนชั่วโมง (UTC) ในช่วงเวลาที่มีชุดพยากรณ์ CAMS ที่บันทึกไว้อย่างน้อยหนึ่งชุด "
-            f"ชุดล่าสุด: {age_th}",
+            f"นับตั้งแต่เริ่มเก็บข้อมูล: เก็บตั้งแต่ {_day(c['since'])} ชุดล่าสุด: {age_th}",
         )
     )
 
