@@ -63,7 +63,7 @@ def test_inner_splits_never_train_on_unmatured_labels():
         splits = lm.inner_splits(origins, h)
         assert len(splits) >= 3
         for tr, va in splits:
-            assert origins[tr].max() + h * 3600 <= origins[va].min()
+            assert origins[tr].max() + (h + 1) * 3600 <= origins[va].min()
             assert not set(tr) & set(va)
 
 

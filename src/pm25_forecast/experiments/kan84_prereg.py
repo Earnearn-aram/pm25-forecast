@@ -5,6 +5,9 @@
 Grid: model {ols, ridge, lasso} x scope {pooled, per_station} x target {raw, log1p} x output
 {level, change} = 24 variants on ``fs_v2_core``. One further, pre-declared sensitivity (the best
 variant on ``fs_v2_full_nocross``) brings the planned count to K = 25 (protocol section 8).
+
+Note: the preregs are unchanged by the purge fix in ``linear_models.inner_splits`` (documented
+deviation: the first runs used a 1 h short purge and were superseded by a full re-run).
 """
 
 from __future__ import annotations

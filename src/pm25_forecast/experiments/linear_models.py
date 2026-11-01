@@ -24,6 +24,10 @@ inner CV, so nothing leaks) and then standardised. Negative predictions are clip
 
 Diagnostics (chosen strength, standardised coefficients per fold) are appended to
 ``$PM25_KAN84_LOG_DIR/<variant>.jsonl`` (default ``~/pm25-experiments/cache/kan84``), outside git.
+
+Deviation note: the first set of KAN-84 runs used an inner-CV purge that was 1 h short
+(``origin + h <= start`` instead of ``origin + (h + 1) h <= start``; a label at target ``t`` is
+available at ``t + 1 h``). Those runs are superseded by the re-run with the corrected purge.
 """
 
 from __future__ import annotations
@@ -162,13 +166,13 @@ def grid_for(model: str) -> tuple[float, ...]:
 
 def inner_splits(origins: np.ndarray, horizon: int) -> list[tuple[np.ndarray, np.ndarray]]:
     """Expanding-window splits on origin time: validate on block k, train on rows whose label
-    had matured at the block start (``origin + h <= start``), never on later rows."""
+    was available at the block start (target ``origin + h`` is available at ``+ 1 h``), never on later rows."""
     edges = np.quantile(origins, np.linspace(0, 1, INNER_BLOCKS + 1))
     out = []
     for k in range(1, INNER_BLOCKS):
         lo, hi = edges[k], edges[k + 1]
         val = (origins >= lo) & ((origins <= hi) if k == INNER_BLOCKS - 1 else (origins < hi))
-        train = origins + horizon * 3600 <= lo
+        train = origins + (horizon + 1) * 3600 <= lo
         if train.sum() >= MIN_INNER_TRAIN and val.any():
             out.append((np.flatnonzero(train), np.flatnonzero(val)))
     return out
