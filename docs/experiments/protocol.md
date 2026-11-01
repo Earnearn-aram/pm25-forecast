@@ -199,8 +199,15 @@ A candidate is promoted to shadow only if **all** hold on the holdout:
    (same blocks) for each station's relative difference; the gate fails on the point estimate;
    the rule is to report the CI and flag every station whose CI includes +5%. Stations below the section 7 minimum are
    listed; if more than 10% of the cohort is below it, the gate is `insufficient_data`.
+   Computed by `evaluate.py` (KAN-96) as `scores["24"]["station_gate"]`: relative difference
+   `MAE_model / MAE_persistence - 1` per station, strictly above +5% fails.
 4. Serving-lag check passes: a test proves features at origin `t` use only `ts <= t−1h` and
    `available_at <= t`, and that the serving feature code is the shared module.
+   The runner proves the first half empirically (KAN-96, `serving_lag` in `evaluation.json`):
+   sampled predictions (48 origins per fold, all stations and horizons) are repeated with every
+   row outside the allowed set added to the snapshot with its value shifted by +1000; any change
+   fails the check and marks the run `invalid`. It cannot see data a model reads from outside
+   its `train`/`snapshot` arguments; the shared-module half stays a code-review item.
 5. Registry manifest validates: the model loads through `models/serving.load_serving_model`
    (`feature_list`, `assumed_reporting_lag_hours`, training window, `snapshot_sha256`, artifact hash).
 6. Valid run (section 12), holdout minimums (section 7) met.
@@ -215,7 +222,9 @@ Tags (all required): `ticket`, `agent`, `model_name`, `model_family`, `feature_s
 Metrics (+24 h, plus `_6h`/`_12h` variants): `mae_24h`, `rmse_24h`, `skill_vs_persistence_24h`,
 `diff_vs_smoother_24h`, `diff_vs_smoother_24h_ci_low`, `diff_vs_smoother_24h_ci_high`,
 `diff_vs_persistence_24h_ci_low`, `diff_vs_persistence_24h_ci_high`, `dm_pvalue_vs_smoother_24h`,
-`spike_recall_24h`, `spike_precision_24h`, `n_pairs_24h`. Params: seed, `ci_level`, `H0`, `E`,
+`spike_recall_24h`, `spike_precision_24h`, `n_pairs_24h`. Gate checks (KAN-96, no `_6h`/`_12h`
+variants): `station_worst_rel_diff_24h`, `station_worst_rel_diff_ci_high_24h`,
+`stations_worse_than_limit_24h`, `serving_lag_checks`, `serving_lag_mismatches`. Params: seed, `ci_level`, `H0`, `E`,
 `fold_starts`, bootstrap B and seed. Undefined metrics are omitted, not zero.
 
 ## 12. What counts as a valid run

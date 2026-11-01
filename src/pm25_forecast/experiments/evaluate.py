@@ -29,7 +29,7 @@ import time
 from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -57,6 +57,10 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 DEFAULT_TICKET = "KAN-82"
 DEFAULT_AGENT = "claude-engineer"
 BASELINE_NAMES = ("persistence", "seasonal_naive", "smoother")
+STATION_MAX_WORSE = 0.05  # gate 10.3: station MAE may exceed persistence by at most 5%
+MAX_LOW_STATION_SHARE = 0.10  # gate 10.3: more than 10% of the cohort below the minimum
+LAG_PROBE_ORIGINS_PER_FOLD = 48  # gate 10.4: sampled origins per weekly fold
+LAG_POISON = 1000.0  # added to every row the model must not see in the lag probe
 
 
 class EvaluationError(RuntimeError):
@@ -235,6 +239,113 @@ def select_cohort(observations: Sequence[Observation], start: datetime, end: dat
     )
 
 
+# ---- serving-lag probe (gate 10.4) ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ProbeSnapshot(Snapshot):
+    """A Snapshot that may hold rows after the origin (``Snapshot`` itself refuses them)."""
+
+    def __post_init__(self) -> None:
+        return None
+
+
+@dataclass
+class LagProbe:
+    """Outcome of re-running sampled predictions with the forbidden rows added (and poisoned)."""
+
+    checked: int = 0
+    mismatches: int = 0
+    errors: int = 0
+    examples: list[dict[str, Any]] = field(default_factory=list)
+
+    def result(self) -> dict[str, Any]:
+        if self.mismatches:
+            status = "fail"
+        elif self.errors or not self.checked:
+            status = "inconclusive"
+        else:
+            status = "pass"
+        return {
+            "status": status,
+            "checked": self.checked,
+            "mismatches": self.mismatches,
+            "errors": self.errors,
+            "origins_per_fold": LAG_PROBE_ORIGINS_PER_FOLD,
+            "method": (
+                "each sampled prediction is repeated with every row of the station outside the "
+                "allowed set (ts > origin - 1 h or available_at > origin; vintages issued or "
+                "available after the origin) added with its value shifted by +1000; a model that "
+                "honours the serving lag must return the same value"
+            ),
+            "examples": self.examples[:5],
+        }
+
+
+def _same_prediction(a: float | None, b: float | None) -> bool:
+    if a is None or b is None:
+        return a is b
+    return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-9)
+
+
+def _probe_prediction(
+    probe: LagProbe,
+    predictor: Predictor,
+    snap: Snapshot,
+    horizon: int,
+    expected: float | None,
+    all_obs: Sequence[Observation],
+    all_vin: Sequence[Vintage],
+) -> None:
+    """Repeat ``predictor(snap, horizon)`` on a snapshot extended with forbidden, poisoned rows."""
+    origin = snap.prediction_time
+    obs_ok = {(o.ts, o.available_at) for o in snap.observations}
+    vin_ok = {(v.issue_time, v.valid_time, v.available_at, v.model) for v in snap.vintages}
+    extra_obs = [
+        replace(o, value=o.value + LAG_POISON)
+        for o in all_obs
+        if (o.ts, o.available_at) not in obs_ok
+    ]
+    extra_vin = [
+        replace(v, value=v.value + LAG_POISON)
+        for v in all_vin
+        if (v.issue_time, v.valid_time, v.available_at, v.model) not in vin_ok
+    ]
+    wide = _ProbeSnapshot(
+        origin,
+        snap.station_id,
+        tuple(sorted([*snap.observations, *extra_obs], key=lambda o: o.ts)),
+        tuple(sorted([*snap.vintages, *extra_vin], key=lambda v: v.issue_time)),
+    )
+    probe.checked += 1
+    try:
+        got = predictor(wide, horizon)
+    except Exception as exc:  # any failure on the widened input is inconclusive
+        probe.errors += 1
+        if len(probe.examples) < 5:
+            probe.examples.append(
+                {
+                    "station": snap.station_id,
+                    "origin": origin.isoformat(),
+                    "horizon": horizon,
+                    "error": f"{type(exc).__name__}: {exc}"[:200],
+                }
+            )
+        return
+    if not _same_prediction(expected, got):
+        probe.mismatches += 1
+        if len(probe.examples) < 5:
+            probe.examples.append(
+                {
+                    "station": snap.station_id,
+                    "origin": origin.isoformat(),
+                    "horizon": horizon,
+                    "with_allowed_rows_only": expected,
+                    "with_forbidden_rows_added": got,
+                }
+            )
+
+
 # ---- walk-forward --------------------------------------------------------------------------
 
 
@@ -260,6 +371,7 @@ def _walk_forward(
     horizons: Sequence[int],
     fit: Factory,
     params: Mapping[str, Any] | None,
+    probe: LagProbe | None = None,
 ) -> tuple[dict[int, _Rows], dict[str, int]]:
     by_station: dict[str, dict[datetime, Observation]] = {s: {} for s in stations}
     sorted_obs: dict[str, list[Observation]] = {s: [] for s in stations}
@@ -299,6 +411,13 @@ def _walk_forward(
         predictor = _call_factory(fit, train, params)
         origin = refit
         last_origin = fold_end - min_h * HOUR
+        probe_at: set[datetime] = set()
+        if probe is not None and last_origin > origin:
+            n_origins = int((last_origin - origin) // HOUR)
+            picks = np.random.default_rng(stats.BOOTSTRAP_SEED + fold_i).choice(
+                n_origins, size=min(LAG_PROBE_ORIGINS_PER_FOLD, n_origins), replace=False
+            )
+            probe_at = {origin + int(i) * HOUR for i in picks}
         while origin < last_origin:
             hs = [h for h in horizons if fold_start <= origin + h * HOUR < fold_end]
             for s in stations:
@@ -326,6 +445,10 @@ def _walk_forward(
                 )
                 for h, actual in todo:
                     pred = predictor(snap, h)
+                    if probe is not None and origin in probe_at:
+                        _probe_prediction(
+                            probe, predictor, snap, h, pred, sorted_obs[s], sorted_vin[s]
+                        )
                     if pred is None:
                         counters["candidate_none"] += 1
                         pred = math.nan
@@ -479,15 +602,89 @@ def score_horizon(
         for hh in sorted(set(hours.tolist()))
     }
     out["cohort_pairs"] = {s: int((stations == s).sum()) for s in cohort}
+    if h == 24:
+        out["station_gate"] = station_gate(
+            stations, origins, abs_err["model"], abs_err["persistence"], grid, level, cohort
+        )
     return out
 
 
-def validity_reasons(plan: Plan, scores: Mapping[int, dict[str, Any]]) -> list[str]:
+def station_gate(
+    stations: np.ndarray,
+    origins: np.ndarray,
+    abs_model: np.ndarray,
+    abs_pers: np.ndarray,
+    grid: int,
+    level: float,
+    cohort: Sequence[str],
+) -> dict[str, Any]:
+    """Gate 10.3: each station's MAE relative to persistence, with a block-bootstrap CI.
+
+    ``rel_diff = sum(|model err| - |persistence err|) / sum(|persistence err|)`` over the
+    station's pairs (= MAE_model / MAE_persistence - 1). The CI resamples the same 72 h blocks
+    of origins as the pooled comparison. The gate decides on the point estimate (strictly more
+    than 5% worse fails); stations whose CI contains +5% are flagged.
+    """
+    per_station: dict[str, Any] = {}
+    for s in cohort:
+        m = stations == s
+        n_pairs = int(m.sum())
+        entry: dict[str, Any] = {"n_pairs": n_pairs}
+        den_total = float(abs_pers[m].sum()) if n_pairs else 0.0
+        if den_total > 0:
+            diff = np.bincount(origins[m], weights=(abs_model - abs_pers)[m], minlength=grid)
+            den = np.bincount(origins[m], weights=abs_pers[m], minlength=grid)
+            lo, hi, est = stats.moving_block_bootstrap_ci(
+                diff, den, block=stats.PRIMARY_BLOCK_H, level=level
+            )
+            entry.update(
+                rel_diff=est,
+                ci=[lo, hi],
+                worse_than_limit=bool(est > STATION_MAX_WORSE),
+                ci_includes_limit=bool(lo <= STATION_MAX_WORSE <= hi),
+            )
+        else:
+            entry["note"] = "no pairs or persistence MAE is zero: relative difference undefined"
+        entry["below_min_pairs"] = n_pairs < folds_mod.MIN_STATION_PAIRS
+        per_station[s] = entry
+    defined = {s: e for s, e in per_station.items() if "rel_diff" in e}
+    failing = sorted(s for s, e in defined.items() if e["worse_than_limit"])
+    low = sorted(s for s, e in per_station.items() if e["below_min_pairs"])
+    if len(low) > MAX_LOW_STATION_SHARE * len(cohort):
+        status = "insufficient_data"
+    else:
+        status = "fail" if failing else "pass"
+    worst = max(defined.items(), key=lambda kv: kv[1]["rel_diff"], default=None)
+    return {
+        "limit": STATION_MAX_WORSE,
+        "status": status,
+        "stations": per_station,
+        "failing": failing,
+        "ci_includes_limit": sorted(s for s, e in defined.items() if e["ci_includes_limit"]),
+        "below_min_pairs": low,
+        "worst_station": worst[0] if worst else None,
+        "worst_rel_diff": worst[1]["rel_diff"] if worst else None,
+        "worst_rel_diff_ci_high": worst[1]["ci"][1] if worst else None,
+        "note": (
+            "fails on the point estimate; CI shown at the run's ci_level; "
+            "min pairs per station is the section 7 holdout minimum"
+        ),
+    }
+
+
+def validity_reasons(
+    plan: Plan, scores: Mapping[int, dict[str, Any]], serving_lag: Mapping[str, Any] | None = None
+) -> list[str]:
     """Reasons the +24 h result is invalid for gating (protocol sections 1, 6, 7, 12)."""
     s = scores.get(24)
     if not s or not s.get("n_pairs"):
         return ["no +24h pairs"]
     reasons = []
+    if serving_lag and serving_lag["status"] == "fail":
+        reasons.append(
+            f"serving-lag check failed: {serving_lag['mismatches']} of "
+            f"{serving_lag['checked']} sampled predictions changed when forbidden rows were added"
+        )
     if s["coverage"] < MIN_COVERAGE:
         reasons.append(f"candidate covers {s['coverage']:.1%} of baseline-eligible pairs (< 95%)")
     if plan.split == "dev":
@@ -542,9 +739,11 @@ def run_evaluation(
     if not cohort:
         raise EvaluationError("no station has >= 80% hourly coverage in the dev period")
     kept_vin = [v for v in vintages if v.valid_time < plan.limit]
-    rows, counters = _walk_forward(data, kept_vin, cohort, plan, horizons, fit, params)
+    probe = LagProbe()
+    rows, counters = _walk_forward(data, kept_vin, cohort, plan, horizons, fit, params, probe)
     scores = {h: score_horizon(h, rows[h], plan, ci_level, cohort) for h in horizons}
-    reasons = validity_reasons(plan, scores)
+    serving_lag = probe.result()
+    reasons = validity_reasons(plan, scores, serving_lag)
     return {
         "split": split,
         "ci_level": ci_level,
@@ -559,6 +758,7 @@ def run_evaluation(
         },
         "scores": {str(h): v for h, v in scores.items()},
         "counters": counters,
+        "serving_lag": serving_lag,
         "invalid_reasons": reasons,
         "bootstrap": {
             "B": stats.BOOTSTRAP_B,
@@ -593,6 +793,20 @@ def metrics_from_result(result: Mapping[str, Any]) -> dict[str, float | None]:
                 f"spike_precision_{h}h": s["spike"]["precision"],
                 f"n_pairs_{h}h": s["n_pairs"],
             }
+        )
+    gate = (result["scores"].get("24") or {}).get("station_gate")
+    if gate:
+        metrics.update(
+            {
+                "station_worst_rel_diff_24h": gate["worst_rel_diff"],
+                "station_worst_rel_diff_ci_high_24h": gate["worst_rel_diff_ci_high"],
+                "stations_worse_than_limit_24h": len(gate["failing"]),
+            }
+        )
+    lag = result.get("serving_lag")
+    if lag:
+        metrics.update(
+            {"serving_lag_checks": lag["checked"], "serving_lag_mismatches": lag["mismatches"]}
         )
     return metrics
 
@@ -752,6 +966,17 @@ def _summary(result: Mapping[str, Any]) -> str:
             f"skill={s['skill_vs_persistence']:+.3f} vs_pers={pe['diff']:+.3f} {ci(pe)} "
             f"vs_smoother={sm['diff']:+.3f} {ci(sm)}"
         )
+    gate = (result["scores"].get("24") or {}).get("station_gate")
+    if gate:
+        lines.append(
+            f"station gate (<= {gate['limit']:.0%} worse than persistence): {gate['status']}"
+            + (f", failing: {', '.join(gate['failing'])}" if gate["failing"] else "")
+        )
+    lag = result["serving_lag"]
+    lines.append(
+        f"serving-lag check: {lag['status']} ({lag['mismatches']} mismatches / "
+        f"{lag['checked']} checks)"
+    )
     if result["invalid_reasons"]:
         lines.append("INVALID: " + "; ".join(result["invalid_reasons"]))
     if "run_id" in result:
