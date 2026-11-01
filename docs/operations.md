@@ -97,29 +97,51 @@ filter too; this is rare and harmless because the step-5 backfill re-inserts it 
 a new `ingested_at`). Otherwise, what is still older than `<T>` and was written within 3 h of its
 `ts` is an old collector row the backfill had no hourly value for.
 
-1. Run the SELECT and compare its total with the "Identify" output.
-2. Run the transaction below. Compare the observations `DELETE n` count with the SELECT total.
-   `COMMIT` only if equal; otherwise `ROLLBACK` and investigate.
+For this repair `T` = `2026-10-30T13:00:00+00:00` (PR #52 merged 11:21Z, PR #55 11:52Z on 2026-10-30;
+the later time is safe). It is already filled in below, so each block can be copied as is.
+Run the blocks one at a time in the Neon SQL Editor (select only the block, then Run).
+
+1. SELECT. Compare its total (sum of `n`) with the "Identify" output.
 
 ```sql
-SELECT station_id, count(*), min(ts), max(ts) FROM observations
+SELECT station_id, count(*) AS n, min(ts), max(ts) FROM observations
 WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
-  AND ingested_at < '<T>' AND ingested_at - ts < interval '3 hours'
-GROUP BY station_id;
+  AND ingested_at < '2026-10-30T13:00:00+00:00' AND ingested_at - ts < interval '3 hours'
+GROUP BY station_id ORDER BY station_id;
+```
 
+2. Open the transaction and delete the observations. Compare the `DELETE n` count with the
+   SELECT total. If they differ, run `ROLLBACK;` (block 4) and investigate.
+
+```sql
 BEGIN;
 DELETE FROM observations
 WHERE source = 'air4thai' AND ts >= '2026-10-27T00:00:00+07:00'
-  AND ingested_at < '<T>' AND ingested_at - ts < interval '3 hours';
--- compare "DELETE n" with the SELECT total above, then decide:
--- scores whose actual no longer exists (the scorer never deletes a score on its own)
+  AND ingested_at < '2026-10-30T13:00:00+00:00' AND ingested_at - ts < interval '3 hours';
+```
+
+3. Same transaction: delete the scores whose actual no longer exists (the scorer never deletes a
+   score on its own).
+
+```sql
 DELETE FROM scores s
 WHERE s.valid_time >= '2026-10-27T00:00:00+07:00'
   AND NOT EXISTS (SELECT 1 FROM observations o
                   WHERE o.station_id = s.station_id AND o.ts = s.valid_time
                     AND o.pm25 IS NOT NULL);
--- equal counts: COMMIT;   otherwise: ROLLBACK;
 ```
+
+4. Equal counts: `COMMIT;`. Otherwise `ROLLBACK;`.
+
+```sql
+COMMIT;
+```
+
+```sql
+ROLLBACK;
+```
+
+Generic form (other runs): replace `2026-10-30T13:00:00+00:00` above with the time `T` from step 2.
 
 Why delete and not impute or keep: a 24 h average is a different quantity (smoothed, lagged),
 so a row holding it is wrong, not merely noisy; features, the persistence baseline, scores and
