@@ -1,0 +1,23 @@
+id: e05-beta-10
+ticket: KAN-83
+hypothesis: A dev-selected blend of latest and mean24 improves 24 hour MAE against
+  fixed beta 0.5.
+model_family: beta-smoother
+model: beta-1.0
+feature_set: latest-mean24
+params:
+  beta: 1.0
+horizons:
+- 6
+- 12
+- 24
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.15
+decision_rule: Compare dev MAE and paired 72 hour CI against smoother; select best
+  valid MAE without holdout.
+split: dev
+final: false
+finalists: 1
+author_agent: codex
