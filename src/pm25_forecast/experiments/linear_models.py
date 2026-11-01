@@ -166,7 +166,8 @@ def grid_for(model: str) -> tuple[float, ...]:
 
 def inner_splits(origins: np.ndarray, horizon: int) -> list[tuple[np.ndarray, np.ndarray]]:
     """Expanding-window splits on origin time: validate on block k, train on rows whose label
-    was available at the block start (target ``origin + h`` is available at ``+ 1 h``), never on later rows."""
+    was available at the block start (target ``origin + h`` is available 1 h later), never on later
+    rows."""
     edges = np.quantile(origins, np.linspace(0, 1, INNER_BLOCKS + 1))
     out = []
     for k in range(1, INNER_BLOCKS):
