@@ -1,0 +1,28 @@
+# KAN-87 (E10). Committed before any run. Dev split only; never the holdout.
+id: e10-ridge-cams
+ticket: KAN-87
+hypothesis: >-
+  Adding CAMS features (latest visible vintage for the target hour, CAMS minus latest observation, 24 h and 72 h mean CAMS error on matured targets) lowers +24 h dev MAE of this model versus its no-CAMS twin on identical rows.
+model_family: ridge
+model: ridge_cams
+feature_set: fs_v2_core+cams_v1
+params:
+  alpha: 30.0
+horizons: [24]
+expected_effect:
+  metric: cams_increment_vs_matched_no_cams_24h
+  direction: negative
+  magnitude: -0.1
+decision_rule: >-
+  Dev exploration, nothing goes to the holdout from this ticket. Report coverage first (share of +24 h
+  origins with a usable CAMS vintage and with all four CAMS features). The comparison is evaluated only
+  if the matched-rows set meets the protocol minimums (section 7: at least 3 dev folds of 600 pairs).
+  If not, the verdict is NOT EVALUABLE (reported as no-go for now), never a result. If evaluable:
+  primary comparison is the +24 h MAE increment of the CAMS model over its matched no-CAMS twin
+  (72 h block CI, 97.5% via Bonferroni over the 2 families); also reported against the smoother.
+  GO if the increment CI is entirely below 0 for at least one family and the model beats the smoother
+  with a CI entirely below 0. PIVOT if only the point estimate is negative. STOP otherwise.
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist
