@@ -67,20 +67,31 @@ def is_ridge_bundle(artifact: bytes) -> bool:
 
 
 def _finite_list(value: Any, size: int, label: str) -> tuple[float, ...]:
-    if (
-        not isinstance(value, list)
-        or len(value) != size
-        or any(isinstance(v, bool) or not isinstance(v, int | float) for v in value)
-        or not all(math.isfinite(v) for v in value)
-    ):
-        raise ValueError(f"ridge bundle {label} must be {size} finite numbers")
-    return tuple(float(v) for v in value)
+    try:
+        if (
+            not isinstance(value, list)
+            or len(value) != size
+            or any(isinstance(v, bool) or not isinstance(v, int | float) for v in value)
+        ):
+            raise ValueError
+        out = tuple(float(v) for v in value)  # OverflowError for absurdly large ints
+        if not all(math.isfinite(v) for v in out):
+            raise ValueError
+    except (ValueError, OverflowError):
+        raise ValueError(f"ridge bundle {label} must be {size} finite numbers") from None
+    return out
 
 
 def _number(value: Any, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
-        raise ValueError(f"ridge bundle {label} must be a finite number")
-    return float(value)
+    try:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError
+        out = float(value)
+        if not math.isfinite(out):
+            raise ValueError
+    except (ValueError, OverflowError):
+        raise ValueError(f"ridge bundle {label} must be a finite number") from None
+    return out
 
 
 def parse_ridge_bundle(payload: Any) -> RidgeSpec:

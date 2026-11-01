@@ -266,11 +266,19 @@ Ridge challenger (KAN-100, stage 1: servable, not yet wired into Predict). The K
 `fs_v2_core`) is trained for every hour +1..+24 h (direct strategy, one small ridge per horizon;
 `--horizons` picks a subset). Training reuses `experiments.linear_models.fit_models` (the fit the
 experiment ran) and `features.library_v2`; serving (`models.serving.RidgeModel`) needs only numpy.
-Dev-split MAE (no holdout) per horizon is stored in the manifest (`metrics.dev_mae_by_horizon`); the
-ridge beat persistence at all 24 hours (`horizons_worse_than_persistence_dev` is empty, and would
-list any hour where it did not). A missing feature gives no forecast for that station-horizon
-(`missing_policy: skip`); `--missing-policy train_mean` reproduces the experiment's training-mean
-fill. Owner steps (`DATABASE_URL` set; add `--kan74-repaired` only once KAN-74 is confirmed fixed):
+Dev-split MAE per horizon (no holdout) and the 95% CI of the difference vs persistence are stored
+in the manifest (`metrics.dev_mae_by_horizon`, source `docs/experiments/kan100-dev-mae.json`). They
+were measured with training-mean imputation, which is now the default `missing_policy: train_mean`,
+and are optimistic: this is the best of about 25 variants chosen on dev, with no holdout. The ridge
+beat persistence at all 24 hours (every CI upper bound below zero, worst -0.13 at +1 h);
+`horizons_worse_than_persistence_dev` lists any hour where it did not (empty). Missing features are
+filled with the training mean (this keeps forecasts alive when `is_thai_holiday` is missing from
+2027-01-01, until KAN-106 extends the table), but there is no forecast without the latest reading
+(`pm25_lag_1h..3h`) or with more than 25% of the 20 features missing, and each run logs a warning
+naming the imputed features. `--missing-policy skip` (any missing feature gives no forecast) is
+available by flag. Training warns loudly if the holiday table does not cover the next 60 days. A
+forecast rebuilds features per horizon (120 calls per run), fine for now. Owner steps (`DATABASE_URL`
+set; add `--kan74-repaired` only once KAN-74 is confirmed fixed; keep `--out-dir` under `out/`):
 
 ```sh
 uv sync --group experiments

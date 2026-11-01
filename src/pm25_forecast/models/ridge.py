@@ -26,7 +26,7 @@ import json
 import logging
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,7 @@ from pm25_forecast.collector import ConfigError
 from pm25_forecast.experiments import dataset
 from pm25_forecast.experiments import linear_models as lm
 from pm25_forecast.experiments.evaluate import TrainSnapshot
-from pm25_forecast.features.library_v2 import feature_set_names
+from pm25_forecast.features.library_v2 import HOLIDAY_YEARS, feature_set_names
 from pm25_forecast.models.ridge_bundle import MAX_HORIZON_H, MISSING_POLICIES, parse_ridge_bundle
 from pm25_forecast.settings import get_settings
 
@@ -74,7 +74,7 @@ def train_snapshot(
 
 
 def fit_bundle(
-    train: TrainSnapshot, missing_policy: str = "skip"
+    train: TrainSnapshot, missing_policy: str = "train_mean"
 ) -> tuple[dict[str, Any], dict[int, int]]:
     """Fit the variant on ``train``; return the ``ridge`` bundle section and rows per horizon."""
     if missing_policy not in MISSING_POLICIES:
@@ -155,12 +155,28 @@ def ridge_manifest(
         "missing_policy": section["missing_policy"],
         "horizons_worse_than_persistence_dev": worse,
         "note": (
-            "Dev-split MAE per horizon is in metrics.dev_mae_by_horizon (no holdout used). "
+            "Dev-split MAE per horizon (with 95% CI vs persistence) is in "
+            "metrics.dev_mae_by_horizon "
+            "(no holdout used); it was measured with training-mean imputation, the default "
+            "missing_policy train_mean (no forecast without the latest reading or with more than "
+            "25% of features missing), and is optimistic: best of ~25 variants chosen on dev. "
             "horizons_worse_than_persistence_dev lists hours where the ridge did not beat "
             "persistence on dev; score and show them separately."
         ),
         "trained_at": _iso(trained_at or datetime.now(UTC)),
     }
+
+
+def holiday_table_warning(refit_time: datetime, days: int = 60) -> str | None:
+    """Warning text when the holiday table does not cover the next ``days`` days (else None)."""
+    last = (refit_time + timedelta(days=days)).year
+    if last in HOLIDAY_YEARS:
+        return None
+    return (
+        f"WARNING: the Thai holiday table (library_v2.HOLIDAY_YEARS={sorted(HOLIDAY_YEARS)}) does "
+        f"not cover {last}, within {days} days: is_thai_holiday will be missing and imputed with "
+        "the training mean until the table is extended (KAN-106)"
+    )
 
 
 def load_observations(
@@ -197,7 +213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--as-of", default=None, help="ISO time with offset (default: now)")
     parser.add_argument("--version", default=None)
-    parser.add_argument("--missing-policy", choices=MISSING_POLICIES, default="skip")
+    parser.add_argument("--missing-policy", choices=MISSING_POLICIES, default="train_mean")
     parser.add_argument("--kan74-repaired", action="store_true")
     parser.add_argument(
         "--dev-mae", type=Path, default=None, help="JSON {h: {ridge, persistence, smoother}}"
@@ -215,6 +231,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.snapshot.expanduser() if args.snapshot else None,
             kan74_repaired=args.kan74_repaired,
         )
+        warning = holiday_table_warning(refit_time)
+        if warning:
+            logger.warning(warning)
+            sys.stderr.write(warning + "\n")
+        out_root = (Path.cwd() / "out").resolve()
+        if out_root not in args.out_dir.resolve().parents and args.out_dir.resolve() != out_root:
+            logger.warning("--out-dir %s is outside out/; keep artifacts out of git", args.out_dir)
         train = train_snapshot(observations, refit_time, args.horizons)
         if not train.observations:
             raise TrainingError("no matured observations")

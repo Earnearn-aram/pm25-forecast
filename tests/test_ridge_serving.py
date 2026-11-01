@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -70,7 +71,7 @@ def fitted(tmp_path_factory):
     return train, out, experiment
 
 
-def model(fitted, policy="skip") -> RidgeModel:
+def model(fitted, policy="train_mean") -> RidgeModel:
     artifact, manifest = fitted[1][policy]
     return load_ridge_model(manifest["version"], artifact, manifest)
 
@@ -152,7 +153,7 @@ def test_forecast_rejects_a_naive_origin(fitted):
 
 
 def test_bundle_round_trip_and_determinism(fitted):
-    artifact, manifest = fitted[1]["skip"]
+    artifact, manifest = fitted[1]["train_mean"]
     spec = parse_ridge_bundle(json.loads(artifact))
     assert tuple(spec.horizons) == HORIZONS and spec.stations == STATIONS
     assert len(spec.horizons[24].coef) == len(spec.features) + len(spec.stations)
@@ -172,7 +173,7 @@ def test_unmatured_rows_are_not_trained_on():
 
 
 def test_registry_accepts_the_artifact_and_cli_check_loads_it(fitted, tmp_path):
-    artifact, manifest = fitted[1]["skip"]
+    artifact, manifest = fitted[1]["train_mean"]
     reg = InMemoryRegistry()
     (tmp_path / "a.json").write_bytes(artifact)
     (tmp_path / "m.json").write_text(json.dumps(manifest))
@@ -185,7 +186,7 @@ def test_registry_accepts_the_artifact_and_cli_check_loads_it(fitted, tmp_path):
 
 
 def test_registry_and_loader_stay_strict(fitted):
-    artifact, manifest = fitted[1]["skip"]
+    artifact, manifest = fitted[1]["train_mean"]
     reg = InMemoryRegistry()
     bad_features = {**manifest, "feature_list": manifest["feature_list"][::-1]}
     with pytest.raises(ValueError, match="feature_list"):
@@ -236,10 +237,55 @@ def test_cli_writes_artifact_and_manifest(fitted, tmp_path, monkeypatch):
 
 def test_serving_import_needs_no_experiments_code():
     code = (
-        "import sys, pm25_forecast.models.serving, pm25_forecast.registry_cli;"
-        "bad = [m for m in sys.modules if m.startswith(('statsmodels', 'mlflow',"
-        " 'pm25_forecast.experiments'))];"
+        "import sys, lightgbm;"  # lightgbm itself imports scikit-learn when installed
+        "before = set(sys.modules);"
+        "import pm25_forecast.models.serving, pm25_forecast.registry_cli;"
+        "bad = [m for m in set(sys.modules) - before if m.startswith(('sklearn', 'statsmodels',"
+        " 'mlflow', 'pm25_forecast.experiments'))];"
         "assert not bad, bad"
     )
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+def test_2027_holiday_gap_is_imputed_and_logged_under_train_mean(fitted, caplog):
+    origin = datetime(2027, 1, 2, 3, tzinfo=UTC)
+    obs = [
+        Observation("a", origin - k * HOUR, 30.0 + k % 5, origin - (k - 1) * HOUR)
+        for k in range(1, 80)
+    ]
+    with caplog.at_level(logging.WARNING, logger="pm25_forecast.models.serving"):
+        got = model(fitted, "train_mean").forecast(obs, "a", origin)
+    assert all(v is not None for v in got.values())
+    assert any("is_thai_holiday" in r.getMessage() for r in caplog.records)
+    assert model(fitted, "skip").forecast(obs, "a", origin) == dict.fromkeys(HORIZONS)
+
+
+def test_more_than_a_quarter_of_features_missing_gives_no_forecast(fitted):
+    origin = ORIGINS[0]
+    m = model(fitted)
+    five = history("a", origin, drop=(2, 3, 6, 12))  # lag_2/3/6/12h + diff_1h = 5 of 20: allowed
+    assert all(v is not None for v in m.forecast(five, "a", origin).values())
+    six = history("a", origin, drop=(2, 3, 6, 12, 24))  # 6 of 20 missing: refused
+    assert m.forecast(six, "a", origin) == dict.fromkeys(HORIZONS)
+
+
+def test_holiday_table_coverage_warning():
+    assert ridge.holiday_table_warning(datetime(2026, 10, 1, tzinfo=UTC)) is None
+    assert "KAN-106" in ridge.holiday_table_warning(datetime(2026, 11, 20, tzinfo=UTC))
+
+
+def test_loader_rejects_a_manifest_without_the_lag(fitted):
+    artifact, manifest = fitted[1]["train_mean"]
+    without = {k: v for k, v in manifest.items() if k != "assumed_reporting_lag_hours"}
+    with pytest.raises(ModelLoadError, match="assumed_reporting_lag_hours"):
+        load_ridge_model("v", artifact, without)
+
+
+def test_huge_numbers_in_a_bundle_are_a_clean_error(fitted):
+    artifact, manifest = fitted[1]["train_mean"]
+    section = json.loads(artifact)["ridge"]
+    section["horizons"]["24"]["intercept"] = 10**400
+    raw = json.dumps({"format": 1, "ridge": section}).encode()
+    with pytest.raises(ModelLoadError):
+        load_ridge_model("v", raw, manifest)

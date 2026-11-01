@@ -20,6 +20,7 @@ prediction job fails loudly instead of feeding features in the wrong order.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -40,7 +41,10 @@ from pm25_forecast.models.baselines import HORIZONS_H, require_utc
 from pm25_forecast.models.ridge_bundle import RidgeSpec, is_ridge_bundle, parse_ridge_bundle
 from pm25_forecast.storage import registry
 
+logger = logging.getLogger(__name__)
+
 MIN_SERVING_LAG_H = 1
+MAX_MISSING_SHARE = 0.25  # train_mean: more missing features than this gives no forecast
 RIDGE_LATEST_LAGS = ("pm25_lag_1h", "pm25_lag_2h", "pm25_lag_3h")  # newest of these = "latest"
 RIDGE_LOOKBACK = timedelta(hours=80)  # fs_v2_* read at most 72 h before the origin
 HOUR = timedelta(hours=1)
@@ -110,8 +114,10 @@ class RidgeModel:
     ``predict`` takes the shared feature mapping (``library_v2.build_features_v2`` output, which
     must also hold ``RIDGE_LATEST_LAGS``) plus the station; ``forecast`` builds the features itself
     from raw observations. A missing input gives None for that (station, horizon): with
-    ``missing_policy`` ``skip`` any missing feature, with ``train_mean`` (the experiment's rule,
-    declared in the bundle) only a missing latest reading. Nothing else is ever filled in.
+    ``missing_policy`` ``skip`` any missing feature; with ``train_mean`` (the default, the rule the
+    dev MAE was measured under) missing features are filled with the training mean, but never when
+    the latest reading is missing or more than ``MAX_MISSING_SHARE`` of the features are missing.
+    The imputed feature names are logged by ``forecast`` (and collected by ``predict`` if asked).
     """
 
     model_version: str
@@ -130,7 +136,11 @@ class RidgeModel:
         return self.spec.stations
 
     def predict(
-        self, horizon: int, features: Mapping[str, float | None], station_id: str
+        self,
+        horizon: int,
+        features: Mapping[str, float | None],
+        station_id: str,
+        imputed: set[str] | None = None,
     ) -> float | None:
         fit = self.spec.horizons[horizon]
         need = (*RIDGE_LATEST_LAGS, *self.feature_list)
@@ -143,8 +153,13 @@ class RidgeModel:
         if latest is None:
             return None
         row = [features[name] for name in self.feature_list]
-        if self.spec.missing_policy == "skip" and any(v is None for v in row):
+        gaps = [n for n, v in zip(self.feature_list, row, strict=True) if v is None]
+        if gaps and (
+            self.spec.missing_policy == "skip" or len(gaps) / len(row) > MAX_MISSING_SHARE
+        ):
             return None
+        if imputed is not None:
+            imputed.update(gaps)
         onehot = [float(s == station_id) for s in self.spec.stations]
         x = np.array([np.nan if v is None else float(v) for v in row] + onehot)
         mean, scale = np.array(fit.mean), np.array(fit.scale)
@@ -182,11 +197,20 @@ class RidgeModel:
         prep = prepare_series({station_id: recent})
         names = tuple(dict.fromkeys((*RIDGE_LATEST_LAGS, *self.feature_list)))
         out: dict[int, float | None] = {}
+        imputed: set[str] = set()
+        # features are rebuilt per horizon (calendar features depend on the target hour)
         for h in self.horizons if horizons is None else horizons:
             feats = build_features_v2(
                 prep, station_id, origin, origin + h * HOUR, None, names=names
             )
-            out[h] = self.predict(h, feats, station_id)
+            out[h] = self.predict(h, feats, station_id, imputed)
+        if imputed:
+            logger.warning(
+                "%s %s: filled missing features with the training mean: %s",
+                self.model_version,
+                station_id,
+                ", ".join(sorted(imputed)),
+            )
         return out
 
 
@@ -285,6 +309,8 @@ def load_ridge_model(
     model_version: str, artifact: bytes, manifest: Mapping[str, Any]
 ) -> RidgeModel:
     """Build a RidgeModel from a verified registry bundle; raise on any spec mismatch."""
+    if "assumed_reporting_lag_hours" not in manifest:
+        raise ModelLoadError("ridge manifest must declare assumed_reporting_lag_hours")
     _check_lag(manifest)
     try:
         spec = parse_ridge_bundle(json.loads(artifact))
