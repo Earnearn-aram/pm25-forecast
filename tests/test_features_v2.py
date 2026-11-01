@@ -1,4 +1,5 @@
 import math
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -127,12 +128,71 @@ def test_feature_set_registry():
     assert tuple(build()) == v2.ALL_FEATURE_NAMES
 
 
-def test_training_and_serving_shapes_agree():
-    as_tuples = {s: [(o.ts, o.value) for o in rows] for s, rows in data().items()}
-    as_dicts = {s: [{"ts": o.ts, "pm25": o.value} for o in rows] for s, rows in data().items()}
-    assert build(as_tuples) == build(as_dicts)
-    # tuples carry no available_at; the Observation form is the stricter one and must match here
-    assert build(as_tuples) == build()
+def test_training_and_serving_shapes_agree_with_available_at():
+    d = data()
+    as_tuples = {s: [(o.ts, o.value, o.available_at) for o in rows] for s, rows in d.items()}
+    as_dicts = {
+        s: [{"ts": o.ts, "pm25": o.value, "available_at": o.available_at} for o in rows]
+        for s, rows in d.items()
+    }
+    assert build(as_tuples) == build(as_dicts) == build(d)
+    # Prepared once (training) and raw records (serving) give identical features.
+    assert build(v2.prepare_series(d)) == build(d)
+    # available_at must matter: delaying every row past t removes them all.
+    late = {s: [(o.ts, o.value, T + H) for o in rows] for s, rows in d.items()}
+    assert build(late)["n_valid_72h"] == 0.0
+
+
+def test_ewma_with_gap_renormalises_over_present_values():
+    gap = build(data(a=series("a", ks=[k for k in range(1, 80) if k not in (2, 3)])))
+    ks = [k for k in range(1, 25) if k not in (2, 3)]
+    w = {k: (1 - v2.EWMA_ALPHA) ** (k - 1) for k in ks}
+    expected = sum(value_at(k) * w[k] for k in ks) / sum(w.values())
+    assert gap["pm25_ewma_24h"] == pytest.approx(expected)
+
+
+def test_duplicate_hour_takes_latest_available_at_not_row_order():
+    rows = [
+        Observation("a", T - H, 1.0, T - H + 2 * H // 2),  # available at T: visible
+        Observation("a", T - H, 2.0, T - H + 30 * H // 60),  # earlier availability
+        Observation("a", T - H, 3.0, T + H),  # not yet available at T
+    ]
+    for order in (rows, rows[::-1]):
+        assert build(data(a=order))["pm25_lag_1h"] == 1.0
+
+
+def test_minute_timestamps_floor_to_the_hour_and_origin_must_be_on_the_hour():
+    obs = data(a=[Observation("a", T - H + timedelta(minutes=30), 42.0, T - H)])
+    assert build(obs)["pm25_lag_1h"] == 42.0
+    with pytest.raises(ValueError, match="on the hour"):
+        v2.build_features_v2(data(), "a", T + timedelta(minutes=5), TARGET)
+
+
+def test_only_requested_features_are_computed():
+    core = v2.build_feature_set("fs_v2_core", data(), "a", T, TARGET)
+    assert "bkk_mean" not in core and "pm25_std_3h" not in core
+    assert v2.build_features_v2(data(), "a", T, TARGET, names=["bkk_mean"]) == {
+        "bkk_mean": pytest.approx((11 + 21 + 111) / 3)
+    }
+    with pytest.raises(KeyError):
+        v2.build_features_v2(data(), "a", T, TARGET, names=["nope"])
+
+
+def test_walk_forward_scale_is_fast_with_prepared_series():
+    stations = [f"s{i}" for i in range(5)]
+    start = T - timedelta(hours=3000)
+    big = {
+        s: [Observation(s, start + i * H, 20.0 + i % 17, start + (i + 1) * H) for i in range(3000)]
+        for s in stations
+    }
+    locs = {s: (13.7 + 0.01 * i, 100.5) for i, s in enumerate(stations)}
+    began = time.perf_counter()
+    prep = v2.prepare_series(big)
+    for n in range(500):
+        origin = T - n * H
+        for s in stations:
+            v2.build_feature_set("fs_v2_full", prep, s, origin, origin + 24 * H, locs)
+    assert time.perf_counter() - began < 5.0
 
 
 def test_as_of_guard_nothing_after_t_minus_1h_is_read():

@@ -9,13 +9,31 @@ feature. A lag of ``k`` h is the reading at exactly ``ts = t - k h`` (lag 1 is t
 allowed reading). A rolling window of ``w`` h covers ``t - w h <= ts <= t - 1h``. Missing inputs
 give ``None``; nothing is imputed. Calendar features describe ``valid_time`` (the target hour,
 known in advance) in Bangkok local time (UTC+7, fixed offset, no DST).
+
+Missing values: ``None`` means missing. Callers NaN-fill for LightGBM and impute for linear
+models; nothing is imputed here. ``n_valid_*h`` and ``missing_lag_*h`` are floats (counts / 0-1).
+
+Timestamps: readings are floored to the hour (a 10:30 reading counts as hour 10:00); the origin
+must be on the hour (ValueError otherwise). If several readings fall in one hour, the one with
+the latest ``available_at <= origin`` wins (a missing ``available_at`` ranks lowest), so the result
+does not depend on row order.
+
+Cross-station features use each station's latest reading within ``MAX_OBSERVATION_AGE`` (3 h, same
+as ``pm25_latest``), while the own-station lags use exact hour slots. ``bkk_mean`` is the mean over
+all stations that have such a reading, INCLUDING the own station, and shifts when stations drop out.
+
+Performance: call ``prepare_series`` once per snapshot/fold and pass the result to
+``build_features_v2`` / ``build_feature_set``; raw records are re-indexed on every call (fine for
+live serving, quadratic in a walk-forward). Only the groups of the requested names are computed.
+
+Holidays: the table covers 2026 only; other years give ``None`` for ``is_thai_holiday``.
 """
 
 from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -34,6 +52,7 @@ BANGKOK_OFFSET = timedelta(hours=7)
 
 # Thai public holidays (including substitution days and cabinet special days), Bangkok local
 # dates; cross-checked 2026-11-01 against secondary lists of the Bank of Thailand calendar.
+# TODO(KAN-86): extend the table BEFORE 2027-01-01 (serving needs it); training is 2026 only.
 # Static table: years outside HOLIDAY_YEARS give None for the holiday flag, not a silent 0.
 HOLIDAY_YEARS: frozenset[int] = frozenset({2026})
 THAI_HOLIDAYS: frozenset[date] = frozenset(
@@ -110,32 +129,46 @@ def feature_set_names(name: str) -> tuple[str, ...]:
         raise KeyError(f"unknown feature set {name!r}; known: {sorted(FEATURE_SETS)}") from None
 
 
-def _series(records: Iterable[Any], origin: datetime) -> dict[datetime, float]:
-    """Usable readings visible at ``origin``: ``ts <= origin - 1h``, ``available_at <= origin``."""
-    cutoff = origin - SERVING_LAG
-    out: dict[datetime, float] = {}
-    for row in _rows(records, (("ts",), ("pm25", "value"), ("available_at", "ingested_at"))):
-        ts, value = row["ts"], _usable(row["pm25"])
-        if ts is None or value is None:
-            continue
-        ts = require_utc(ts)
-        if ts > cutoff or ts < origin - timedelta(hours=max(WINDOWS_H) + 1):
-            continue
-        available_at = row["available_at"]
-        if available_at is not None and require_utc(available_at) > origin:
-            continue
-        out[ts] = value
-    return out
+_NO_TIME = datetime.min.replace(tzinfo=UTC)
 
 
-def _latest(series: Mapping[datetime, float], origin: datetime) -> float | None:
-    fresh = [(ts, v) for ts, v in series.items() if origin - ts <= MAX_OBSERVATION_AGE]
-    return max(fresh, key=lambda r: r[0])[1] if fresh else None
+class PreparedSeries:
+    """Observations indexed once: station -> hour -> [(available_at, value)] (hour-floored UTC)."""
+
+    def __init__(self, index: dict[str, dict[datetime, list[tuple[datetime, float]]]]):
+        self._index = index
+
+    @property
+    def stations(self) -> tuple[str, ...]:
+        return tuple(self._index)
+
+    def value(self, station: str, hour: datetime, origin: datetime) -> float | None:
+        """Reading of ``hour`` visible at ``origin`` (latest available_at <= origin), else None."""
+        rows = self._index.get(station, {}).get(hour)
+        if not rows:
+            return None
+        best: tuple[datetime, float] | None = None
+        for row in rows:
+            if row[0] <= origin and (best is None or row[0] >= best[0]):
+                best = row
+        return None if best is None else best[1]
 
 
-def _window(series: Mapping[datetime, float], origin: datetime, hours: int) -> list[float]:
-    """Values for hours origin-1h back to origin-``hours``h, newest first."""
-    return [v for k in range(1, hours + 1) if (v := series.get(origin - k * HOUR)) is not None]
+def prepare_series(observations_by_station: Mapping[str, Iterable[Any]]) -> PreparedSeries:
+    """Normalise and index records once (same record shapes as ``build_features``)."""
+    index: dict[str, dict[datetime, list[tuple[datetime, float]]]] = {}
+    for station, records in observations_by_station.items():
+        hours = index.setdefault(station, {})
+        fields = (("ts",), ("pm25", "value"), ("available_at", "ingested_at"))
+        for row in _rows(records, fields):
+            ts, value = row["ts"], _usable(row["pm25"])
+            if ts is None or value is None:
+                continue
+            hour = require_utc(ts).replace(minute=0, second=0, microsecond=0)
+            available_at = row["available_at"]
+            avail = _NO_TIME if available_at is None else require_utc(available_at)
+            hours.setdefault(hour, []).append((avail, value))
+    return PreparedSeries(index)
 
 
 def _calendar(valid_time: datetime) -> dict[str, float | None]:
@@ -163,88 +196,125 @@ def _distance_km(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 def build_features_v2(
-    observations_by_station: Mapping[str, Iterable[Any]],
+    observations: Mapping[str, Iterable[Any]] | PreparedSeries,
     station_id: str,
     prediction_time: datetime,
     valid_time: datetime,
     station_locations: Mapping[str, tuple[float, float]] | None = None,
+    names: Sequence[str] | None = None,
 ) -> dict[str, float | None]:
-    """All v2 features for one station and origin, keyed by ``ALL_FEATURE_NAMES``.
+    """Features for one station and origin, keyed by ``names`` (default ``ALL_FEATURE_NAMES``).
 
-    ``observations_by_station`` maps station id to observation records (same shapes as
-    ``build_features``). ``station_locations`` maps station id to (lat, lon); without it the
-    nearest-neighbour feature is None. Use ``build_feature_set`` to get a named subset.
+    ``observations`` is a ``PreparedSeries`` (preferred) or a mapping of station id to raw
+    records. ``station_locations`` maps station id to (lat, lon); without it the nearest-neighbour
+    feature is None. Only the groups needed for ``names`` are computed.
     """
     origin, valid_time = require_utc(prediction_time), require_utc(valid_time)
-    all_series = {s: _series(rows, origin) for s, rows in observations_by_station.items()}
-    own = all_series.get(station_id, {})
+    if (origin.minute, origin.second, origin.microsecond) != (0, 0, 0):
+        raise ValueError(f"prediction_time must be on the hour, got {origin.isoformat()}")
+    want = tuple(ALL_FEATURE_NAMES if names is None else names)
+    unknown = set(want) - set(ALL_FEATURE_NAMES)
+    if unknown:
+        raise KeyError(f"unknown features: {sorted(unknown)}")
+    wanted = set(want)
+    prep = (
+        observations if isinstance(observations, PreparedSeries) else prepare_series(observations)
+    )
+
+    # Own readings for t-1h .. t-72h (None = missing), looked up once and shared by all groups.
+    slots: list[float | None] = [
+        prep.value(station_id, origin - k * HOUR, origin) for k in range(1, max(WINDOWS_H) + 1)
+    ]
+
+    def window(hours: int) -> list[float]:
+        return [v for v in slots[:hours] if v is not None]
+
+    def at(k: int) -> float | None:  # reading at ts = t - k h
+        return slots[k - 1]
 
     feats: dict[str, float | None] = {}
-    for k, name in zip(LAGS_H, LAG_NAMES, strict=True):
-        feats[name] = own.get(origin - k * HOUR)
+    for k in LAGS_H:
+        feats[f"pm25_lag_{k}h"] = at(k)
+        feats[f"missing_lag_{k}h"] = float(at(k) is None)
 
     for w in WINDOWS_H:
-        vals = _window(own, origin, w)
+        vals = window(w)
+        feats[f"n_valid_{w}h"] = float(len(vals))
         feats[f"pm25_mean_{w}h"] = statistics.fmean(vals) if vals else None
         feats[f"pm25_std_{w}h"] = statistics.stdev(vals) if len(vals) >= 2 else None
         feats[f"pm25_min_{w}h"] = min(vals) if vals else None
         feats[f"pm25_max_{w}h"] = max(vals) if vals else None
         feats[f"pm25_median_{w}h"] = statistics.median(vals) if vals else None
 
-    # EWMA over present values, newest first, weight (1 - alpha)^age_in_hours, normalised.
+    # EWMA over present values, newest first, weight (1 - alpha)^(age-1), normalised over them.
     weighted = [
-        (own[ts], (1 - EWMA_ALPHA) ** (k - 1))
-        for k in range(1, EWMA_WINDOW_H + 1)
-        if (ts := origin - k * HOUR) in own
+        (v, (1 - EWMA_ALPHA) ** i) for i, v in enumerate(slots[:EWMA_WINDOW_H]) if v is not None
     ]
     total = sum(w for _, w in weighted)
     feats[EWMA_NAME] = sum(v * w for v, w in weighted) / total if weighted else None
 
-    newest = own.get(origin - SERVING_LAG)
+    newest = at(1)
     for d in DIFFS_H:
-        older = own.get(origin - SERVING_LAG - d * HOUR)
+        older = at(1 + d)
         feats[f"pm25_diff_{d}h"] = None if newest is None or older is None else newest - older
 
-    feats.update(_calendar(valid_time))
+    if wanted & set(CALENDAR_NAMES):
+        feats.update(_calendar(valid_time))
 
-    latest_by_station = {
-        s: v for s, ser in all_series.items() if (v := _latest(ser, origin)) is not None
+    if wanted & set(CROSS_STATION_NAMES):
+        feats.update(_cross_station(prep, station_id, origin, station_locations))
+
+    return {name: feats[name] for name in want}
+
+
+def _latest_reading(prep: PreparedSeries, station: str, origin: datetime) -> float | None:
+    for k in range(1, int(MAX_OBSERVATION_AGE / HOUR) + 1):  # ts = t-1h .. t-3h, newest first
+        v = prep.value(station, origin - k * HOUR, origin)
+        if v is not None:
+            return v
+    return None
+
+
+def _cross_station(
+    prep: PreparedSeries,
+    station_id: str,
+    origin: datetime,
+    locations: Mapping[str, tuple[float, float]] | None,
+) -> dict[str, float | None]:
+    latest = {s: v for s in prep.stations if (v := _latest_reading(prep, s, origin)) is not None}
+    mean = statistics.fmean(latest.values()) if latest else None
+    own = latest.get(station_id)
+    out: dict[str, float | None] = {
+        "bkk_mean": mean,
+        "dev_from_bkk_mean": None if own is None or mean is None else own - mean,
+        "nearest_station_pm25": None,
     }
-    feats["bkk_mean"] = statistics.fmean(latest_by_station.values()) if latest_by_station else None
-    own_latest = latest_by_station.get(station_id)
-    feats["dev_from_bkk_mean"] = (
-        None if own_latest is None or feats["bkk_mean"] is None else own_latest - feats["bkk_mean"]
-    )
-    feats["nearest_station_pm25"] = None
-    here = (station_locations or {}).get(station_id)
-    if here is not None:
+    here = (locations or {}).get(station_id)
+    if here is not None and locations is not None:
         others = [
-            (_distance_km(here, station_locations[s]), s)
-            for s in sorted(latest_by_station)
-            if s != station_id and s in station_locations
+            (_distance_km(here, locations[s]), s)
+            for s in sorted(latest)
+            if s != station_id and s in locations
         ]
         if others:
-            feats["nearest_station_pm25"] = latest_by_station[min(others)[1]]
-
-    for k in LAGS_H:
-        feats[f"missing_lag_{k}h"] = float(feats[f"pm25_lag_{k}h"] is None)
-    for w in WINDOWS_H:
-        feats[f"n_valid_{w}h"] = float(len(_window(own, origin, w)))
-
-    return {name: feats[name] for name in ALL_FEATURE_NAMES}
+            out["nearest_station_pm25"] = latest[min(others)[1]]
+    return out
 
 
 def build_feature_set(
     name: str,
-    observations_by_station: Mapping[str, Iterable[Any]],
+    observations: Mapping[str, Iterable[Any]] | PreparedSeries,
     station_id: str,
     prediction_time: datetime,
     valid_time: datetime,
     station_locations: Mapping[str, tuple[float, float]] | None = None,
 ) -> dict[str, float | None]:
-    """The features of registered set ``name``, in the set's order."""
-    names = feature_set_names(name)
-    feats = build_features_v2(
-        observations_by_station, station_id, prediction_time, valid_time, station_locations
+    """The features of registered set ``name``, in the set's order (only those are computed)."""
+    return build_features_v2(
+        observations,
+        station_id,
+        prediction_time,
+        valid_time,
+        station_locations,
+        names=feature_set_names(name),
     )
-    return {n: feats[n] for n in names}
