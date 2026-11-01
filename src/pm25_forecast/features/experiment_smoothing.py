@@ -22,3 +22,27 @@ def rolling_values(
         and isfinite(o.value)
         and o.value >= 0
     ]
+
+
+def exponential_mean(
+    observations: tuple[Observation, ...], origin: datetime, half_life: float
+) -> float | None:
+    """Time-weighted mean of all available history using an hourly half-life."""
+    if half_life <= 0:
+        raise ValueError("half-life must be positive")
+    origin = require_utc(origin)
+    numerator = denominator = 0.0
+    for o in observations:
+        age = (origin - o.ts).total_seconds() / 3600
+        if (
+            age < 1
+            or o.available_at is None
+            or o.available_at > origin
+            or not isfinite(o.value)
+            or o.value < 0
+        ):
+            continue
+        weight = 2 ** (-(age - 1) / half_life)
+        numerator += weight * o.value
+        denominator += weight
+    return numerator / denominator if denominator else None

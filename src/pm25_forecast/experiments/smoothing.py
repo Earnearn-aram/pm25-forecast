@@ -31,3 +31,33 @@ def moving_average(train: TrainSnapshot, params: Mapping[str, Any]) -> Predictor
         return sum(v for _, v in values) / len(values) if values else None
 
     return predict
+
+
+def ewma(train: TrainSnapshot, params: Mapping[str, Any]) -> Predictor:
+    """Exponentially weight available station history by elapsed hours."""
+    from pm25_forecast.features.experiment_smoothing import exponential_mean
+
+    half_life = float(params["half_life_hours"])
+    stations = set(train.stations)
+    last_snapshot = None
+    last_result = None
+
+    def predict(snapshot: Snapshot, horizon: int) -> float | None:
+        nonlocal last_snapshot, last_result
+        if snapshot is last_snapshot:
+            return last_result
+        last_snapshot = snapshot
+        latest = build_features(
+            snapshot.observations[-3:],
+            (),
+            snapshot.prediction_time,
+            snapshot.prediction_time + timedelta(hours=horizon),
+        )["pm25_latest"]
+        last_result = (
+            exponential_mean(snapshot.observations, snapshot.prediction_time, half_life)
+            if snapshot.station_id in stations and latest is not None
+            else None
+        )
+        return last_result
+
+    return predict
