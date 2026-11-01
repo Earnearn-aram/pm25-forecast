@@ -118,3 +118,44 @@ def test_coverage_zero_without_vintages_and_counts_with_them():
     assert res["vintages_read"] == 1
     assert res["with_target_vintage"] == 1
     assert res["with_all_features"] == 0  # the error features need >= 6 matched hours
+
+
+def _synthetic_run(factory, params=None):
+    import numpy as np
+
+    from pm25_forecast.experiments.evaluate import run_evaluation
+
+    rng = np.random.default_rng(7)
+    start = datetime(2026, 7, 31, 17, tzinfo=UTC)
+    end = datetime(2026, 10, 26, tzinfo=UTC)
+    hours = [start + i * H for i in range(int((end - start) / H))]
+    truth = [30 + 10 * np.sin(i / 12.0) + rng.normal(0, 2) for i in range(len(hours))]
+    o = [Observation("a", t, float(v), t + H) for t, v in zip(hours, truth, strict=True)]
+    # CAMS vintages for every valid hour from 2026-09-01: issued 36 h ahead, stored 5 h later
+    v = [
+        Vintage("a", t - 36 * H, t, float(x + rng.normal(0, 3)), t - 31 * H)
+        for t, x in zip(hours, truth, strict=True)
+        if t >= datetime(2026, 9, 1, tzinfo=UTC)
+    ]
+    return run_evaluation(o, v, fit=factory, horizons=[24], params=params)
+
+
+@pytest.mark.parametrize(
+    "family,params",
+    [("ridge", None), ("lgbm", {"n_seeds": 1, "n_estimators": 20, "min_child_samples": 20})],
+)
+def test_models_run_through_the_runner_and_base_cams_use_same_rows(family, params):
+    from pm25_forecast.experiments import kan87_models as m
+
+    cams = _synthetic_run(getattr(m, f"{family}_cams"), params)
+    base = _synthetic_run(getattr(m, f"{family}_base"), params)
+    n_cams, n_base = cams["scores"]["24"]["n_pairs"], base["scores"]["24"]["n_pairs"]
+    assert n_cams > 0  # forecasts are produced once vintages exist
+    assert n_cams == n_base  # identical rows with and without CAMS
+
+
+def test_equal_issue_time_ties_break_on_available_at_not_order():
+    a = Vintage("a", T - 12 * H, TARGET, 1.0, T - 8 * H)
+    b = Vintage("a", T - 12 * H, TARGET, 2.0, T - 7 * H)  # same issue, stored later: wins
+    for order in ([a, b], [b, a]):
+        assert feats(obs(range(1, 4)), order)["cams_pm25_target"] == 2.0

@@ -53,15 +53,16 @@ class PreparedCams:
         issued_by: datetime | None = None,
     ) -> float | None:
         """Newest vintage for ``valid_time`` visible at ``origin`` (and issued by ``issued_by``)."""
-        best: tuple[datetime, float] | None = None
+        best: tuple[datetime, datetime, float] | None = None
         for issue, avail, value in self._index.get(station, {}).get(valid_time, ()):
             if issue > origin or avail > origin:
                 continue
             if issued_by is not None and issue > issued_by:
                 continue
-            if best is None or issue >= best[0]:
-                best = (issue, value)
-        return None if best is None else best[1]
+            # newest issue wins; equal issue times break on available_at, then value (order-free)
+            if best is None or (issue, avail, value) > best:
+                best = (issue, avail, value)
+        return None if best is None else best[2]
 
     def __bool__(self) -> bool:
         return any(self._index.values())

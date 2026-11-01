@@ -1,6 +1,6 @@
 # E10: CAMS forecast as a feature (KAN-87)
 
-**Verdict: NO-GO for now. The question cannot be evaluated on the frozen snapshot: CAMS coverage of the dev split is 0%, structurally, not by bad luck.**
+**Verdict: NOT TESTABLE (no verdict on CAMS). Nothing was measured: CAMS coverage of the dev split is 0%, for two independent structural reasons (below). Next step: re-test when data exists.**
 
 ## Question and rule (fixed before running)
 
@@ -16,7 +16,7 @@ meet protocol section 7 (3 dev folds of at least 600 pairs); otherwise "not eval
 - `cams_err_24h`, `cams_err_72h`: mean `observed - CAMS` over the last 24 / 72 h, matured targets only
   (observation with `available_at <= t`; CAMS is the newest visible vintage issued at or before that hour, so it is a forecast, not a hindcast;
   at least 6 matched hours, else None).
-Missing means None, nothing imputed. Unit tests: `tests/test_features_cams.py` (visibility, hindcast exclusion, maturity, matched rows).
+Missing means None, nothing imputed. Unit tests: `tests/test_features_cams.py` (visibility, hindcast exclusion, maturity, matched rows, tie-break, and ridge/lgbm base vs CAMS end to end through the runner on a small synthetic snapshot WITH vintages: forecasts are produced and both use the same rows).
 
 ## Coverage (`python -m pm25_forecast.experiments.kan87_coverage`, dev split, snapshot e02-v1)
 
@@ -27,18 +27,18 @@ Missing means None, nothing imputed. Unit tests: `tests/test_features_cams.py` (
 | with all four CAMS features | 0 (0.0%) |
 | vintages in the snapshot | 0 |
 
-Why it cannot improve with a re-export: dev targets are before H0 = 2026-10-05. The collector stores
-vintages only since 2026-10-27, and the runner drops vintages with `valid_time >= H0` (and all targets from 2026-10-26 are excluded
-until the KAN-74 repair). A `--kan74-repaired` snapshot would still have 0% dev coverage; the holdout (targets up to 2026-10-25) is also before the first vintage
-and is locked anyway. The covered period and the air4thai dev period do not overlap at all.
+Two independent reasons for 0 vintages (dates: protocol.md section 3 and the snapshot manifest):
+1. The default export drops them: `dataset.py` `keep(valid)` requires `valid < KAN74_CUTOFF` (2026-10-26) unless `--kan74-repaired`, and the collector stores vintages only since 2026-10-27, so all are filtered out (manifest: `vintages_total` 0).
+2. A repaired export would still give 0% on dev: dev targets end before H0 = 2026-10-05 (manifest `last_usable_target` 2026-10-25), and the runner drops vintages with `valid_time >= H0`.
+The holdout (targets up to 2026-10-25) is also before the first vintage and is locked anyway.
 
-A dry run (`--no-log`, `ridge_cams` through the runner) ended `INVALID: no +24h pairs`. No MLflow runs were made, so there are no with/without MAE numbers, no CI versus the matched no-CAMS model or the smoother. I did not substitute anything for them.
+A one-off dry run (`--no-log`, `ridge_cams` through the runner) ended `INVALID: no +24h pairs`; that output is not reproducible from the PR (the 0% figure is, via the coverage tool above). No MLflow runs were made, so there are no with/without MAE numbers, no CI versus the matched no-CAMS model or the smoother. I did not substitute anything for them.
 
 ## Recommendation (confidence: high that it is not evaluable now; none about the effect)
 
-No-go for now; this says nothing about whether CAMS helps. When it can be tested: CAMS-covered days must supply
-training rows (28 d) plus at least 3 dev folds, about 49 days from 2026-10-27, so about mid-December 2026 at the earliest, and later for a
-holdout (70 d, about early January 2027). That needs a new snapshot with CAMS vintages, a protocol amendment (folds are derived
+Not testable now; this says nothing about whether CAMS helps. Re-test when data exists. Rough timing (my estimates, not measured): CAMS-covered days must supply
+training rows (28 d) plus at least 3 dev folds, about 49 days from 2026-10-27, so roughly mid-December 2026 (estimate) at the earliest, and later for a
+holdout (70 d, roughly early January 2027, estimate). That needs a new snapshot with CAMS vintages, a protocol amendment (folds are derived
 from S0 and the air4thai era; the matched-rows set will be only the CAMS-covered period), a new prereg set and a new holdout. The factories
 (`kan87_models.py`: `ridge_base/cams`, `lgbm_base/cams`) are ready; with that data they run through the standard runner
 (`--prereg ... --model pm25_forecast.experiments.kan87_models:<name>`).
