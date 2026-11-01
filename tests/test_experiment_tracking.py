@@ -11,7 +11,7 @@ SHA = "a" * 64
 
 
 def tags(**over):
-    base = {t: "x" for t in tracking.REQUIRED_TAGS}
+    base = dict.fromkeys(tracking.REQUIRED_TAGS, "x")
     base.update(ticket="KAN-85", split="dev", git_dirty="false", snapshot_sha256=SHA, prereg="p-1")
     base.update(over)
     return base
@@ -102,8 +102,15 @@ def test_git_state_shape():
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    pytest.importorskip("mlflow")
-    monkeypatch.setenv(tracking.STORE_ENV, f"sqlite:///{tmp_path / 'my store' / 'm.db'}")
+    mlflow = pytest.importorskip("mlflow")
+    uri = f"sqlite:///{tmp_path / 'my store' / 'm.db'}"
+    monkeypatch.setenv(tracking.STORE_ENV, uri)
+    # mlflow's tracking URI is process-global: pin it to this test's store, otherwise runs()
+    # reads whichever store an earlier test left behind when log_run refuses before connecting.
+    (tmp_path / "my store").mkdir()
+    mlflow.set_tracking_uri(uri)
+    # Independent of the checkout's state: holdout runs need a clean tree.
+    monkeypatch.setattr(tracking, "git_state", lambda: ("c" * 40, False))
     return tmp_path
 
 
@@ -127,8 +134,8 @@ def test_valid_run_logged(store):
     (run,) = runs()
     assert run.info.run_id == run_id and run.info.status == "FINISHED"
     assert run.data.tags["prereg"] == "p-1"
-    assert len(run.data.tags["git_sha"]) == 40
-    assert run.data.tags["git_dirty"] in ("true", "false")
+    assert run.data.tags["git_sha"] == "c" * 40
+    assert run.data.tags["git_dirty"] == "false"
     assert run.data.metrics["mae_24h"] == 5.0
     assert "spike_recall_24h" not in run.data.metrics
     assert run.data.params["seed"] == "1"
@@ -219,7 +226,7 @@ def test_render_leaderboard_formats():
         tracking.render_leaderboard([], "csv")
 
 
-def test_leaderboard_best_run_dev_only_flags_invalid(store):
+def test_leaderboard_best_run_dev_only_flags_invalid(store, monkeypatch):
     import mlflow
 
     log = tracking.log_run
@@ -228,14 +235,16 @@ def test_leaderboard_best_run_dev_only_flags_invalid(store):
     bad = log("kan78/e1", "bad", {}, {**GOOD, "mae_24h": 1.0}, caller_tags())
     mlflow.MlflowClient().set_tag(bad, "invalid", "true")
     better = {**GOOD, "mae_24h": 3.0, "skill_vs_persistence_24h": 0.1}
-    log("kan78/e2", "only", {}, better, caller_tags())
+    monkeypatch.setattr(tracking, "git_state", lambda: ("d" * 40, True))
+    log("kan78/e2", "only", {}, better, caller_tags())  # dev run from a dirty tree
+    monkeypatch.setattr(tracking, "git_state", lambda: ("c" * 40, False))
     log("kan78/e3", "ho", {}, {**GOOD, "mae_24h": 2.0}, caller_tags(split="holdout"))
 
     rows = tracking.collect_leaderboard()
     assert [r["experiment"] for r in rows] == ["kan78/e2", "kan78/e1"]
     assert rows[1]["run"].startswith("best ") and rows[1]["mae"] == 4.0
     assert rows[0]["skill"] == 0.1
-    assert rows[0]["dirty"] is tracking.git_state()[1]
+    assert rows[0]["dirty"] is True and rows[1]["dirty"] is False
     assert [r["experiment"] for r in tracking.collect_leaderboard(split="holdout")] == ["kan78/e3"]
 
 
