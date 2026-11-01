@@ -102,9 +102,11 @@ def collect_all(snapshot: Path, out_dir: Path) -> dict[str, str]:
 
 
 def load_cache(cache: Path) -> dict[str, dict[str, np.ndarray]]:
-    """``{model: {field: array}}`` at the 24 h horizon rows where every model has a forecast.
+    """``{model: {field: array}}``: the raw per-pair arrays of every horizon, one dict per model.
 
-    Persistence and smoother are taken from the first file (identical in every file).
+    No filtering or alignment happens here; ``common_frame`` aligns the models on the (station,
+    origin) rows where all have a forecast. Persistence and smoother columns are the same in
+    every file (they come from the runner's baselines on the same rows).
     """
     raw = {m: dict(np.load(cache / f"{m}.npz")) for m in SPECS}
     return raw

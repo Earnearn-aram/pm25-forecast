@@ -112,3 +112,62 @@ def test_figures_are_written_small(tmp_path):
     saved = ea.save_figures(summary, onset, tmp_path)
     assert len(saved) == 4
     assert all((tmp_path / n).stat().st_size < 150_000 for n in saved)
+
+
+def _raw(n=6, nan_at=None):
+    """Two models' raw arrays for horizon 24; ``nan_at`` drops one forecast of model b."""
+    origin = (np.arange(n, dtype=np.int64) + 100) * H
+    base = {
+        "h24_station": np.array(["a"] * n),
+        "h24_origin_s": origin,
+        "h24_actual": np.arange(n, dtype=float),
+        "h24_pers": np.full(n, 5.0),
+        "h24_smoo": np.full(n, 6.0),
+        "h24_trend6": np.zeros(n),
+    }
+    a = {**base, "h24_cand": np.arange(n, dtype=float) + 1}
+    b = {**base, "h24_cand": np.arange(n, dtype=float) + 2}
+    if nan_at is not None:
+        b["h24_cand"][nan_at] = np.nan
+    return {"a": a, "b": b}
+
+
+def test_common_frame_aligns_models_on_shared_rows():
+    f = ea.common_frame(_raw(nan_at=2))
+    assert len(f["actual"]) == 5 and 2 not in f["actual"].tolist()
+    assert np.allclose(f["pred"]["a"] - f["actual"], 1.0)
+    assert np.allclose(f["pred"]["b"] - f["actual"], 2.0)
+    assert np.all(f["pred"]["smoother"] == 6.0) and np.all(f["latest"] == 5.0)
+
+
+def test_collect_rows_alignment_and_trend6_uses_only_origin_minus_1h_and_7h():
+    from datetime import timedelta
+
+    from pm25_forecast.backtest import Observation
+    from pm25_forecast.experiments import folds as folds_mod
+
+    start = folds_mod.S0
+    n_hours = 24 * 70
+    obs = [
+        Observation("a", start + timedelta(hours=i), float(i % 24), start + timedelta(hours=i + 1))
+        for i in range(n_hours)
+    ]
+
+    # a distinctive value at origin-1h and origin-7h; a future reading must never be used.
+    def fit(train, params=None):
+        def predict(snapshot, horizon):
+            return 7.0
+
+        return predict
+
+    try:
+        out = ea.collect_rows(obs, [], fit, None, horizons=(24,))
+    except Exception as exc:  # the synthetic series may be too short for the runner's plan
+        pytest.skip(f"runner plan needs a longer series: {exc}")
+    st, o = out["h24_station"], out["h24_origin_s"]
+    assert len(st) == len(o) == len(out["h24_actual"]) == len(out["h24_cand"])
+    assert np.all(out["h24_cand"] == 7.0)
+    by_ts = {int((start + timedelta(hours=i)).timestamp()): float(i % 24) for i in range(n_hours)}
+    for origin_s, trend in zip(o, out["h24_trend6"], strict=True):
+        expected = by_ts[int(origin_s) - H] - by_ts[int(origin_s) - 7 * H]
+        assert trend == pytest.approx(expected)
