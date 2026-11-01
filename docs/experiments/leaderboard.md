@@ -6,3 +6,6 @@ Invalid runs are excluded; DIRTY marks runs made from uncommitted code.
 | experiment | run | mae_24h | rmse_24h | skill vs persistence | n_pairs | git_sha | snapshot hash | dirty |
 |---|---|---|---|---|---|---|---|---|
 | kan78/e00-demo | persistence-fixture (005fb93a) | 1.851 | 2.263 |  | 72 | 464619f13f | dc9d912d7fd7 |  |
+| kan78/e04-smoother | smoother-dev (da9ad074) | 3.867 | 5.206 | 0.103 | 4200 | a11a322935 | a00cfc9edd4c |  |
+| kan78/e04-persistence | persistence-dev (3ca1e4c4) | 4.311 | 5.896 | 0.000 | 4200 | a11a322935 | a00cfc9edd4c |  |
+| kan78/e04-seasonal-naive | seasonal_naive-dev (b631a4f5) | 4.757 | 6.380 | -0.103 | 4200 | a11a322935 | a00cfc9edd4c |  |
