@@ -22,5 +22,5 @@ decision_rule: >-
   Promote only if diff_vs_smoother_24h_ci_high < 0 and diff_vs_persistence_24h_ci_high < 0
   on the holdout, and the station and serving gates in protocol section 10 pass.
 split: dev                        # dev | holdout
-final: false                      # true only for one of at most 3 holdout finalists
+final: false                      # true only for one of at most 2 holdout finalists
 author_agent: claude-data-scientist

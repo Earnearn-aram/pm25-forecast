@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ALLOWED_HORIZONS = (6, 12, 24)
-MAX_FINALISTS = 3
+MAX_FINALISTS = 2
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 _TICKET_RE = re.compile(r"^KAN-\d+$")
 

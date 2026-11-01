@@ -75,9 +75,9 @@ def test_non_mapping_rejected():
 
 
 def test_finalist_cap_and_duplicates():
-    fin = [_make(id=f"cand-{i}", split="holdout", final=True) for i in range(3)]
+    fin = [_make(id=f"cand-{i}", split="holdout", final=True) for i in range(2)]
     check_finalists(fin)
-    with pytest.raises(ValueError, match="at most 3"):
+    with pytest.raises(ValueError, match="at most 2"):
         check_finalists([*fin, _make(id="cand-9", split="holdout", final=True)])
     with pytest.raises(ValueError, match="duplicate"):
         check_finalists([fin[0], fin[0]])

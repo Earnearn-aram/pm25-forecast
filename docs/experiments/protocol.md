@@ -14,10 +14,12 @@ shadow path.
   and +12 h (reported, never gating).
 - **Persistence**: newest observation with `ts` in `[t−3h, t−1h]` (the 3 h age limit of
   `models/baselines.py`, applied after the serving lag); none, no forecast.
-- **Smoother**: `latest + 0.5 · (mean24 − latest)`, `latest` as above, `mean24` the mean of the
-  observations with `ts` in `[t−24h, t−1h]` (at least 12 of 24). The same formula is used at every
-  horizon (KAN-76, PR #59). If the merged KAN-76 code differs, the code wins and this line is
-  amended.
+- **Smoother** (KAN-76, merged; `features.mean_24h`, `models/serving.py`):
+  `latest + 0.5 · (mean24 − latest)`, `latest` as above, `mean24` the plain mean of usable
+  readings with `ts` in `[t−24h, t−1h]` and `available_at <= t`, **no minimum count**. When
+  `mean24` is None the smoother falls back to `latest` (= persistence). Baseline scoring uses this
+  same code at +6/+12 too, although the registered smoother serves only +24 h. The merged code
+  wins over this text on any conflict.
 - Candidate, persistence and smoother are always scored on the **common intersection** of
   (station, origin, horizon). No imputation. A candidate that covers fewer than 95% of the
   baseline-eligible pairs of a split is invalid for that split.
@@ -30,6 +32,14 @@ used. The same rule applies to training rows: a training pair (origin `o`, targe
 at a refit time `T` only if `o + h <= T` and the label `available_at <= T`. Features come from
 `src/pm25_forecast/features/` (shared with serving); no private feature code. Rows without a
 valid `available_at` are excluded, never filled with `ts`.
+
+**Assumed availability in experiments.** `docs/backtest.md` forbids substituting `ts` for
+`available_at` because the live `ingested_at` is not a historical arrival time. For the frozen
+experiment snapshot we apply an explicit, documented assumption instead: `available_at = ts + 1 h`
+for every air4thai observation (backfilled rows have an `ingested_at` days later, which would
+distort walk-forward training). This is the serving lag, not a measured arrival time, and every
+report states it. CAMS vintages keep their real `available_at` (collected only since 2026-10-27).
+KAN-74-affected targets stay excluded until the repair (section 3).
 
 ## 3. Data
 
@@ -89,7 +99,7 @@ All computed on the common intersection (section 1), per horizon, from code in t
 - `mae_24h`, `rmse_24h` (`_6h`, `_12h` analogues): over all station-hour pairs.
 - `skill_vs_persistence_24h = 1 − MAE_model / MAE_persistence`.
 - `diff_vs_smoother_24h = MAE_model − MAE_smoother` (and `diff_vs_persistence_24h`). **Negative is
-  better.** Computed as the mean of paired absolute-error differences.
+  better.** Pooled mean of paired absolute-error differences (section 6).
 - `n_pairs_24h`: number of station-hour pairs in the intersection.
 - Thai PM2.5 bands (µg/m³, upper edges): 0–15 very good, 15–25 good, 25–37.5 moderate,
   37.5–75 starting to affect health, >75 affecting health. A value equal to an edge falls in the
@@ -101,43 +111,51 @@ All computed on the common intersection (section 1), per horizon, from code in t
   `spike_recall_24h = TP/(TP+FN)`, `spike_precision_24h = TP/(TP+FP)`. If the denominator is
   zero, or the split has fewer than **50 observed spike pairs**, log no value (null) and report the
   counts; never log 0 or 1 for an undefined case. Spike metrics are diagnostics, not gates.
-  (KAN-65: spike detection was very weak, ≤ 10% recall; report it honestly.)
+  (KAN-65: spike detection was very weak, ≤ 10% recall; report it honestly. Values > 37.5 are
+  likely rare in Aug-Oct, so spike metrics may be null or unstable.)
 - Each metric is logged with the `_6h`/`_12h` variants for every horizon in the preregistration.
 
 ## 6. Statistics
 
-Unit of analysis for inference: the **hourly series** `d_t` = mean over stations of the paired
-absolute-error difference (candidate − baseline) at origin hour `t`. This keeps cross-station
-dependence inside one observation. Pairs from consecutive origins overlap in time and
-overlapping horizon errors are autocorrelated: pairs MUST NOT be treated as independent.
+Unit of analysis for inference (bootstrap **and** DM, one unit everywhere): the **hourly,
+pair-weighted series**. For origin hour `t`, `S_t` = sum of the paired absolute-error differences
+(candidate − baseline) over the stations present, `N_t` = their count. The estimate is
+`sum(S_t)/sum(N_t)`, identical to the pooled pair mean `diff_vs_*_24h`; the DM series is
+`d_t = S_t/N_t`. (Stations are not averaged with equal weight: station means would differ,
+about 109 vs 116 in the KAN-65 numbers, so use pair weights.) Compute in float64 with no rounding
+before the CI. Consecutive origins overlap in time and h-step errors are autocorrelated: pairs
+MUST NOT be treated as independent. `skill_vs_persistence_24h` and the spike metrics are pooled
+over all pairs of the split.
 
-- **Paired MAE difference with 7-day moving-block bootstrap CI.** Blocks are 168 consecutive
-  hourly origins on the calendar grid, start uniformly at any grid hour that fits; each block
-  carries (sum of pair differences, pair count); draw `ceil(n_hours/168)` blocks with replacement,
-  statistic = total sum / total count (handles gaps). **B = 10,000 resamples, seed 20261101**,
+- **Moving-block bootstrap CI, 72 h primary.** Blocks are 72 consecutive hourly origins on the
+  calendar grid, start uniformly at any grid hour that fits; each block carries `(S_t, N_t)`
+  sums; draw `ceil(n_hours/72)` blocks with replacement. **B = 10,000 resamples, seed 20261101**,
   `numpy.random.default_rng(seed)`, percentile interval. `diff_vs_*_ci_low/_ci_high` are the
-  bounds at the level in section 8 (95% for one finalist), logged as `ci_level` param.
-  Mandatory sensitivity (report, not gating): block lengths 24 h and 72 h. If the 24 h
-  interval crosses 0 when the 7-day one does not, the report MUST mark the result *fragile*
-  (KAN-65: borderline CIs flipped with block size).
-- With a 21 d holdout there are only ~3 independent 7-day blocks: say so in every holdout report.
-- **Diebold–Mariano** on the same `d_t` series (absolute-error loss, so it tests MAE equality),
-  versus the smoother, two-sided: `dm_pvalue_vs_smoother_24h`. Long-run variance by
-  Newey–West (Bartlett kernel) with bandwidth **`m = 2h − 1 = 47` for h = 24** (11 for h = 6, 23 for
-  h = 12): `h − 1` is the minimum MA order implied by h-step overlap; doubling it covers the daily
-  cycle in the errors. Harvey–Leybourne–Newbold small-sample correction and a Student-t with
-  `n − 1` df. Sensitivity (report only): `m = h − 1` and `m = 167`. If the estimated variance is
-  `<= 0`, log null and mark the run invalid for gating. Missing hours are dropped; require at least
-  95% of the grid hours present.
-- Per-run dev CIs and p-values are descriptive. The holdout CI is the confirmatory test.
+  bounds at the section 8 level (logged as param `ci_level`). Mandatory sensitivities: 24 h and
+  168 h blocks. If any sensitivity interval crosses 0 while the 72 h one does not, mark the result
+  *fragile* in the report (KAN-65: borderline CIs flipped with block size).
+- With a 21 d holdout there are only 3 independent weekly blocks: say so in every holdout report.
+- **Diebold-Mariano**, descriptive only (the CI decides). Absolute-error loss, two-sided,
+  versus the smoother: `dm_pvalue_vs_smoother_24h`. Long-run variance by Newey-West (Bartlett
+  kernel), primary bandwidth **`m = 167`** (one week, covers h-step overlap and the daily cycle);
+  sensitivity `m = 47` (`2h − 1` at h = 24) and `m = h − 1`. Harvey-Leybourne-Newbold
+  small-sample correction and Student-t with `n − 1` df. If the estimated variance is `<= 0`, log
+  null and mark the run invalid for gating. Missing hours are dropped; require at least 95% of
+  the grid hours present.
+- Per-run dev CIs and p-values are descriptive. The holdout gate (section 10) is **supportive
+  evidence on one 3-week window, not a confirmatory test**: a short window, 3 independent
+  blocks, one season, and baselines tuned (beta) on earlier data.
 - Correlation is not causation: results say "predicts better on this period", not why.
 
 ## 7. Minimum sample sizes
 
-- Holdout (+24 h): at least **5,000 pairs** and **400 hourly origins** (≈ 17 d) present, and every
+- Holdout (+24 h): at least **2,100 pairs** and **400 hourly origins** (≈ 17 d) present, and every
   station in the cohort with at least 250 pairs. Below that the holdout result is
-  `insufficient_data`, not a pass.
-- Dev run: at least 3 weekly folds with at least 1,000 pairs each.
+  `insufficient_data`, not a pass. (Maximum with 5 stations: 5 × 21 × 24 = 2,520 pairs.) The main
+  coverage gate is the 95% rule of section 1.
+- Dev fold: at least **600 pairs** (maximum 5 × 7 × 24 = 840); a dev run needs at least 3 such
+  folds. Date arithmetic and these minimums are tested in `tests/test_experiment_folds.py`
+  (`src/pm25_forecast/experiments/folds.py`).
 - Spike metrics: at least 50 observed spike pairs, else null (section 5).
 - Category/spike reporting by station only for stations with at least 250 pairs.
 
@@ -145,11 +163,11 @@ overlapping horizon errors are autocorrelated: pairs MUST NOT be treated as inde
 
 - Dev exploration is free (any number of runs, models, features), but every run is logged in
   MLflow and the report states the **number of dev runs** and that dev CIs are unadjusted.
-- At most **3 pre-registered finalists** (`final: true`, section 9) go to the holdout, scored
+- At most **2 pre-registered finalists** (`final: true`, section 9) go to the holdout, scored
   **once each**. Candidates, features and parameters are frozen in git before scoring.
 - Confidence level for the gate: 95% when one finalist is registered; with `k` finalists
   (`k` = number registered, not number scored) use Bonferroni, level `1 − 0.05/k` (two-sided
-  percentiles `0.025/k`, `1 − 0.025/k`). The level is fixed in the preregistration set before the
+  percentiles `0.025/k`, `1 − 0.025/k`; at most 97.5%). The level is fixed in the preregistration set before the
   holdout is touched and logged as param `ci_level`. Each finalist is compared against two
   baselines; both comparisons use the same level.
 - A holdout re-run of the same preregistration id is invalid (a crash re-run with identical
@@ -163,7 +181,7 @@ Before the first run that carries an `id`, commit `docs/experiments/prereg/<id>.
 `docs/experiments/prereg_template.yaml`; model and loader:
 `src/pm25_forecast/experiments/prereg.py`). Fields: id, ticket, hypothesis, model_family, model,
 feature_set, params, horizons (24 mandatory), expected_effect, decision_rule, split, final,
-author_agent. `final: true` requires `split: holdout` and is allowed for at most 3 files.
+author_agent. `final: true` requires `split: holdout` and is allowed for at most 2 files.
 The MLflow tag `prereg` = the id (dev exploration without a file: tag `exploratory`; such runs can
 never go to the holdout).
 
@@ -171,18 +189,22 @@ never go to the holdout).
 
 A candidate is promoted to shadow only if **all** hold on the holdout:
 
-1. `diff_vs_persistence_24h_ci_high < 0` **and** `diff_vs_smoother_24h_ci_high < 0` (7-day block
-   CI at the section 8 level).
-2. No station has MAE worse than persistence by more than **5%** at +24 h (stations below the
-   section 7 minimum are listed; if more than 10% of the cohort is below it, the gate is
-   `insufficient_data`).
-3. Serving-lag check passes: a test proves features at origin `t` use only `ts <= t−1h` and
+1. `diff_vs_persistence_24h_ci_high < 0` **and** `diff_vs_smoother_24h_ci_high < 0` (72 h block
+   CI at the section 8 level), **and** the point estimate `diff_vs_smoother_24h <= −0.15` µg/m³
+   (minimum effect).
+2. The paired diff (candidate − baseline) is negative in **each of the 3 weekly holdout folds**,
+   against both persistence and the smoother.
+3. No station has MAE worse than persistence by more than **5%** at +24 h. Report a bootstrap CI
+   (same blocks) for each station's relative difference; the gate fails on the point estimate
+   and the report flags stations whose CI includes +5%. Stations below the section 7 minimum are
+   listed; if more than 10% of the cohort is below it, the gate is `insufficient_data`.
+4. Serving-lag check passes: a test proves features at origin `t` use only `ts <= t−1h` and
    `available_at <= t`, and that the serving feature code is the shared module.
-4. Registry manifest validates: the model loads through `models/serving.load_serving_model`
+5. Registry manifest validates: the model loads through `models/serving.load_serving_model`
    (`feature_list`, `assumed_reporting_lag_hours`, training window, `snapshot_sha256`, artifact hash).
-5. Valid run (section 12), holdout minimums (section 7) met.
+6. Valid run (section 12), holdout minimums (section 7) met.
 
-Passing is a shadow-run recommendation, not production promotion; Boss decides promotion.
+Passing is supportive evidence (section 6), a shadow-run recommendation, not production promotion; Boss decides promotion.
 
 ## 11. MLflow logging
 
@@ -204,7 +226,7 @@ A run is valid only if all hold; otherwise tag it `invalid` and exclude it from 
 - air4thai-era data and target exclusions of section 3 enforced; serving lag of section 2 enforced;
 - walk-forward and fold dates exactly per section 4; no holdout data read in dev runs;
 - common-intersection coverage and minimum sample sizes met (sections 1, 7);
-- holdout: prereg file committed before the run, `final: true`, at most 3 finalists, first scoring;
+- holdout: prereg file committed before the run, `final: true`, at most 2 finalists, first scoring;
 - no NaN/inf predictions; negative predictions clipped at 0 and stated.
 
 ## 13. Report (Confluence, 8 sections)
