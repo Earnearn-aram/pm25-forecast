@@ -1,0 +1,29 @@
+# KAN-88 (E11). Committed before the run. Dev split only; never the holdout.
+id: e11-ridge-wx-d2
+ticket: KAN-88
+hypothesis: >-
+  Adding Open-Meteo previous_day1 ECMWF IFS forecast features (wind speed and direction, humidity, temperature, rain, pressure, cloud, shortwave radiation) lowers +24 h dev MAE of this model versus its no-weather twin on identical rows.
+model_family: ridge
+model: ridge_wx_d2
+feature_set: fs_v2_core+wx_v1(previous_day2)
+params:
+  alpha: 30.0
+horizons: [6, 12, 24]
+expected_effect:
+  metric: weather_increment_vs_matched_no_weather_24h
+  direction: negative
+  magnitude: -0.1
+decision_rule: >-
+  Dev exploration, nothing goes to the holdout from this ticket. Primary comparison: the MAE increment
+  of the weather model over its matched no-weather model (same family, same rows), +24 h, 72 h block
+  CI, 95% shown and 97.5% (Bonferroni over the 2 families) used for the decision. KAN-75 success rule
+  applied to each weather model: (A) 95% CI of weather minus smoother MAE entirely below 0 AND MAE gain
+  vs persistence >= 15%, or (B) onset catch share above the matched no-weather model by >= 10 points
+  with paired CI above 0 and false-alarm share rising <= 2 points (judged only with >= 30 onsets on >= 8
+  days). GO if for at least one family (A or B) holds AND the increment CI at 97.5% is entirely below 0.
+  PIVOT if not go but the increment point estimate is negative in at least one family. STOP otherwise.
+  Sensitivity (descriptive, not decisive): previous_day2 weather (strictly available at the origin).
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist
