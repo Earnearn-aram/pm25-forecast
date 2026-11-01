@@ -92,11 +92,11 @@ def test_export_is_read_only_and_hash_deterministic(tmp_path):
         for s in conn.statements
     )
     m2 = export_snapshot(tmp_path / "b", "postgresql://unused", connect=lambda _url: FakeConn())
-    assert m1["content_sha256"] == m2["content_sha256"]
+    assert m1["snapshot_sha256"] == m2["snapshot_sha256"]
     m3 = export_snapshot(
         tmp_path / "c", "postgresql://unused", kan74_repaired=True, connect=lambda _url: FakeConn()
     )
-    assert m3["content_sha256"] != m1["content_sha256"]
+    assert m3["snapshot_sha256"] != m1["snapshot_sha256"]
 
 
 def test_hash_ignores_input_order():
@@ -113,6 +113,8 @@ def test_manifest_fields_and_round_trip(tmp_path):
     )
     on_disk = json.loads((tmp_path / "s" / "manifest.json").read_text())
     assert on_disk == manifest
+    assert manifest["snapshot_sha256"] == manifest["content_sha256"]
+    assert "0 vintages" in manifest["vintages_note"]
     assert manifest["created_at"] == "2026-11-01T00:00:00Z"
     assert manifest["git_sha"] == "abc123"
     assert manifest["stations"] == ["02t", "59t"]
@@ -152,7 +154,7 @@ def test_load_detects_tampering(tmp_path):
     dataset.write_snapshot(tmp_path / "s", obs, vin, kan74_repaired=False, git_sha="x")
     path = tmp_path / "s" / "manifest.json"
     manifest = json.loads(path.read_text())
-    manifest["content_sha256"] = "0" * 64
+    manifest["snapshot_sha256"] = "0" * 64
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="hash mismatch"):
         load_snapshot(tmp_path / "s")
@@ -165,6 +167,26 @@ def test_refuses_non_empty_directory(tmp_path):
         dataset.write_snapshot(tmp_path / "x", [], [], kan74_repaired=False)
 
 
-def test_cli_rejects_out_inside_repo(monkeypatch, capsys):
+def test_cli_rejects_out_inside_repo():
     root = Path(dataset.__file__).resolve().parents[3]
     assert dataset.main(["export", "--out", str(root / "snap")]) == 2
+
+
+def test_cli_fails_closed_without_repo_root(monkeypatch, tmp_path):
+    def boom(*_a):
+        raise OSError("no git")
+
+    monkeypatch.setattr(dataset, "_git", boom)
+    assert dataset.main(["export", "--out", str(tmp_path / "s")]) == 2
+
+
+def test_off_hour_observation_rejected():
+    row = ("a", datetime(2026, 8, 1, 0, 30, tzinfo=UTC), 1.0, "air4thai", CREATED, CREATED)
+    with pytest.raises(ValueError, match="UTC hour"):
+        dataset.build_manifest([row], [], kan74_repaired=False, git_sha="x")
+
+
+def test_cutoff_is_the_settings_constant():
+    from pm25_forecast.settings import KAN74_BUG_CUTOFF
+
+    assert dataset.KAN74_CUTOFF is KAN74_BUG_CUTOFF

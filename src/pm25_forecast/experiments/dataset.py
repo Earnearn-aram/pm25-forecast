@@ -31,15 +31,14 @@ import duckdb
 from pm25_forecast.backtest import Observation, Vintage
 from pm25_forecast.collector import ConfigError
 from pm25_forecast.drift import DATA_SOURCE_BREAK
-from pm25_forecast.settings import get_settings
+from pm25_forecast.settings import KAN74_BUG_CUTOFF, get_settings
 from pm25_forecast.storage import db
 
 logger = logging.getLogger(__name__)
 
-# KAN-74: targets from this instant were affected by the 24 h rolling-average headline value;
-# they are excluded unless the owner confirms the repair (`--kan74-repaired`). A target exactly
-# at the cut-off is excluded (conservative).
-KAN74_CUTOFF = datetime(2026, 10, 26, 0, 0, tzinfo=UTC)
+# KAN-74: targets at or after this instant are excluded unless `--kan74-repaired` (one source of
+# truth: settings.KAN74_BUG_CUTOFF).
+KAN74_CUTOFF = KAN74_BUG_CUTOFF
 SCHEMA_VERSION = 1
 HOUR = timedelta(hours=1)
 AIR4THAI_LAG = HOUR
@@ -168,6 +167,10 @@ def build_manifest(
     git_sha: str | None = None,
 ) -> dict[str, Any]:
     created_at = _utc(created_at or datetime.now(UTC))
+    digest = content_sha256(obs, vin)
+    for row in obs:
+        if row[1] != row[1].replace(minute=0, second=0, microsecond=0):
+            raise ValueError(f"observation ts is not on the UTC hour: {row[0]} {row[1]}")
     stations = sorted({r[0] for r in obs} | {r[0] for r in vin})
     obs_hours: dict[str, set[datetime]] = defaultdict(set)
     obs_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -182,13 +185,16 @@ def build_manifest(
     last = max((r[1] for r in obs), default=None)
     expected = int((last - first) / HOUR) + 1 if first and last else 0
     missing = {
-        s: round(1 - len(obs_hours[s]) / expected, 6) if expected else None for s in stations
+        s: max(0.0, round(1 - len(obs_hours[s]) / expected, 6)) if expected else None
+        for s in stations
     }
+    assert all(m is None or m >= 0 for m in missing.values())
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": _iso(created_at),
         "git_sha": git_sha if git_sha is not None else _git_sha(),
-        "content_sha256": content_sha256(obs, vin),
+        "snapshot_sha256": digest,
+        "content_sha256": digest,  # alias of snapshot_sha256 (kept for early readers)
         "files": {"observations": OBSERVATIONS_FILE, "vintages": VINTAGES_FILE},
         "time_range": {
             "first_usable_target": _iso(first) if first else None,
@@ -207,6 +213,10 @@ def build_manifest(
             },
             "vintages_by_station": dict(sorted(vin_counts.items())),
         },
+        "vintages_note": (
+            "CAMS vintages exist only from 2026-10-27, after the KAN-74 cut-off, so the default "
+            "snapshot has 0 vintages; a CAMS-inclusive snapshot needs --kan74-repaired"
+        ),
         "missing_hour_rate_by_station": missing,
         "missing_hour_rate_note": (
             "1 - observed hours / hours in [first_usable_target, last_usable_target]; "
@@ -296,7 +306,8 @@ def load_snapshot(path: Path | str) -> tuple[list[Observation], list[Vintage], d
         (s, _utc(i), _utc(v), float(val), _utc(av), m)
         for s, i, v, val, av, m in _read_parquet(path / VINTAGES_FILE)
     ]
-    if content_sha256(obs_rows, vin_rows) != manifest["content_sha256"]:
+    expected_hash = manifest.get("snapshot_sha256", manifest.get("content_sha256"))
+    if content_sha256(obs_rows, vin_rows) != expected_hash:
         raise ValueError(f"snapshot content hash mismatch in {path}")
     observations = [Observation(s, ts, v, av) for s, ts, v, _src, av, _ing in sorted(obs_rows)]
     vintages = [Vintage(s, i, v, val, av, m) for s, i, v, val, av, m in sorted(vin_rows)]
@@ -341,8 +352,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             root = Path(_git("rev-parse", "--show-toplevel")).resolve()
         except (OSError, subprocess.CalledProcessError):
-            root = None
-        if root is not None and (out == root or root in out.parents):
+            raise ConfigError("cannot locate the git repository; refusing to export") from None
+        if out == root or root in out.parents:
             raise ConfigError("--out must be outside the git repository")
         settings = get_settings()
         if settings.database_url is None:
