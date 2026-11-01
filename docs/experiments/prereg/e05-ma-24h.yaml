@@ -1,0 +1,23 @@
+id: e05-ma-24h
+ticket: KAN-83
+hypothesis: Recent moving averages improve 24 hour forecast MAE against the fixed
+  smoother.
+model_family: moving-average
+model: ma-24h
+feature_set: rolling-pm25
+params:
+  window_hours: 24
+horizons:
+- 6
+- 12
+- 24
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.15
+decision_rule: Compare dev MAE and paired 72 hour CI against smoother; select best
+  valid MAE without holdout.
+split: dev
+final: false
+finalists: 1
+author_agent: codex
