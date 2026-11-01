@@ -86,6 +86,16 @@ def table(rows: list[dict[str, Any]]) -> str:
     return head + body
 
 
+def load_log(path: Path) -> list[dict[str, Any]]:
+    """Tuning-log entries, one per (refit_time, horizon); a later line replaces an earlier one."""
+    latest: dict[tuple[str, int], dict[str, Any]] = {}
+    for line in path.read_text().splitlines():
+        if line.strip():
+            e = json.loads(line)
+            latest[(e["refit_time"], e["horizon"])] = e
+    return list(latest.values())
+
+
 def tuning_tables(log_dir: Path, best_id: str) -> str:
     out = []
     chosen: Counter = Counter()
@@ -93,8 +103,7 @@ def tuning_tables(log_dir: Path, best_id: str) -> str:
     for p in sorted(log_dir.glob("e12-*.tuning.jsonl")):
         if "abl" in p.name:
             continue
-        for line in p.read_text().splitlines():
-            e = json.loads(line)
+        for e in load_log(p):
             if e["horizon"] == 24:
                 chosen[json.dumps(e["config"], sort_keys=True)] += 1
                 n += 1
@@ -104,8 +113,7 @@ def tuning_tables(log_dir: Path, best_id: str) -> str:
     gains: dict[str, float] = defaultdict(float)
     count = 0
     f = log_dir / f"{best_id}.tuning.jsonl"
-    for line in f.read_text().splitlines():
-        e = json.loads(line)
+    for e in load_log(f):
         if e["horizon"] != 24:
             continue
         tot = sum(e["gain"].values())

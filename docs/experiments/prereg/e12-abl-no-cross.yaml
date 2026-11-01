@@ -22,9 +22,9 @@ params:
   log_name: e12-abl-no-cross
 horizons: [6, 12, 24]
 expected_effect:
-  metric: diff_vs_smoother_24h
+  metric: diff_full_minus_ablation_mae_24h
   direction: negative
-  magnitude: -0.2
+  magnitude: -0.05
 decision_rule: >-
   Descriptive: report the change in mae_24h and in diff_vs_smoother_24h versus the full-set run
   e12-full-l2-delta. A group matters if removing it raises mae_24h by more than 0.05 ug/m3.

@@ -26,6 +26,7 @@ nearest-station feature is not used (the snapshot has no station coordinates).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections import defaultdict
@@ -134,8 +135,45 @@ def _anchor(feats: Mapping[str, float]) -> float | None:
 
 
 # Training features are a pure function of (station, origin, valid) and of rows that were already
-# available at the origin, so they are identical in every fold of a run: computed once.
+# available at the origin, so within one training snapshot every (station, origin, valid) is
+# computed once. The cache belongs to ONE snapshot: it is keyed by a fingerprint of the training
+# rows and of the feature list, and replaced as soon as another snapshot (or another feature
+# library) is fitted, so it can never serve features built from different data.
 _TRAIN_CACHE: dict[tuple[str, datetime, datetime], dict[str, float]] = {}
+_TRAIN_CACHE_FP: list[str | None] = [None]
+
+
+def _fingerprint(observations: Any) -> str:
+    h = hashlib.sha256()
+    h.update(repr((BASE_ALL, USED_CROSS)).encode())
+    for o in sorted(observations, key=lambda o: (o.station_id, o.ts)):
+        h.update(
+            f"{o.station_id}|{o.ts.isoformat()}|{o.value!r}|{o.available_at.isoformat()};".encode()
+        )
+    return h.hexdigest()
+
+
+def _train_cache_for(observations: Any) -> dict[tuple[str, datetime, datetime], dict[str, float]]:
+    fp = _fingerprint(observations)
+    if _TRAIN_CACHE_FP[0] != fp:
+        _TRAIN_CACHE.clear()
+        _TRAIN_CACHE_FP[0] = fp
+    return _TRAIN_CACHE
+
+
+def inner_cv_masks(tgt: np.ndarray, h: int, inner_folds: int):
+    """Expanding-window inner CV over target timestamps (epoch seconds), purged by the horizon.
+
+    A validation pair with target ``v`` is forecast at origin ``v - h``; a training label with
+    target ``t`` becomes available at ``t + 1 h`` (protocol: ``available_at = ts + 1 h``), so it is
+    known at the validation origin only if ``t + 1 h <= v - h``. The fold boundary ``edges[j]`` is
+    the earliest validation target, hence ``t <= edges[j] - (h + 1) h``.
+    """
+    edges = np.quantile(tgt, np.linspace(0, 1, inner_folds + 2))
+    for j in range(1, inner_folds + 1):
+        val = (tgt >= edges[j]) & (tgt < edges[j + 1] if j < inner_folds else tgt <= edges[-1])
+        tr = tgt <= edges[j] - (h + 1) * 3600
+        yield tr, val
 
 
 def _lgb_params(cfg: Mapping[str, Any], objective: str, alpha: float, seed: int, threads: int):
@@ -178,6 +216,7 @@ def fit(train: TrainSnapshot, params: Mapping[str, Any] | None = None) -> Predic
     configs = config_grid(budget, seed)
     delta = target_kind == "delta"
 
+    train_cache = _train_cache_for(train.observations)
     by_station: dict[str, dict[datetime, Observation]] = defaultdict(dict)
     for o in train.observations:
         by_station[o.station_id][o.ts] = o
@@ -197,10 +236,10 @@ def fit(train: TrainSnapshot, params: Mapping[str, Any] | None = None) -> Predic
             for target, label in by_station.get(s, {}).items():
                 origin = target - h * HOUR
                 key = (s, origin, target)
-                feats = _TRAIN_CACHE.get(key)
+                feats = train_cache.get(key)
                 if feats is None:
                     feats = _all_features(prep, s, origin, target)
-                    _TRAIN_CACHE[key] = feats
+                    train_cache[key] = feats
                 anchor = _anchor(feats)
                 if anchor is None:
                     continue  # never scored: persistence has no value either
@@ -226,12 +265,9 @@ def fit(train: TrainSnapshot, params: Mapping[str, Any] | None = None) -> Predic
             )
 
         # Inner time-series CV on the training part only: expanding window, purged by h.
-        edges = np.quantile(tgt, np.linspace(0, 1, inner_folds + 2))
         scores = np.zeros(len(configs))
         n_used = 0
-        for j in range(1, inner_folds + 1):
-            val = (tgt >= edges[j]) & (tgt < edges[j + 1] if j < inner_folds else tgt <= edges[-1])
-            tr = tgt <= edges[j] - h * 3600  # the label was known at the validation origin
+        for tr, val in inner_cv_masks(tgt, h, inner_folds):
             if tr.sum() < 100 or val.sum() < 20:
                 continue
             n_used += 1
@@ -304,6 +340,14 @@ def _write_log(prm: Mapping[str, Any], log: list[dict[str, Any]]) -> None:
         return
     path = Path(str(log_dir)).expanduser() / f"{name}.tuning.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        for entry in log:
-            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+    # Idempotent: a re-run replaces the entries of the same refit time instead of appending twice.
+    new = {e["refit_time"] for e in log}
+    keep = []
+    if path.exists():
+        keep = [
+            ln
+            for ln in path.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and json.loads(ln)["refit_time"] not in new
+        ]
+    keep += [json.dumps(entry, sort_keys=True) for entry in log]
+    path.write_text("\n".join(keep) + "\n", encoding="utf-8")
