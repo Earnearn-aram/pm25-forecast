@@ -28,4 +28,5 @@ decision_rule: >-
   pass.
 split: dev                        # dev | holdout
 final: false                      # true only for one of at most 2 holdout finalists
+finalists: 1                      # k = number of finalists registered (1 or 2); sets ci_level = 1 - 0.05/k
 author_agent: claude-data-scientist

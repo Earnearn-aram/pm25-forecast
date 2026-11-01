@@ -170,6 +170,7 @@ over all pairs of the split.
   percentiles `0.025/k`, `1 − 0.025/k`; at most 97.5%). The level is fixed in the
   preregistration set before the holdout is touched and logged as param `ci_level`. Each finalist is compared against two
   baselines; both comparisons use the same level.
+- Implementation (KAN-82): `finalists` (k, 1 or 2) is a field of the preregistration and `evaluate --holdout` takes k and the horizons only from it. The once-only check queries the local MLflow store (`~/pm25-experiments/mlflow`); a deleted or replaced store resets it, so never delete that store and keep backups. If the store cannot be queried the holdout is refused.
 - A holdout re-run of the same preregistration id is invalid (a crash re-run with identical
   `git_sha`, `snapshot_sha256` and predictions is allowed and noted).
 - A failed finalist is reported as failed. New ideas after the holdout is seen need a new

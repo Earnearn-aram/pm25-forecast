@@ -49,6 +49,7 @@ class Prereg(BaseModel):
     decision_rule: str = Field(min_length=10)
     split: Literal["dev", "holdout"]
     final: bool
+    finalists: int = Field(default=1, ge=1, le=MAX_FINALISTS)
     author_agent: str = Field(min_length=1)
 
     @field_validator("id")
@@ -109,3 +110,6 @@ def check_finalists(preregs: list[Prereg]) -> None:
     n_final = sum(p.final for p in preregs)
     if n_final > MAX_FINALISTS:
         raise ValueError(f"at most {MAX_FINALISTS} finalists may be registered, got {n_final}")
+    wrong = [p.id for p in preregs if p.final and p.finalists != n_final]
+    if wrong:
+        raise ValueError(f"finalists must equal the number registered ({n_final}): {wrong}")
