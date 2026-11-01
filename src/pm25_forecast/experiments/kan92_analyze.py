@@ -24,12 +24,12 @@ E15_IDS = ("e15-equal5", "e15-invmae5", "e15-stack5", "e15-smoother-gbm", "e15-r
 BONF_SUFFIX = "-bonf5"
 # Family-best member runs from the earlier tickets (dev, +24 h, 4,200 pairs), for reference.
 MEMBER_RUNS = {
-    "ridge e06-ridge-pool-raw-chg": "9215183065474135bcbfa8de637f44e5",  # pragma: allowlist secret (MLflow run id)
-    "clim e05-clim-28d-blend": "444eecf8cc5d4dc492e157ee0fa51104",  # pragma: allowlist secret (MLflow run id)
-    "gbm e12-full-l2-delta": "76298486bbca4bc2b88987b3c742bd64",  # pragma: allowlist secret (MLflow run id)
-    "arima e07-arima-d1": "ba06af54de50496796d873c595e8eb17",  # pragma: allowlist secret (MLflow run id)
-    "wx e11-lgbm-wx-d2": "62adf1482ff2458e99130b356cae87da",  # pragma: allowlist secret (MLflow run id)
-    "wx e11-lgbm-wx": "e41b2f96731e4d698e176c017aa926cd",  # pragma: allowlist secret (MLflow run id)
+    "ridge e06-ridge-pool-raw-chg": "9215183065474135bcbfa8de637f44e5",  # pragma: allowlist secret
+    "clim e05-clim-28d-blend": "444eecf8cc5d4dc492e157ee0fa51104",  # pragma: allowlist secret
+    "gbm e12-full-l2-delta": "76298486bbca4bc2b88987b3c742bd64",  # pragma: allowlist secret
+    "arima e07-arima-d1": "ba06af54de50496796d873c595e8eb17",  # pragma: allowlist secret
+    "wx e11-lgbm-wx-d2": "62adf1482ff2458e99130b356cae87da",  # pragma: allowlist secret
+    "wx e11-lgbm-wx": "e41b2f96731e4d698e176c017aa926cd",  # pragma: allowlist secret
 }
 
 
