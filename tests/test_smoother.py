@@ -183,3 +183,28 @@ def test_retrain_reports_a_smoother_challenger_as_skipped_not_crashing():
     assert result.status == "ok"
     assert result.challenger_comparison == {}
     assert "scored by Score" in result.roles["challenger_error"]
+
+
+def test_owner_register_step_accepts_the_built_files(tmp_path, monkeypatch):
+    """The files the smoother module writes pass `registry_cli register` (owner step 1)."""
+    from pm25_forecast import registry_cli
+
+    monkeypatch.setattr("sys.argv", ["smoother", "--out-dir", str(tmp_path)])
+    assert smoother_build.main() == 0
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert registry.validate_manifest(manifest)["version"] == VERSION
+    reg, lines = InMemoryRegistry(), []
+    code = registry_cli.run(
+        [
+            "register",
+            "--artifact",
+            str(tmp_path / "artifact.json"),
+            "--manifest",
+            str(tmp_path / "manifest.json"),
+        ],
+        database_url="db",
+        connect=lambda _url: reg,
+        out=lines.append,
+    )
+    assert code == 0, lines
+    assert isinstance(load_registered_model(reg, VERSION), SmootherModel)
