@@ -27,6 +27,8 @@ experiments = [
     "jupyter",
     "mlflow",
     "nbconvert",
+    "scikit-learn>=1.9.1",
+    "statsmodels>=0.15.0",
 ]
 
 [build-system]
