@@ -12,6 +12,7 @@ CLI: ``python -m pm25_forecast.experiments.tracking {leaderboard,render-report,d
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -24,14 +25,19 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 STORE_ENV = "MLFLOW_TRACKING_URI"
+ARTIFACT_ENV = "MLFLOW_ARTIFACT_ROOT"
 DEFAULT_STORE_DIR = Path("~/pm25-experiments/mlflow")
 EXPERIMENT_PREFIX = "kan78/"
 _EXPERIMENT_RE = re.compile(r"^kan78/[a-z0-9][a-z0-9_-]{1,63}$")
 BUSY_TIMEOUT_S = 30
 LOCK_RETRIES = 6
-LEADERBOARD_PATH = Path(__file__).resolve().parents[3] / "docs" / "experiments" / "leaderboard.md"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+LEADERBOARD_PATH = REPO_ROOT / "docs" / "experiments" / "leaderboard.md"
+# Output directories that do not count as uncommitted code when computing ``git_dirty``.
+DIRTY_IGNORE = ("report", ".claude", ".codex", "out")
 
 REQUIRED_TAGS = (
     "ticket",
@@ -80,15 +86,50 @@ def store_dir() -> Path:
     return DEFAULT_STORE_DIR.expanduser()
 
 
+def _env(name: str) -> str:
+    """Process environment first, then ``.env`` in the working directory or the repo root."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    from dotenv import dotenv_values
+
+    for base in (Path.cwd(), REPO_ROOT):
+        value = (dotenv_values(base / ".env").get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _with_timeout(uri: str) -> str:
+    """Add the SQLite busy timeout to a sqlite URI that has none."""
+    if uri.startswith("sqlite:") and "timeout=" not in uri:
+        return f"{uri}{'&' if '?' in uri else '?'}timeout={BUSY_TIMEOUT_S}"
+    return uri
+
+
 def tracking_uri() -> str:
-    """``MLFLOW_TRACKING_URI`` if set and non-blank, else the shared SQLite store."""
+    """``MLFLOW_TRACKING_URI`` (env or .env) if set, else the shared SQLite store."""
     # ``timeout`` is sqlite's busy timeout: a second writer waits instead of failing at once.
-    default = f"sqlite:///{store_dir() / 'mlflow.db'}?timeout={BUSY_TIMEOUT_S}"
-    return os.environ.get(STORE_ENV, "").strip() or default
+    return _with_timeout(_env(STORE_ENV) or f"sqlite:///{store_dir() / 'mlflow.db'}")
+
+
+def _sqlite_path(uri: str) -> Path | None:
+    match = re.match(r"^sqlite:///(.*?)(\?.*)?$", uri)
+    return Path(match.group(1)).expanduser().resolve() if match else None
 
 
 def artifact_root() -> str:
-    return (store_dir() / "artifacts").as_uri()
+    """``MLFLOW_ARTIFACT_ROOT`` if set, else ``artifacts/`` next to the SQLite database.
+
+    Always explicit, so artifacts never fall back to a per-worktree ``./mlruns``.
+    """
+    explicit = _env(ARTIFACT_ENV)
+    if explicit:
+        return explicit if "://" in explicit else Path(explicit).expanduser().resolve().as_uri()
+    db = _sqlite_path(tracking_uri())
+    if db is None:
+        raise TrackingError(f"{ARTIFACT_ENV} is required when {STORE_ENV} is not a sqlite URI")
+    return (db.parent / "artifacts").as_uri()
 
 
 def file_sha256(path: Path | str) -> str:
@@ -99,20 +140,25 @@ def file_sha256(path: Path | str) -> str:
     return digest.hexdigest()
 
 
-def _git(*args: str) -> str:
+def _git(*args: str, cwd: Path | None = None) -> str:
     return subprocess.run(
         ["git", *args],
-        cwd=Path(__file__).resolve().parent,
+        cwd=cwd or Path(__file__).resolve().parent,
         capture_output=True,
         text=True,
         check=True,
     ).stdout.strip()
 
 
-def git_state() -> tuple[str, bool]:
-    """(HEAD sha, dirty flag) of the code that produced the run."""
-    sha = _git("rev-parse", "HEAD")
-    return sha, bool(_git("status", "--porcelain", "--untracked-files=no"))
+def git_state(repo: Path | None = None) -> tuple[str, bool]:
+    """(HEAD sha, dirty flag) of the code that produced the run.
+
+    Dirty means any tracked change or untracked file, except the output directories in
+    ``DIRTY_IGNORE``.
+    """
+    pathspec = [":(top)", *(f":(top,exclude){d}" for d in DIRTY_IGNORE)]
+    sha = _git("rev-parse", "HEAD", cwd=repo)
+    return sha, bool(_git("status", "--porcelain", "--", *pathspec, cwd=repo))
 
 
 def snapshot_hash(value: Path | str) -> str:
@@ -126,14 +172,17 @@ def snapshot_hash(value: Path | str) -> str:
     if not path.is_file():
         raise TrackingError(f"snapshot_sha256 is neither a digest nor a manifest: {text}")
     manifest = json.loads(path.read_text())
-    return str(manifest.get("snapshot_sha256", manifest.get("content_sha256", "")))
+    digest = str(manifest.get("snapshot_sha256", manifest.get("content_sha256", "")))
+    if not _SHA_RE.fullmatch(digest):
+        raise TrackingError(f"no valid snapshot_sha256 in manifest {path}")
+    return digest
 
 
 def validate_tags(tags: Mapping[str, Any]) -> dict[str, str]:
     missing = [t for t in REQUIRED_TAGS if tags.get(t) in (None, "")]
     if missing:
         raise TrackingError(f"missing required tags: {', '.join(missing)}")
-    unknown = sorted(set(tags) - set(REQUIRED_TAGS) - {"invalid"})
+    unknown = sorted(set(tags) - set(REQUIRED_TAGS))
     if unknown:
         raise TrackingError(f"unknown tags: {', '.join(unknown)}")
     out = {k: str(v) for k, v in tags.items()}
@@ -174,8 +223,9 @@ def _mlflow() -> Any:
 def _client() -> Any:
     mlflow = _mlflow()
     uri = tracking_uri()
-    if uri.startswith("sqlite:///"):
-        Path(uri.removeprefix("sqlite:///").split("?")[0]).parent.mkdir(parents=True, exist_ok=True)
+    db = _sqlite_path(uri)
+    if db is not None:
+        db.parent.mkdir(parents=True, exist_ok=True)
     mlflow.set_tracking_uri(uri)
     return mlflow.MlflowClient()
 
@@ -184,17 +234,17 @@ def _ensure_experiment(client: Any, name: str) -> str:
     exp = client.get_experiment_by_name(name)
     if exp is not None:
         return exp.experiment_id
-    root = None
-    if not os.environ.get(STORE_ENV, "").strip():
-        (store_dir() / "artifacts").mkdir(parents=True, exist_ok=True)
-        root = artifact_root()
+    root = artifact_root()
+    if root.startswith("file://"):
+        Path(unquote(urlparse(root).path)).mkdir(parents=True, exist_ok=True)
+    from mlflow.exceptions import MlflowException
+
     try:
         return client.create_experiment(name, artifact_location=root)
-    except Exception:  # another agent created it first
-        exp = client.get_experiment_by_name(name)
-        if exp is None:
+    except MlflowException as exc:
+        if exc.error_code != "RESOURCE_ALREADY_EXISTS":
             raise
-        return exp.experiment_id
+        return client.get_experiment_by_name(name).experiment_id  # another agent got there first
 
 
 def _is_locked(exc: BaseException) -> bool:
@@ -226,7 +276,8 @@ def log_run(
 
     ``tags`` holds the eight caller tags; ``git_sha`` / ``git_dirty`` are filled here and may
     not be passed. ``tags["snapshot_sha256"]`` may be a digest or an E02 snapshot path.
-    Nothing is written if validation fails.
+    Nothing is written if validation fails. A run that fails while writing is marked FAILED.
+    Using the MLflow client directly bypasses all of these checks.
     """
     if not _EXPERIMENT_RE.fullmatch(experiment):
         raise TrackingError(f"experiment must match {_EXPERIMENT_RE.pattern}, got {experiment!r}")
@@ -235,9 +286,15 @@ def log_run(
     given = sorted(set(tags) & set(AUTO_TAGS))
     if given:
         raise TrackingError(f"{', '.join(given)} are filled automatically; do not pass them")
+    if "invalid" in tags:
+        raise TrackingError("the invalid tag is set by tooling, not by callers")
     full = dict(tags)
-    if full.get("snapshot_sha256") not in (None, ""):
-        full["snapshot_sha256"] = snapshot_hash(full["snapshot_sha256"])
+    if full.get("snapshot_sha256") in (None, ""):
+        raise TrackingError(
+            "snapshot_sha256 not given: pass the E02 snapshot digest, or the snapshot dir or "
+            "manifest.json to read it from"
+        )
+    full["snapshot_sha256"] = snapshot_hash(full["snapshot_sha256"])
     sha, dirty = git_state()
     full["git_sha"], full["git_dirty"] = sha, str(dirty).lower()
     checked_tags = validate_tags(full)
@@ -252,23 +309,38 @@ def log_run(
 
     client = _client()
 
+    state: dict[str, Any] = {"run_id": None, "batch": False, "files": 0}
+
     def write() -> str:
-        run = client.create_run(
-            _ensure_experiment(client, experiment), run_name=run_name, tags=checked_tags
-        )
-        run_id = run.info.run_id
-        now = int(time.time() * 1000)
-        client.log_batch(
-            run_id,
-            metrics=[Metric(k, v, now, 0) for k, v in checked_metrics.items()],
-            params=[Param(k, str(v)) for k, v in params.items()],
-        )
-        for f in files:
-            client.log_artifact(run_id, str(f))
+        # Every step records its completion, so a retry after a lock error resumes where it
+        # stopped instead of creating a second run.
+        if state["run_id"] is None:
+            run = client.create_run(
+                _ensure_experiment(client, experiment), run_name=run_name, tags=checked_tags
+            )
+            state["run_id"] = run.info.run_id
+        run_id = state["run_id"]
+        if not state["batch"]:
+            now = int(time.time() * 1000)
+            client.log_batch(
+                run_id,
+                metrics=[Metric(k, v, now, 0) for k, v in checked_metrics.items()],
+                params=[Param(k, str(v)) for k, v in params.items()],
+            )
+            state["batch"] = True
+        while state["files"] < len(files):
+            client.log_artifact(run_id, str(files[state["files"]]))
+            state["files"] += 1
         client.set_terminated(run_id, "FINISHED")
         return run_id
 
-    return _with_retry(write)
+    try:
+        return _with_retry(write)
+    except BaseException:
+        if state["run_id"]:
+            with contextlib.suppress(Exception):  # best effort; the original error matters
+                client.set_terminated(state["run_id"], "FAILED")
+        raise
 
 
 # ---- leaderboard ---------------------------------------------------------------------------
@@ -283,6 +355,7 @@ LEADERBOARD_COLUMNS = (
     "git_sha",
     "snapshot hash",
     "dirty",
+    "prereg",
 )
 
 
@@ -302,7 +375,11 @@ def collect_leaderboard(*, split: str = "dev") -> list[dict[str, Any]]:
             max_results=500,
         )
         for run in runs:
-            if run.data.tags.get("invalid") == "true" or run.info.lifecycle_stage != "active":
+            if (
+                run.data.tags.get("invalid") == "true"
+                or run.info.lifecycle_stage != "active"
+                or run.info.status != "FINISHED"
+            ):
                 continue
             m, t = run.data.metrics, run.data.tags
             rows.append(
@@ -316,6 +393,7 @@ def collect_leaderboard(*, split: str = "dev") -> list[dict[str, Any]]:
                     "git_sha": t.get("git_sha", "")[:10],
                     "snapshot": t.get("snapshot_sha256", "")[:12],
                     "dirty": t.get("git_dirty") == "true",
+                    "prereg": t.get("prereg", ""),
                 }
             )
             break  # runs are sorted, so the first valid one is the best
@@ -334,13 +412,22 @@ def render_leaderboard(rows: Sequence[Mapping[str, Any]], fmt: str, *, split: st
             str(r["git_sha"]),
             str(r["snapshot"]),
             "DIRTY" if r["dirty"] else "",
+            str(r.get("prereg", "")),
         ]
         for r in rows
     ]
     cells = [[c.replace("|", "/") for c in row] for row in cells]
+    warnings = []
+    for label, key in (("snapshot_sha256", "snapshot"), ("prereg", "prereg")):
+        values = sorted({str(r.get(key, "")) for r in rows})
+        if len(values) > 1:
+            warnings.append(
+                f"WARNING: ranked runs have different {label} values ({', '.join(values)}); "
+                "they are not directly comparable."
+            )
     title = f"Leaderboard ({split} split, best run per experiment, by mae_24h)"
     if fmt == "confluence":
-        lines = ["||" + "||".join(LEADERBOARD_COLUMNS) + "||"]
+        lines = [*warnings, "||" + "||".join(LEADERBOARD_COLUMNS) + "||"]
         lines += ["|" + "|".join(c or " " for c in row) + "|" for row in cells]
         return "\n".join(lines) + "\n"
     if fmt != "md":
@@ -349,8 +436,9 @@ def render_leaderboard(rows: Sequence[Mapping[str, Any]], fmt: str, *, split: st
         f"# {title}",
         "",
         "Generated by `python -m pm25_forecast.experiments.tracking leaderboard --format md`.",
-        "Invalid runs are excluded; DIRTY marks runs made from uncommitted code.",
+        "Invalid and unfinished runs are excluded; DIRTY marks runs made from uncommitted code.",
         "",
+        *[w for warning in warnings for w in (warning, "")],
         "| " + " | ".join(LEADERBOARD_COLUMNS) + " |",
         "|" + "|".join("---" for _ in LEADERBOARD_COLUMNS) + "|",
     ]
@@ -427,8 +515,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "leaderboard":
         split = "holdout" if args.holdout else "dev"
         text = render_leaderboard(collect_leaderboard(split=split), args.format, split=split)
+        if split == "holdout":
+            print("WARNING: holdout results; never commit them or tune on them.", file=sys.stderr)
         if args.format == "md":
             out = args.out or LEADERBOARD_PATH
+            if split == "holdout" and (args.out is None or out.resolve().is_relative_to(REPO_ROOT)):
+                raise TrackingError("--holdout --format md needs --out outside the repository")
             out.write_text(text)
             print(f"wrote {out}")
         else:

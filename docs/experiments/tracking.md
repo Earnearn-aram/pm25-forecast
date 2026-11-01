@@ -10,14 +10,22 @@ One store for every worktree and agent (Claude and OpenAI alike), outside git:
     ~/pm25-experiments/mlflow/mlflow.db     SQLite backend
     ~/pm25-experiments/mlflow/artifacts/    artifact files
 
-Exact tracking URI used by default (`$HOME` expanded; the helper builds it, paths with spaces are fine):
+Exact tracking URI used by default (the helper builds it; paths with spaces are fine):
 
     MLFLOW_TRACKING_URI=sqlite:////Users/<you>/pm25-experiments/mlflow/mlflow.db?timeout=30
 
-`MLFLOW_TRACKING_URI` in `.env` (placeholder in `.env.example`; blank means the default above)
-overrides it. If you override it with a SQLite URI, keep `?timeout=30`, the SQLite busy timeout.
-Concurrent writers: SQLite waits up to 30 s for the lock, and `log_run` also retries lock errors
-six times with backoff, so two agents logging at once do not fail.
+`MLFLOW_TRACKING_URI` can be set in the environment or in `.env` (cwd or repo root; the process
+environment wins; placeholder in `.env.example`, blank means the default above). `?timeout=30`
+(the SQLite busy timeout) is appended to any sqlite URI that lacks it.
+
+Artifacts always go to an explicit root, never to a per-worktree `./mlruns`: `MLFLOW_ARTIFACT_ROOT`
+(env or `.env`; a path or URI) if set, otherwise the `artifacts/` directory next to the SQLite file.
+A non-sqlite tracking URI requires `MLFLOW_ARTIFACT_ROOT`. Experiments keep the artifact root they
+were created with.
+
+Concurrent writers: SQLite waits up to 30 s for the lock, and `log_run` retries lock errors up to
+six times with backoff, resuming the same run (it never creates a second one). A run that still
+fails is marked FAILED and the leaderboard ignores it.
 
 Cross-worktree write test (KAN-81 build): from the sandboxed agent session a file was written
 to and removed from `~/pm25-experiments/mlflow/` while the shell was in two different directories
@@ -31,8 +39,10 @@ agent session or a different OS user writing at the same time; the two-writer ca
 - Run name: free text, unique per attempt (for example `lgbm-direct-seed1`).
 - Tags (all required): `ticket`, `agent`, `model_name`, `model_family`, `feature_set`, `git_sha`,
   `git_dirty`, `snapshot_sha256`, `split` (`dev`|`holdout`), `prereg`. `git_sha` and `git_dirty` are
-  filled by `log_run` (dirty = tracked files changed; untracked files are ignored) and cannot be
-  passed. `git_dirty` must be false for holdout runs.
+  filled by `log_run` and cannot be passed. Dirty = any tracked change or untracked file outside
+  `report/`, `.claude/`, `.codex/`, `out/`. `git_dirty` must be false for holdout runs.
+- `invalid` is set by tooling only; `log_run` rejects it as a caller tag. Writing with the MLflow
+  client or UI directly bypasses every check here; such runs are not valid evidence.
 - Required metrics: `mae_24h`, `rmse_24h`. All others of protocol section 11 (including
   `n_pairs_24h`) are optional; undefined values are omitted, never logged as 0.
 
@@ -68,6 +78,8 @@ Copy it, fill it, then render it to `report/report.html` (git-ignored) and attac
     uv run --group experiments python -m pm25_forecast.experiments.tracking render-report \
         notebooks/<file>.ipynb --run-id <RUN_ID> --execute
 
+`--execute` runs the notebook's code with your permissions; only render notebooks you trust.
+
 Strip notebook outputs before committing (a pre-commit hook for this would need a new dependency, so it is a manual step):
 
     uv run --group experiments jupyter nbconvert --clear-output --inplace notebooks/<file>.ipynb
@@ -75,7 +87,10 @@ Strip notebook outputs before committing (a pre-commit hook for this would need 
 ## Leaderboard
 
 Best valid run (lowest `mae_24h`, `invalid` runs excluded) of each `kan78/*` experiment, dev split;
-`--holdout` shows the holdout split instead. Runs from uncommitted code are marked DIRTY.
+`--holdout` shows the holdout split instead; with `--format md` it requires `--out` outside the
+repository (holdout numbers must not land in tracked files) and prints a warning. Only FINISHED
+runs count. Runs from uncommitted code are marked DIRTY, and a warning is added when the ranked runs
+have different `snapshot_sha256` or `prereg` values (they are not directly comparable).
 
     uv run --group experiments python -m pm25_forecast.experiments.tracking leaderboard --format md
     uv run --group experiments python -m pm25_forecast.experiments.tracking leaderboard --format confluence

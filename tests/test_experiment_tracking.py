@@ -27,17 +27,53 @@ GOOD = {"mae_24h": 5.0, "rmse_24h": 7.0, "n_pairs_24h": 100}
 EXP = "kan78/e00-test"
 
 
-def test_default_store_is_shared_sqlite(monkeypatch):
-    monkeypatch.delenv(tracking.STORE_ENV, raising=False)
+@pytest.fixture
+def clean_env(tmp_path, monkeypatch):
+    """No MLFLOW_* in the process, and no .env reachable from cwd or the (patched) repo root."""
+    for name in (tracking.STORE_ENV, tracking.ARTIFACT_ENV):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "cwd").mkdir(exist_ok=True)
+    (tmp_path / "repo").mkdir(exist_ok=True)
+    monkeypatch.chdir(tmp_path / "cwd")
+    monkeypatch.setattr(tracking, "REPO_ROOT", tmp_path / "repo")
+    return tmp_path
+
+
+def test_default_store_is_shared_sqlite(clean_env):
     assert "/pm25-experiments/mlflow/mlflow.db?timeout=" in tracking.tracking_uri()
     assert tracking.tracking_uri().startswith("sqlite:///")
 
 
-def test_env_overrides_store(monkeypatch):
-    monkeypatch.setenv(tracking.STORE_ENV, "sqlite:///tmp/x.db")
-    assert tracking.tracking_uri() == "sqlite:///tmp/x.db"
+def test_env_overrides_store_and_gets_busy_timeout(clean_env, monkeypatch):
+    monkeypatch.setenv(tracking.STORE_ENV, "sqlite:////tmp/x.db")
+    assert tracking.tracking_uri() == "sqlite:////tmp/x.db?timeout=30"
+    monkeypatch.setenv(tracking.STORE_ENV, "sqlite:////tmp/x.db?timeout=5")
+    assert tracking.tracking_uri() == "sqlite:////tmp/x.db?timeout=5"
     monkeypatch.setenv(tracking.STORE_ENV, "  ")
     assert "pm25-experiments" in tracking.tracking_uri()
+
+
+def test_dotenv_is_read_and_process_env_wins(clean_env, monkeypatch):
+    (clean_env / "cwd" / ".env").write_text("MLFLOW_TRACKING_URI=sqlite:////tmp/dot env/a.db\n")
+    assert tracking.tracking_uri() == "sqlite:////tmp/dot env/a.db?timeout=30"
+    monkeypatch.setenv(tracking.STORE_ENV, "sqlite:////tmp/b.db")
+    assert tracking.tracking_uri().startswith("sqlite:////tmp/b.db")
+
+
+def test_repo_root_dotenv_is_read(clean_env):
+    (clean_env / "repo" / ".env").write_text(f"{tracking.ARTIFACT_ENV}={clean_env}/arts\n")
+    assert tracking.artifact_root() == (clean_env / "arts").as_uri()
+
+
+def test_artifact_root_next_to_db_or_explicit(clean_env, monkeypatch):
+    monkeypatch.setenv(tracking.STORE_ENV, f"sqlite:///{clean_env / 'my store' / 'm.db'}")
+    assert tracking.artifact_root() == (clean_env / "my store" / "artifacts").as_uri()
+    monkeypatch.setenv(tracking.ARTIFACT_ENV, str(clean_env / "elsewhere"))
+    assert tracking.artifact_root() == (clean_env / "elsewhere").as_uri()
+    monkeypatch.delenv(tracking.ARTIFACT_ENV)
+    monkeypatch.setenv(tracking.STORE_ENV, "postgresql://u@h/db")
+    with pytest.raises(tracking.TrackingError, match=tracking.ARTIFACT_ENV):
+        tracking.artifact_root()
 
 
 def test_valid_tags_pass():
@@ -95,13 +131,34 @@ def test_file_sha256(tmp_path):
     assert tracking.file_sha256(p) == hashlib.sha256(b"abc").hexdigest()
 
 
+def test_git_state_counts_untracked_but_not_output_dirs(tmp_path):
+    import subprocess
+
+    def git(*a):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@x", *a], cwd=tmp_path, check=True
+        )
+
+    git("init", "-q")
+    (tmp_path / "a.py").write_text("x = 1\n")
+    git("add", ".")
+    git("commit", "-qm", "init")
+    assert tracking.git_state(tmp_path)[1] is False
+    for d in ("report", ".claude", "out"):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "f.html").write_text("x")
+    assert tracking.git_state(tmp_path)[1] is False
+    (tmp_path / "new_module.py").write_text("y = 2\n")
+    assert tracking.git_state(tmp_path)[1] is True
+
+
 def test_git_state_shape():
     sha, dirty = tracking.git_state()
     assert len(sha) == 40 and isinstance(dirty, bool)
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(clean_env, tmp_path, monkeypatch):
     mlflow = pytest.importorskip("mlflow")
     uri = f"sqlite:///{tmp_path / 'my store' / 'm.db'}"
     monkeypatch.setenv(tracking.STORE_ENV, uri)
@@ -212,18 +269,27 @@ ROW = {
     "git_sha": "abc",
     "snapshot": "def",
     "dirty": True,
+    "prereg": "p1",
 }
 
 
 def test_render_leaderboard_formats():
     md = tracking.render_leaderboard([ROW], "md")
     assert "| experiment | run | mae_24h |" in md
-    assert "| kan78/e1 | a (12345678) | 5.000 | 7.000 |  | 90 | abc | def | DIRTY |" in md
+    assert "| kan78/e1 | a (12345678) | 5.000 | 7.000 |  | 90 | abc | def | DIRTY | p1 |" in md
     wiki = tracking.render_leaderboard([ROW], "confluence")
     assert wiki.startswith("||experiment||run||mae_24h||")
     assert "|kan78/e1|" in wiki and "DIRTY" in wiki
     with pytest.raises(tracking.TrackingError):
         tracking.render_leaderboard([], "csv")
+    assert "WARNING" not in md
+
+
+def test_leaderboard_warns_on_mixed_snapshots_or_prereg():
+    other = {**ROW, "experiment": "kan78/e2", "snapshot": "zzz", "prereg": "p2"}
+    for fmt in ("md", "confluence"):
+        text = tracking.render_leaderboard([ROW, other], fmt)
+        assert "different snapshot_sha256" in text and "different prereg" in text
 
 
 def test_leaderboard_best_run_dev_only_flags_invalid(store, monkeypatch):
@@ -285,3 +351,72 @@ def test_render_report_attaches_html(store):
     assert html.name == "report.html" and html.is_file()
     names = [a.path for a in mlflow.MlflowClient().list_artifacts(run_id, "report")]
     assert names == ["report/report.html"]
+
+
+def test_experiment_artifacts_go_to_the_shared_store_not_cwd(store):
+    import mlflow
+
+    tracking.log_run(EXP, "r", {}, GOOD, caller_tags())
+    exp = mlflow.MlflowClient().get_experiment_by_name(EXP)
+    assert exp.artifact_location == (store / "my store" / "artifacts").as_uri()
+    assert not (store / "cwd" / "mlruns").exists()
+
+
+def test_invalid_tag_and_missing_snapshot_refused(store):
+    with pytest.raises(tracking.TrackingError, match="invalid tag"):
+        tracking.log_run(EXP, "r", {}, GOOD, {**caller_tags(), "invalid": "false"})
+    t = caller_tags()
+    del t["snapshot_sha256"]
+    with pytest.raises(tracking.TrackingError, match="snapshot_sha256 not given"):
+        tracking.log_run(EXP, "r", {}, GOOD, t)
+    (store / "m.json").write_text("{}")
+    with pytest.raises(tracking.TrackingError, match="no valid snapshot_sha256"):
+        tracking.log_run(EXP, "r", {}, GOOD, caller_tags(snapshot_sha256=str(store / "m.json")))
+    assert runs() == []
+
+
+def test_lock_error_mid_write_resumes_same_run(store, monkeypatch):
+    import mlflow
+
+    monkeypatch.setattr(tracking.time, "sleep", lambda _s: None)
+    original = mlflow.MlflowClient.log_batch
+    calls = []
+
+    def flaky(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("database is locked")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(mlflow.MlflowClient, "log_batch", flaky)
+    run_id = tracking.log_run(EXP, "r", {"a": 1}, GOOD, caller_tags())
+    (run,) = runs()
+    assert run.info.run_id == run_id and run.info.status == "FINISHED"
+    assert run.data.metrics["mae_24h"] == 5.0
+
+
+def test_failed_write_marks_run_failed_and_leaderboard_skips_it(store, monkeypatch):
+    import mlflow
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(mlflow.MlflowClient, "log_batch", boom)
+    with pytest.raises(RuntimeError, match="disk"):
+        tracking.log_run(EXP, "r", {}, GOOD, caller_tags())
+    (run,) = runs()
+    assert run.info.status == "FAILED"
+    assert tracking.collect_leaderboard() == []
+
+
+def test_holdout_md_leaderboard_must_go_outside_repo(store, capsys):
+    repo = store / "repo"
+    tracking.log_run("kan78/e1", "a", {}, GOOD, caller_tags(split="holdout"))
+    with pytest.raises(tracking.TrackingError, match="outside the repository"):
+        tracking.main(["leaderboard", "--holdout", "--format", "md"])
+    with pytest.raises(tracking.TrackingError, match="outside the repository"):
+        tracking.main(["leaderboard", "--holdout", "--format", "md", "--out", str(repo / "x.md")])
+    out = store / "holdout.md"
+    assert tracking.main(["leaderboard", "--holdout", "--format", "md", "--out", str(out)]) == 0
+    assert "kan78/e1" in out.read_text()
+    assert "WARNING: holdout" in capsys.readouterr().err
