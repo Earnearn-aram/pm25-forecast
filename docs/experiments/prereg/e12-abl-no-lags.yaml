@@ -1,0 +1,35 @@
+id: e12-abl-no-lags
+ticket: KAN-89
+hypothesis: >-
+  Feature ablation of the E12 best configuration (fs_v2_full, objective l2, target delta; the
+  lowest dev mae_24h of the 12 primary variants): dropping the lags group raises +24 h MAE
+  versus the full set, i.e. the group carries signal. Dev only; one of 4 ablation variants
+  (16 dev runs in total); dev CIs are unadjusted.
+model_family: lightgbm
+model: gbm-pooled-l2-delta-no-lags
+feature_set: fs_v2_full-no-lags
+params:
+  feature_set: fs_v2_full
+  objective: l2
+  target: delta
+  drop_groups: [lags]
+  budget: 8
+  inner_folds: 3
+  huber_alpha: 8.0
+  num_threads: 4
+  seed: 20261101
+  log_dir: out/kan89
+  log_name: e12-abl-no-lags
+horizons: [6, 12, 24]
+expected_effect:
+  metric: diff_vs_smoother_24h
+  direction: negative
+  magnitude: -0.2
+decision_rule: >-
+  Descriptive: report the change in mae_24h and in diff_vs_smoother_24h versus the full-set run
+  e12-full-l2-delta. A group matters if removing it raises mae_24h by more than 0.05 ug/m3.
+  No holdout run is made in this ticket.
+split: dev
+final: false
+finalists: 1
+author_agent: claude-data-scientist
