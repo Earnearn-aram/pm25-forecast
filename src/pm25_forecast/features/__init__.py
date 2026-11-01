@@ -117,3 +117,35 @@ def build_features(
         "pm25_same_hour_24h": same_hour,
         "cams_pm25": None if cams is None else cams[1],
     }
+
+
+# KAN-76: inputs of the one-parameter smoother. Kept apart from FEATURE_NAMES on purpose: the
+# LightGBM training, drift references and manifests are built on FEATURE_NAMES and must not change.
+MEAN_24H_NAME = "pm25_mean_24h"
+SMOOTHER_FEATURE_NAMES: tuple[str, ...] = ("pm25_latest", MEAN_24H_NAME)
+MEAN_24H_WINDOW = timedelta(hours=24)
+MEAN_24H_END_LAG = timedelta(hours=1)  # the origin-hour reading is never in yet (1 h lag)
+
+
+def mean_24h(observations: Iterable[Any], prediction_time: datetime) -> float | None:
+    """Mean of the usable readings with ``prediction_time - 24h <= ts <= prediction_time - 1h``.
+
+    This is the ``mean24`` of the KAN-65 analysis (hours o-24 .. o-1). Readings that are not yet
+    available at ``prediction_time``, missing or negative are ignored; no readings gives None
+    (nothing is invented). Same record shapes as ``build_features``.
+    """
+    prediction_time = require_utc(prediction_time)
+    start, end = prediction_time - MEAN_24H_WINDOW, prediction_time - MEAN_24H_END_LAG
+    values: list[float] = []
+    for row in _rows(observations, (("ts",), ("pm25", "value"), ("available_at", "ingested_at"))):
+        ts, value = row["ts"], _usable(row["pm25"])
+        if ts is None or value is None:
+            continue
+        ts = require_utc(ts)
+        if not start <= ts <= end:
+            continue
+        available_at = row["available_at"]
+        if available_at is not None and require_utc(available_at) > prediction_time:
+            continue
+        values.append(value)
+    return sum(values) / len(values) if values else None

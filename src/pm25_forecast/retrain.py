@@ -65,6 +65,7 @@ from pm25_forecast.storage import db
 from pm25_forecast.storage.guard import RunSkipped, run_entrypoint
 from pm25_forecast.storage.registry import (
     SELECT_CHAMPION,
+    is_smoother_bundle,
     last_retrain_event_at,
     promote_model,
     publish_model,
@@ -500,6 +501,8 @@ def run(
         if challenger_version and challenger_version not in already_scored:
             try:
                 challenger_artifact, challenger_manifest = read_model(con, challenger_version)
+                if is_smoother_bundle(challenger_artifact):  # KAN-76: no booster to compare
+                    raise ModelLoadError("smoother challenger is scored by Score, not by retrain")
                 challenger = load_serving_model(
                     challenger_version, challenger_artifact, challenger_manifest
                 )

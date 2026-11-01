@@ -1,0 +1,17 @@
+{
+  "_comment": "Synthetic readings for tests/test_smoother.py. Prediction time is 2026-10-28T12:00Z, so mean24 covers 2026-10-27T12:00Z .. 2026-10-28T11:00Z inclusive (hours o-24 .. o-1). In window: 10, 20, 30 and 60 (mean 30). Excluded: 900 (25 h old), 700 (the origin hour itself), 800 (future), 500 (ingested after the prediction time), a missing and a negative reading.",
+  "prediction_time": "2026-10-28T12:00:00+00:00",
+  "observations": [
+    {"ts": "2026-10-27T11:00:00+00:00", "pm25": 900.0, "ingested_at": "2026-10-27T11:05:00+00:00"},
+    {"ts": "2026-10-27T12:00:00+00:00", "pm25": 10.0, "ingested_at": "2026-10-27T12:05:00+00:00"},
+    {"ts": "2026-10-27T20:00:00+00:00", "pm25": 20.0, "ingested_at": "2026-10-27T20:05:00+00:00"},
+    {"ts": "2026-10-28T02:00:00+00:00", "pm25": null, "ingested_at": "2026-10-28T02:05:00+00:00"},
+    {"ts": "2026-10-28T05:00:00+00:00", "pm25": -3.0, "ingested_at": "2026-10-28T05:05:00+00:00"},
+    {"ts": "2026-10-28T08:00:00+00:00", "pm25": 30.0, "ingested_at": "2026-10-28T08:05:00+00:00"},
+    {"ts": "2026-10-28T09:00:00+00:00", "pm25": 500.0, "ingested_at": "2026-10-28T13:00:00+00:00"},
+    {"ts": "2026-10-28T11:00:00+00:00", "pm25": 60.0, "ingested_at": "2026-10-28T11:05:00+00:00"},
+    {"ts": "2026-10-28T12:00:00+00:00", "pm25": 700.0, "ingested_at": "2026-10-28T12:05:00+00:00"},
+    {"ts": "2026-10-28T13:00:00+00:00", "pm25": 800.0, "ingested_at": "2026-10-28T13:05:00+00:00"}
+  ],
+  "expected_mean_24h": 30.0
+}

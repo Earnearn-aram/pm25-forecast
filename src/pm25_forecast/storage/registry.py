@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pm25_forecast.collector import open_db
+from pm25_forecast.features import SMOOTHER_FEATURE_NAMES
 from pm25_forecast.storage import db
 
 INSERT_MODEL = """
@@ -114,6 +115,15 @@ def validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return dict(manifest)
 
 
+def is_smoother_bundle(artifact: bytes) -> bool:
+    """True for a KAN-76 smoother bundle (``{"format": 1, "smoother": {...}}``)."""
+    try:
+        bundle = json.loads(artifact)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(bundle, dict) and "smoother" in bundle
+
+
 def _validate_artifact_features(artifact: bytes, feature_list: list[str]) -> None:
     """Require the manifest's ordered features to match every booster in the bundle."""
     try:
@@ -122,6 +132,14 @@ def _validate_artifact_features(artifact: bytes, feature_list: list[str]) -> Non
         raise ValueError("model artifact is not a supported JSON bundle") from exc
     if not isinstance(bundle, dict) or bundle.get("format") != 1:
         raise ValueError("model artifact is not a supported JSON bundle")
+    if "smoother" in bundle:  # KAN-76: no booster; the inputs are fixed by the shared features
+        spec = bundle["smoother"]
+        beta = spec.get("beta") if isinstance(spec, dict) else None
+        if isinstance(beta, bool) or not isinstance(beta, int | float) or not 0 <= beta <= 1:
+            raise ValueError("smoother artifact needs a beta in [0, 1]")
+        if feature_list != list(SMOOTHER_FEATURE_NAMES):
+            raise ValueError("manifest feature_list does not match the smoother inputs")
+        return
     if isinstance(bundle.get("horizons"), dict) and bundle["horizons"]:
         model_texts = list(bundle["horizons"].values())
     elif isinstance(bundle.get("booster"), str):
