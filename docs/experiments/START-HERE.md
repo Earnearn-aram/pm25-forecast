@@ -52,7 +52,7 @@ Note: Codex keeps `.git` read-only inside the sandbox even in a writable root. I
 
 5. Copy `notebooks/_template_experiment_report.ipynb`, fill the 8 sections from the run, and render it:
    `uv run --group experiments python -m pm25_forecast.experiments.tracking render-report <notebook> --run-id <id>`.
-   Then make the HTML report for the ticket (plots, explanations, your `e*.md` narrative): `uv run --group experiments python -m pm25_forecast.experiments.report --ticket KAN-<n> --status "in review"`, then `... report index`, and commit `docs/experiments/reports/`. Put a `Verdict: **...**` line under the title of your `e*.md`; the index shows it. Reports hold aggregates only and are built from dev runs.
+   Then make the HTML report for the ticket (plots, explanations, your `e*.md` narrative): `uv run --group experiments python -m pm25_forecast.experiments.report --ticket KAN-<n>`, then `... report index`, and commit `docs/experiments/reports/`. Put a `Verdict: **...**` line under the title of your `e*.md`; the index shows it. Reports hold aggregates only and are built from dev runs.
 6. Update the leaderboard: `... tracking leaderboard --format md`, commit `docs/experiments/leaderboard.md`.
 7. Before pushing, all of these must pass: `uv sync --locked`, `uv run ruff check`, `uv run ruff format --check`, `uv run pytest`, `uv run pre-commit run --all-files`.
 8. Open the PR. The description lists the acceptance criteria met and how, what you skipped and why, and the MLflow run ids. Add a Jira comment with the result in three lines: question, answer, run ids.

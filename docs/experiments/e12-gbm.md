@@ -1,5 +1,7 @@
 # E12 Gradient boosting: pooled LightGBM (KAN-89)
 
+Verdict: **NO WIN**. No LightGBM variant beats the smoother; all 12 CIs include zero (dev only).
+
 Question: does a tuned, pooled LightGBM on the v2 feature sets (`fs_v2_core`, `fs_v2_full`) beat persistence and the smoother at +24 h on the dev folds? Dev split only (5 weekly folds, 5 stations, 4200 pairs per horizon); the holdout was never scored (`--holdout` not used). Snapshot `e02-v1` (sha256 `a00cfc9e...`), air4thai era, `available_at = ts + 1 h` (protocol section 2).
 
 ## Result in one paragraph

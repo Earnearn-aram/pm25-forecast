@@ -6,6 +6,7 @@
  "dirty": false,
  "finding": "No variant beats the smoother: all 12 paired 95% CIs include zero.",
  "n_variants": 12,
+ "outcome": "none",
  "plots": [
   "mae",
   "paired",
@@ -16,8 +17,8 @@
  "snapshots": [
   "a00cfc9edd4c"
  ],
- "status": "in review (PR open)",
+ "status": "written up",
  "ticket": "KAN-89",
  "title": "E12 Gradient boosting: pooled LightGBM (KAN-89)",
- "verdict": "Nothing beats the smoother."
+ "verdict": "NO WIN"
 }

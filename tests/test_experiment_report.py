@@ -145,7 +145,7 @@ def test_holdout_runs_are_never_read(populated):
 
 def test_report_is_self_contained_with_all_plots(populated):
     out = populated / "out"
-    path = report.write_ticket_report("KAN-90", out, docs(populated), "in review")
+    path = report.write_ticket_report("KAN-90", out, docs(populated))
     text = path.read_text()
     assert text.count("data:image/png;base64,") == 5  # mae, paired, folds, breakdown, ablation
     assert 'src="http' not in text and 'href="http' not in text
@@ -153,7 +153,7 @@ def test_report_is_self_contained_with_all_plots(populated):
     assert "How to read this" in text and "entirely below zero" in text
     # prereg hypothesis and decision rule, narrative, verdict, status
     assert "Model A is better than the smoother" in text
-    assert "NO WIN" in text and "in review" in text
+    assert "NO WIN" in text and "written up" in text
     assert "&lt;b&gt;experiment&lt;/b&gt;" in text  # markdown input is escaped
     assert "<code>x&lt;y</code>" in text
     side = json.loads((out / "KAN-90.json").read_text())
@@ -214,7 +214,7 @@ def test_unknown_ticket_and_bad_ticket(store, tmp_path):
 
 def test_index_has_leaderboard_ticket_rows_and_warnings(populated, monkeypatch):
     out = populated / "out"
-    report.write_ticket_report("KAN-90", out, docs(populated), "merged")
+    report.write_ticket_report("KAN-90", out, docs(populated))
     other = "c" * 64
     add_run(populated, "e00-demo", 1.0, -0.1, [-0.2, 0.0], ticket="KAN-81", snapshot_sha256=other)
     monkeypatch.setattr(tracking, "git_state", lambda: ("e" * 40, True))  # the next run is dirty
@@ -222,7 +222,7 @@ def test_index_has_leaderboard_ticket_rows_and_warnings(populated, monkeypatch):
     assert report.main(["index", "--out", str(out)]) == 0
     text = (out / "index.html").read_text()
     assert '<a href="KAN-90.html">KAN-90</a>' in text
-    assert "NO WIN" in text and "merged" in text
+    assert "NO WIN" in text and "written up" in text
     assert "no report yet" in text and "--ticket KAN-91" in text
     assert "DIRTY" in text
     assert "different snapshot_sha256 values" in text
@@ -248,3 +248,31 @@ def test_markdown_subset():
     assert 'href="https://x.y"' in html and "javascript:" in html and 'href="javascript' not in html
     assert "<pre><code>code &lt;x&gt;</code></pre>" in html
     assert re.search(r"<p>text with <code>c</code>", html)
+
+
+def test_verdict_only_from_explicit_line():
+    assert report._verdict("# T\n\n**Caveat** here\nVerdict: **NO WIN** x") == "NO WIN"
+    assert report._verdict("# T\n\n**Caveat** only\n") == ""
+
+
+def test_verdict_claims_win():
+    assert report.verdict_claims_win("WIN")
+    assert not report.verdict_claims_win("NO WIN")
+    assert not report.verdict_claims_win("PIVOT")
+
+
+def test_index_flags_mismatch_and_missing_verdict():
+    base = {"finding": "f", "outcome": "none"}
+    assert "MISMATCH" in report._verdict_cell({**base, "verdict": "WIN"})
+    assert "MISMATCH" in report._verdict_cell({**base, "outcome": "win", "verdict": "NO WIN"})
+    ok = report._verdict_cell({**base, "verdict": "NO WIN"})
+    assert "MISMATCH" not in ok and "Computed: f" in ok
+    assert "no explicit verdict" in report._verdict_cell({**base, "verdict": ""})
+
+
+def test_plot_mae_without_baselines_has_clean_caption(store):
+    add_run(store, "e90-a", 3.70, -0.20, [-0.40, -0.01])
+    (v,) = report.collect_variants("KAN-90")
+    v.baselines = {}
+    plot = report.plot_mae([v])
+    assert plot.caption.startswith("Variants are sorted") and "None" not in plot.title

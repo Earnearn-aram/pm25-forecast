@@ -6,6 +6,7 @@
  "dirty": false,
  "finding": "No variant beats the smoother: all 6 paired 95% CIs include zero.",
  "n_variants": 6,
+ "outcome": "none",
  "plots": [
   "mae",
   "paired",
@@ -15,7 +16,7 @@
  "snapshots": [
   "a00cfc9edd4c"
  ],
- "status": "merged",
+ "status": "written up",
  "ticket": "KAN-88",
  "title": "E11: weather-forecast features (KAN-88)",
  "verdict": "PIVOT"

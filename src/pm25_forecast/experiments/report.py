@@ -72,6 +72,8 @@ class Variant:
     baselines: dict[str, float] = field(default_factory=dict)
     fold_starts: list[str] = field(default_factory=list)
     has_eval: bool = False
+    block_h: int = 72
+    sens_blocks: list[int] = field(default_factory=list)
     invalid_reasons: list[str] = field(default_factory=list)
 
     @property
@@ -107,6 +109,11 @@ def _read_eval(client: Any, run_id: str, v: Variant) -> None:
     except Exception:  # missing or malformed artifact: the variant stays table-only
         return
     v.has_eval = True
+    boot = data.get("bootstrap") or {}
+    v.block_h = int(boot.get("primary_block_h", v.block_h))
+    v.sens_blocks = [int(b) for b in boot.get("sensitivity_blocks_h") or []]
+    if "ci_level" in data:
+        v.ci_level = float(data["ci_level"])
     v.invalid_reasons = [str(r) for r in data.get("invalid_reasons") or []]
     v.fold_starts = [str(x) for x in (data.get("plan") or {}).get("fold_starts") or []]
     vs = score.get("vs_smoother") or {}
@@ -305,12 +312,8 @@ def find_narrative(ticket: str, docs_dir: Path) -> Narrative:
 
 
 def _verdict(text: str) -> str:
-    """'Verdict: **X**' if present, else the first bold phrase near the top, else empty."""
-    m = re.search(r"Verdict:\s*\*\*(.+?)\*\*", text)
-    if m:
-        return m.group(1).strip()
-    head = "\n".join(text.splitlines()[:30])
-    m = re.search(r"\*\*(.+?)\*\*", head)
+    """The 'Verdict: **X**' line of the write-up; empty when there is none (never guessed)."""
+    m = re.search(r"^Verdict:\s*\*\*(.+?)\*\*", text, flags=re.M)
     return m.group(1).strip() if m else ""
 
 
@@ -394,7 +397,11 @@ def plot_mae(variants: Sequence[Variant]) -> Plot | None:
         return None
     pers, smooth = _ref(rows, "persistence"), _ref(rows, "smoother")
     best = rows[0]
-    title = f"Lowest +24 h error is {best.mae:.2f} ({best.name}); smoother {smooth:.2f}, persistence {pers:.2f}"
+    title = f"Lowest +24 h error is {best.mae:.2f} ({best.name})"
+    if smooth is not None:
+        title += f"; smoother {smooth:.2f}"
+    if pers is not None:
+        title += f"; persistence {pers:.2f}"
     fig = _fig(9, 0.38 * len(rows) + 1.8)
     ax = fig.add_subplot()
     ys = list(range(len(rows)))[::-1]
@@ -413,15 +420,15 @@ def plot_mae(variants: Sequence[Variant]) -> Plot | None:
     ax.set_title(_wrap(title), fontsize=13, loc="left")
     ax.legend(loc="lower right", fontsize=10, frameon=True)
     _style(ax)
-    gap = None if smooth is None else best.mae - smooth
-    caption = (
-        f"Variants are sorted by MAE (best on top). The best variant is {best.mae:.3f}, "
-        f"{abs(gap):.3f} {'below' if gap < 0 else 'above'} the smoother"
-        if gap is not None
-        else ""
-    )
+    caption = "Variants are sorted by MAE (best on top)."
+    if smooth is not None:
+        gap = best.mae - smooth
+        caption += (
+            f" The best variant is {best.mae:.3f}, {abs(gap):.3f} "
+            f"{'below' if gap < 0 else 'above'} the smoother."
+        )
     caption += (
-        ". A gap this size is only meaningful if the paired interval in the next plot is "
+        " A gap this size is only meaningful if the paired interval in the next plot is "
         "entirely below zero; the lowest MAE of many variants is partly luck."
     )
     how = (
@@ -438,6 +445,7 @@ def plot_paired(variants: Sequence[Variant]) -> Plot | None:
     if not rows:
         return None
     k = sum(1 for v in rows if v.ci is not None)
+    lvl, blk, sens = _cfg(variants)
     clean = [v for v in rows if v.status == "clean"]
     frag = [v for v in rows if v.status == "fragile"]
     if clean:
@@ -448,7 +456,7 @@ def plot_paired(variants: Sequence[Variant]) -> Plot | None:
     elif frag:
         title = f"No variant clearly beats the smoother: {len(frag)} CI below zero but fragile"
     else:
-        title = f"No variant beats the smoother: all {k} of the 95% CIs reach zero"
+        title = f"No variant beats the smoother: all {k} of the {lvl} CIs reach zero"
     fig = _fig(9, 0.38 * len(rows) + 1.9)
     ax = fig.add_subplot()
     ys = list(range(len(rows)))[::-1]
@@ -480,15 +488,15 @@ def plot_paired(variants: Sequence[Variant]) -> Plot | None:
     ax.legend(loc="best", fontsize=10, frameon=True)
     _style(ax)
     caption = (
-        f"Bars are 95% paired block-bootstrap CIs (72 h blocks) on the same {rows[0].n_pairs or ''} "
+        f"Bars are {lvl} paired block-bootstrap CIs ({blk} h blocks) on the same {rows[0].n_pairs or ''} "
         f"station-hours. {k} variants were compared and the intervals are unadjusted for that "
-        f"(exploratory), so about one in twenty would cross zero by chance alone. "
+        f"(exploratory), so some would cross zero by chance alone. "
         "Selecting the best of many also makes the winner look better than it is."
     )
     if frag:
         names = ", ".join(v.name for v in frag)
         caption += (
-            f" Fragile: {names} (CI below zero with 72 h blocks but not with 24 h or 168 h blocks), "
+            f" Fragile: {names} (CI below zero with {blk} h blocks but not with {sens} blocks), "
             "so do not read it as a win."
         )
     how = (
@@ -559,6 +567,14 @@ def plot_folds(variants: Sequence[Variant]) -> Plot | None:
     return Plot(
         "folds", title, _png(fig), "Heatmap of per-fold MAE difference vs smoother", caption, how
     )
+
+
+def _cfg(variants: Sequence[Variant]) -> tuple[str, int, str]:
+    """(CI level text, primary block hours, sensitivity blocks text) from the run data."""
+    v = next((x for x in variants if x.kind == "primary" and x.has_eval), None)
+    level = v.ci_level if v else PRIMARY_CI_LEVEL
+    sens = v.sens_blocks if v and v.sens_blocks else [24, 168]
+    return f"{level * 100:g}%", (v.block_h if v else 72), " or ".join(f"{b} h" for b in sens)
 
 
 def best_variant(variants: Sequence[Variant]) -> Variant | None:
@@ -749,8 +765,8 @@ GLOSSARY = (
         "The percentage by which a model's MAE is below persistence's. 0% means no better than persistence. The smoother already earns about 10%, so a model must beat that, not only persistence.",
     ),
     (
-        "Paired CI (95%, 72 h blocks)",
-        "For the same station-hours we subtract the smoother's error from the model's error and average. Negative means the model is better. The 95% confidence interval is the plausible range for that average, from a block bootstrap (72 h blocks, because neighbouring hours are correlated).",
+        "Paired CI ({lvl}, {blk} h blocks)",
+        "For the same station-hours we subtract the smoother's error from the model's error and average. Negative means the model is better. The {lvl} confidence interval is the plausible range for that average, from a block bootstrap ({blk} h blocks, because neighbouring hours are correlated).",
     ),
     (
         "Why the CI must be entirely below zero",
@@ -762,18 +778,38 @@ GLOSSARY = (
     ),
     (
         "Fragile",
-        "The 72 h CI is below zero but the interval flips to include zero when the block length is changed to 24 h or 168 h. The conclusion depends on an analysis choice, so it is not trusted.",
+        "The {blk} h CI is below zero but the interval flips to include zero when the block length is changed to {sens}. The conclusion depends on an analysis choice, so it is not trusted.",
     ),
     (
         "Exploratory / unadjusted",
-        "When many variants are tried, some look good by chance (at 95%, about 1 in 20). Intervals here are not corrected for that, so a lone 'success' among many is a lead to test on the holdout, not a result.",
+        "When many variants are tried, some look good by chance (at {lvl}, about 1 in {odds}). Intervals here are not corrected for that, so a lone 'success' among many is a lead to test on the holdout, not a result.",
     ),
 )
 
 
-def _glossary_html() -> str:
-    items = "".join(f"<dt>{_e(t)}</dt><dd>{_e(d)}</dd>" for t, d in GLOSSARY)
+def _glossary_html(variants: Sequence[Variant]) -> str:
+    lvl, blk, sens = _cfg(variants)
+    odds = round(1 / max(1e-9, 1 - float(lvl.rstrip("%")) / 100))
+    fill = {"lvl": lvl, "blk": blk, "sens": sens, "odds": odds}
+    items = "".join(
+        f"<dt>{_e(t.format(**fill))}</dt><dd>{_e(d.format(**fill))}</dd>" for t, d in GLOSSARY
+    )
     return f'<div class="box"><h4>How to read this report</h4><dl>{items}</dl></div>'
+
+
+def outcome(variants: Sequence[Variant]) -> str:
+    """win (some CI entirely below zero, not fragile) | fragile | none, from the numbers."""
+    rows = [v for v in variants if v.kind == "primary" and v.has_eval and v.ci is not None]
+    if any(v.status == "clean" for v in rows):
+        return "win"
+    return "fragile" if any(v.status == "fragile" for v in rows) else "none"
+
+
+def verdict_claims_win(verdict: str) -> bool:
+    """Does the written verdict claim a win? Negations (no, not, nothing, stop, pivot) cancel it."""
+    v = verdict.lower()
+    negated = re.search(r"\b(no|not|nothing|none|never|stop|pivot|fails?)\b", v)
+    return bool(re.search(r"\b(win|go|beats?|improves?)\b", v)) and not negated
 
 
 def headline(variants: Sequence[Variant]) -> str:
@@ -784,9 +820,10 @@ def headline(variants: Sequence[Variant]) -> str:
     clean = [v for v in rows if v.status == "clean"]
     frag = [v for v in rows if v.status == "fragile"]
     k = len(rows)
+    lvl = _cfg(variants)[0]
     if clean:
         return (
-            f"{len(clean)} of {k} variants have a 95% CI vs the smoother entirely below zero on dev "
+            f"{len(clean)} of {k} variants have a {lvl} CI vs the smoother entirely below zero on dev "
             f"({', '.join(v.name for v in clean)}). Exploratory and unadjusted for {k} comparisons; "
             "dev only, so not evidence of holdout performance."
         )
@@ -795,7 +832,7 @@ def headline(variants: Sequence[Variant]) -> str:
             f"No variant clearly beats the smoother. {len(frag)} of {k} have a CI below zero but "
             f"are fragile ({', '.join(v.name for v in frag)})."
         )
-    return f"No variant beats the smoother: all {k} paired 95% CIs include zero."
+    return f"No variant beats the smoother: all {k} paired {lvl} CIs include zero."
 
 
 def _variant_table(variants: Sequence[Variant]) -> str:
@@ -804,7 +841,7 @@ def _variant_table(variants: Sequence[Variant]) -> str:
         "MAE",
         "skill vs persistence",
         "diff vs smoother",
-        "95% CI (72 h)",
+        f"{_cfg(variants)[0]} CI ({_cfg(variants)[1]} h)",
         "result",
         "run",
         "dirty",
@@ -903,8 +940,6 @@ def build_report(
     variants: Sequence[Variant],
     narrative: Narrative,
     preregs: Sequence[dict[str, Any]],
-    *,
-    status: str = "draft",
 ) -> tuple[str, dict[str, Any]]:
     """The HTML page and the sidecar summary used by the index."""
     plots = [
@@ -919,6 +954,7 @@ def build_report(
         if p is not None
     ]
     title = narrative.title or f"Experiment report {ticket}"
+    status = "written up" if narrative.path else "no write-up yet"
     best = best_variant(variants)
     primary = [v for v in variants if v.kind == "primary"]
     snaps = sorted({v.snapshot[:12] for v in variants if v.snapshot})
@@ -942,7 +978,7 @@ def build_report(
     ]
     for w in _warnings(variants):
         parts.append(f'<div class="box warn"><strong>{_e(w)}</strong></div>')
-    parts.append(_glossary_html())
+    parts.append(_glossary_html(variants))
     parts.append("<h2>Hypothesis and decision rule</h2>" + _prereg_html(preregs))
     parts.append("<h2>Plots</h2>")
     for i, p in enumerate(plots, 1):
@@ -977,7 +1013,8 @@ def build_report(
         "ticket": ticket,
         "title": title,
         "status": status,
-        "verdict": narrative.verdict or headline(variants),
+        "verdict": narrative.verdict,
+        "outcome": outcome(variants),
         "finding": headline(variants),
         "n_variants": len(primary),
         "best": None if best is None else {"name": best.name, "mae": best.mae},
@@ -989,6 +1026,23 @@ def build_report(
 
 
 # ---- index ----------------------------------------------------------------------------------
+
+
+def _verdict_cell(s: dict[str, Any]) -> str:
+    """Written verdict next to the computed finding; flags a disagreement."""
+    written = s.get("verdict") or ""
+    out = (
+        f"<strong>{_e(written)}</strong>"
+        if written
+        else "<em>no explicit verdict in the write-up</em>"
+    )
+    out += f"<br><span class='meta'>Computed: {_e(s.get('finding', ''))}</span>"
+    claims = verdict_claims_win(written)
+    if written and (
+        (claims and s.get("outcome") != "win") or (not claims and s.get("outcome") == "win")
+    ):
+        out += "<br><strong>MISMATCH: the written verdict and the computed finding disagree; check.</strong>"
+    return out
 
 
 def build_index(out_dir: Path) -> str:
@@ -1009,7 +1063,7 @@ def build_index(out_dir: Path) -> str:
         tk_rows.append(
             "<tr>"
             f'<td><a href="{_e(s["ticket"])}.html">{_e(s["ticket"])}</a></td>'
-            f"<td>{_e(s['title'])}</td><td>{_e(s['status'])}</td><td>{_e(s['verdict'])}</td>"
+            f"<td>{_e(s['title'])}</td><td>{_e(s['status'])}</td><td>{_verdict_cell(s)}</td>"
             f"<td class='n'>{s['n_variants']}</td>"
             f"<td>{'' if not best else _e(best['name']) + ' (' + _num(best['mae']) + ')'}</td>"
             f"<td>{'DIRTY' if s.get('dirty') else ''}</td></tr>"
@@ -1060,21 +1114,20 @@ def build_index(out_dir: Path) -> str:
             )
             + "</tr>"
         )
-    warns = [
-        f"WARNING: ranked runs have different {label} values ({', '.join(values)}); they are not directly comparable."
-        for label, key in (("snapshot_sha256", "snapshot"), ("prereg", "prereg"))
-        if len(values := sorted({str(r.get(key, "")) for r in rows})) > 1
-    ]
-    warn_html = "".join(f'<div class="box warn"><strong>{_e(w)}</strong></div>' for w in warns[:1])
-    if len(warns) > 1:
-        warn_html += '<div class="box warn"><strong>Runs also have different prereg ids, as expected: each experiment has its own.</strong></div>'
+    snaps = sorted({str(r.get("snapshot", "")) for r in rows})
+    warn_html = ""
+    if len(snaps) > 1:
+        warn_html = (
+            '<div class="box warn"><strong>WARNING: ranked runs have different snapshot_sha256 '
+            f"values ({_e(', '.join(snaps))}); they are not directly comparable.</strong></div>"
+        )
     th_t = "".join(
         f"<th>{h}</th>"
         for h in (
             "ticket (report)",
             "title",
-            "status",
-            "verdict",
+            "write-up",
+            "verdict (written, then computed)",
             "variants",
             "best +24 h MAE",
             "dirty",
@@ -1088,7 +1141,7 @@ def build_index(out_dir: Path) -> str:
         "Regenerate with <code>python -m pm25_forecast.experiments.report --ticket KAN-n</code> then "
         "<code>... report index</code>.</p>"
         '<div class="box"><h4>How to read the verdicts</h4><p>A variant only counts as better than the '
-        "smoother when its paired 95% CI is entirely below zero and not fragile. Everything here is dev "
+        "smoother when its paired CI is entirely below zero and not fragile. Everything here is dev "
         "split and exploratory; nothing is holdout evidence.</p></div>"
         f"<h2>Tickets</h2><div class='scroll'><table><thead><tr>{th_t}</tr></thead><tbody>{''.join(tk_rows)}</tbody></table></div>"
         f"<h2>Leaderboard (dev, best run per experiment, by mae_24h)</h2>{warn_html}"
@@ -1106,18 +1159,14 @@ def build_index(out_dir: Path) -> str:
 # ---- CLI ------------------------------------------------------------------------------------
 
 
-def write_ticket_report(
-    ticket: str, out_dir: Path, docs_dir: Path = DOCS_DIR, status: str = "draft"
-) -> Path:
+def write_ticket_report(ticket: str, out_dir: Path, docs_dir: Path = DOCS_DIR) -> Path:
     if not re.fullmatch(r"KAN-\d+", ticket):
         raise tracking.TrackingError(f"ticket must look like KAN-<n>, got {ticket!r}")
     variants = collect_variants(ticket)
     if not variants:
         raise tracking.TrackingError(f"no valid dev runs tagged ticket={ticket} in the store")
     narrative = find_narrative(ticket, docs_dir)
-    doc, side = build_report(
-        ticket, variants, narrative, load_preregs(variants, docs_dir), status=status
-    )
+    doc, side = build_report(ticket, variants, narrative, load_preregs(variants, docs_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{ticket}.html"
     path.write_text(doc, encoding="utf-8")
@@ -1136,16 +1185,13 @@ def main(argv: list[str] | None = None) -> int:
         default=DOCS_DIR,
         help="docs/experiments dir to read e*.md and prereg/ from",
     )
-    parser.add_argument(
-        "--status", default="draft", help="ticket status shown in the report and index"
-    )
     args = parser.parse_args(argv)
     if args.command == "index":
         args.out.mkdir(parents=True, exist_ok=True)
         path = args.out / "index.html"
         path.write_text(build_index(args.out), encoding="utf-8")
     elif args.ticket:
-        path = write_ticket_report(args.ticket, args.out, args.docs_dir, args.status)
+        path = write_ticket_report(args.ticket, args.out, args.docs_dir)
     else:
         parser.error("give --ticket KAN-<n> or the command 'index'")
     print(f"wrote {path} ({path.stat().st_size / 1024:.0f} KB)")

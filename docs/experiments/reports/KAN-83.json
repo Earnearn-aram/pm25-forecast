@@ -6,6 +6,7 @@
  "dirty": false,
  "finding": "No variant clearly beats the smoother. 1 of 25 have a CI below zero but are fragile (e05-beta-06).",
  "n_variants": 26,
+ "outcome": "fragile",
  "plots": [
   "mae",
   "paired",
@@ -15,7 +16,7 @@
  "snapshots": [
   "a00cfc9edd4c"
  ],
- "status": "merged",
+ "status": "written up",
  "ticket": "KAN-83",
  "title": "E05 smoothing experiments \u2014 KAN-83",
  "verdict": "NO WIN"
