@@ -16,6 +16,12 @@ feature in ``FEATURE_NAMES``, plus the shift of the observed PM2.5 itself (``tar
   training years (wrapping around the year end; 29 Feb counts as 28 Feb). Otherwise a multi-year
   window flags plain seasonality as drift. A seasonal reference with fewer than ``MIN_REFERENCE``
   points is ``insufficient``; there is no fallback to the whole window.
+* KAN-77: the reference only uses the air4thai era. Rows before ``DATA_SOURCE_BREAK`` (2026-07-31
+  17:00 UTC, OpenAQ era: a smoothed product) are excluded, as are origins whose target lies after
+  ``KAN74_BUG_CUTOFF`` (2026-10-26 00:00 UTC, observations affected by the KAN-74 collector bug).
+  Origins also start ``HISTORY`` after the break, so no history window reaches before it. Too
+  little data left is ``insufficient`` (PSI NULL), never a crash. The cut-offs are part of the
+  stored season key (``reference_tag``), so rows built with other cut-offs are rebuilt.
 * The reference side (bin edges and shares) is cached in ``drift_reference`` per model_version
   and rebuilt when the training window or the season key (``doy±30@<ISO week of the recent end>``)
   changes, so in practice about weekly; a daily run reads only the recent 7 days.
@@ -69,6 +75,9 @@ MIN_BINS = 3  # fewer distinct reference bins (near-constant or integer-heavy da
 CAMS_MIN_COVERAGE = 0.5  # cams_pm25 needs CAMS for at least this share of the reference origins
 RECENT_WINDOW = timedelta(days=7)
 SEASON_DAYS = 30  # reference = training rows within this many days of the year of the recent end
+# KAN-77: reference cut-offs (timezone-aware UTC). See the module docstring.
+DATA_SOURCE_BREAK = datetime(2026, 7, 31, 17, 0, tzinfo=UTC)  # first air4thai-era row
+KAN74_BUG_CUTOFF = datetime(2026, 10, 26, 0, 0, tzinfo=UTC)  # targets after this are unreliable
 PSI_BINS = 5
 PSI_EPSILON = 1e-4  # share used for an empty bin, so the logarithm is defined
 TARGET_FEATURE = "target_pm25"
@@ -235,6 +244,16 @@ def season_anchor(moment: datetime) -> datetime:
     return (moment - timedelta(days=moment.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
+
+
+def reference_tag() -> str:
+    """Identifies the reference cut-offs; part of the cache key, so changing them rebuilds."""
+    return f"ref@{DATA_SOURCE_BREAK:%Y%m%dT%H}/{KAN74_BUG_CUTOFF:%Y%m%dT%H}"
+
+
+def reference_window(window: "Window") -> "Window":
+    """The manifest training window clamped to the air4thai era and before the KAN-74 bug."""
+    return Window(start=max(window.start, DATA_SOURCE_BREAK), end=min(window.end, KAN74_BUG_CUTOFF))
 
 
 def season_key(anchor: datetime, days: int = SEASON_DAYS) -> str:
@@ -511,16 +530,19 @@ def save_reference(
 def build_reference(
     con: Any, manifest: Manifest, stations: set[str] | None, anchor: datetime
 ) -> dict[str, Reference]:
-    """Rebuild the reference: training-window rows in season with ``anchor`` (then cached)."""
-    window = manifest.training_window
+    """Rebuild the reference: air4thai-era training-window rows in season with ``anchor``."""
+    window = reference_window(manifest.training_window)
 
     def keep(moment: datetime) -> bool:
         return in_season(moment, anchor)
 
     lag = timedelta(hours=manifest.assumed_reporting_lag_hours or 0)
+    # Origins: history must not reach before the break, targets not after the bug cut-off.
+    origin_start = max(window.start, DATA_SOURCE_BREAK + HISTORY)
+    origin_end = min(window.end, KAN74_BUG_CUTOFF - timedelta(hours=max(manifest.horizons)))
     inputs = Inputs(con, window.start, window.end, stations, manifest.horizons)
     features, n_origins = inputs.feature_values(
-        window.start, window.end, lag, manifest.horizons, keep
+        origin_start, origin_end, lag, manifest.horizons, keep
     )
     reference = {name: make_reference(name, features[name], n_origins) for name in FEATURE_NAMES}
     target = inputs.target_values(window.start, window.end, keep)
@@ -561,13 +583,13 @@ def model_checks(
     day: datetime | None = None,
 ) -> list[Check]:
     day = day or now.replace(hour=0, minute=0, second=0, microsecond=0)
-    ref = manifest.training_window
+    ref = reference_window(manifest.training_window)
     recent_end = floor_to_hour(now)
     recent = Window(start=recent_end - RECENT_WINDOW, end=recent_end)
     lag = timedelta(hours=manifest.assumed_reporting_lag_hours or 0)
 
     anchor = season_anchor(recent_end)
-    season = season_key(anchor)
+    season = f"{season_key(anchor)}|{reference_tag()}"
     reference = load_reference(con, model_version, ref, season)
     if reference is None:  # not cached, or built from another window or season
         reference = build_reference(con, manifest, stations, anchor)

@@ -47,6 +47,15 @@ An empty bin counts as a 0.0001 share so the logarithm is defined. Non-finite va
   multi-year window from flagging plain seasonality (for example PM2.5 in the dry season against
   a whole-year reference) as drift. If the seasonal reference has fewer than 200 points the
   status is `insufficient`; there is no fallback to the whole window.
+  Since KAN-77 the reference only uses the air4thai era: rows before `DATA_SOURCE_BREAK`
+  (2026-07-31 17:00 UTC; before it the data was the smoothed OpenAQ product, which made PSI
+  about 0.7) and origins whose target lies after `KAN74_BUG_CUTOFF` (2026-10-26 00:00 UTC, rows
+  affected by the KAN-74 collector bug) are excluded. Origins start 24 h after the break so no
+  history window reaches before it. Both are timezone-aware UTC constants in `drift.py`. If too
+  little is left the status is `insufficient` (PSI NULL). `ref_start`/`ref_end` in `drift_checks`
+  and `drift_reference` show the clamped window. The cut-offs are part of the stored
+  `season_key` (`...|ref@20260731T17/20261026T00`), so reference rows built with other cut-offs
+  are recomputed on the next run, with no manual SQL; changing a constant does the same.
 - Recent: the last 7 days up to the current UTC hour.
 - Features: every name in `FEATURE_NAMES` (`pm25_latest`, `pm25_same_hour_24h`, `cams_pm25`),
   rebuilt hourly per station from stored observations and CAMS vintages through the shared
