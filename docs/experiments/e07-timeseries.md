@@ -1,7 +1,7 @@
 # E07: classical time series (ARIMA, SARIMA, Holt-Winters) — KAN-85
 
 Verdict: **DROP the family.** No variant beats the smoother; every paired difference versus the
-smoother is positive (worse). Only the two ARIMA/ETS variants beat persistence with a CI below zero,
+smoother is positive (worse). Only three variants (arima-d1 and both ETS variants) beat persistence with a CI below zero,
 which the smoother already does with a lower MAE. Dev split only; the holdout was never touched.
 
 ## 1. Question and decision rule (preregistered before any run)
@@ -60,7 +60,7 @@ ETS variants are significantly worse than the smoother (CI entirely above zero).
 (3.420) is close to the smoother's level but still not better (diff +0.050, CI [-0.091, +0.177]);
 no horizon is gating.
 Nothing beats the smoother, with or without correcting for 5 variants (no CI is below zero, so a
-Bonferroni level cannot change that); no corrected run was needed. Spike metrics are undefined
+Bonferroni level cannot change that); no corrected run was needed (the prereg lists a Bonferroni sensitivity run only for a variant whose unadjusted CI excludes zero against the smoother; none did, so it was not run). Spike metrics are undefined
 (15 observed spikes, under 50). No negative forecasts, no missing forecasts (candidate_none 0).
 
 ## 4. Runtime

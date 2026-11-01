@@ -94,7 +94,9 @@ def _log_fold(name: str, train: TrainSnapshot, seconds: float, detail: dict[str,
 def _train_series(train: TrainSnapshot) -> dict[str, dict[datetime, Observation]]:
     out: dict[str, dict[datetime, Observation]] = {s: {} for s in train.stations}
     for o in train.observations:
-        if o.station_id in out and o.ts <= train.refit_time:  # matured rows only
+        # The runner builds TrainSnapshot from rows with available_at <= refit_time (evaluate.md),
+        # so ts <= refit_time is enough here.
+        if o.station_id in out and o.ts <= train.refit_time:
             out[o.station_id][o.ts] = o
     return out
 
