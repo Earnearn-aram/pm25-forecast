@@ -5,34 +5,57 @@ Invalid and unfinished runs are excluded; DIRTY marks runs made from uncommitted
 
 WARNING: ranked runs have different snapshot_sha256 values (a00cfc9edd4c, dc9d912d7fd7); they are not directly comparable.
 
-WARNING: ranked runs have different prereg values (e05-beta-00, e05-beta-01, e05-beta-02, e05-beta-03, e05-beta-04, e05-beta-05, e05-beta-06, e05-beta-07, e05-beta-08, e05-beta-09, e05-beta-10, e05-clim-14d-blend, e05-clim-14d-pure, e05-clim-28d-blend, e05-clim-28d-pure, e05-clim-7d-blend, e05-clim-7d-pure, e05-ewma-12h, e05-ewma-24h, e05-ewma-2h, e05-ewma-6h, e05-ma-12h, e05-ma-24h, e05-ma-3h, e05-ma-48h, e05-ma-6h, exploratory, none-demo); they are not directly comparable.
+WARNING: ranked runs have different prereg values (e05-beta-00, e05-beta-01, e05-beta-02, e05-beta-03, e05-beta-04, e05-beta-05, e05-beta-06, e05-beta-07, e05-beta-08, e05-beta-09, e05-beta-10, e05-clim-14d-blend, e05-clim-14d-pure, e05-clim-28d-blend, e05-clim-28d-pure, e05-clim-7d-blend, e05-clim-7d-pure, e05-ewma-12h, e05-ewma-24h, e05-ewma-2h, e05-ewma-6h, e05-ma-12h, e05-ma-24h, e05-ma-3h, e05-ma-48h, e05-ma-6h, e11-lgbm-base, e11-lgbm-wx, e11-lgbm-wx-d2, e11-ridge-base, e11-ridge-wx, e11-ridge-wx-d2, e12-abl-no-calendar, e12-abl-no-cross, e12-abl-no-lags, e12-abl-no-rolling, e12-core-huber-delta, e12-core-huber-level, e12-core-l1-delta, e12-core-l1-level, e12-core-l2-delta, e12-core-l2-level, e12-full-huber-delta, e12-full-huber-level, e12-full-l1-delta, e12-full-l1-level, e12-full-l2-delta, e12-full-l2-level, exploratory, none-demo); they are not directly comparable.
 
 | experiment | run | mae_24h | rmse_24h | skill vs persistence | n_pairs | git_sha | snapshot hash | dirty | prereg |
 |---|---|---|---|---|---|---|---|---|---|
 | kan78/e00-demo | persistence-fixture (005fb93a) | 1.851 | 2.263 |  | 72 | 464619f13f | dc9d912d7fd7 |  | none-demo |
 | kan78/e05-clim-28d-blend | climatology-28d-blend-dev (444eecf8) | 3.791 | 5.288 | 0.121 | 4200 | ecd4bd3e5c | a00cfc9edd4c |  | e05-clim-28d-blend |
 | kan78/e05-beta-07 | beta-0.7-dev (3f8a628c) | 3.829 | 5.126 | 0.112 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-07 |
+| kan78/e05-beta-06-bonferroni | beta-06-dev-bonferroni-26 (e3fb0fa2) | 3.837 | 5.151 | 0.110 | 4200 | 255ad5346e | a00cfc9edd4c |  | e05-beta-06 |
 | kan78/e05-beta-06 | beta-0.6-dev (1cc8391c) | 3.837 | 5.151 | 0.110 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-06 |
+| kan78/e11-ridge-base | ridge_base-dev (a347ab56) | 3.838 | 5.317 | 0.110 | 4200 | c87259db19 | a00cfc9edd4c |  | e11-ridge-base |
 | kan78/e05-beta-08 | beta-0.8-dev (8e76cb0d) | 3.840 | 5.133 | 0.109 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-08 |
+| kan78/e12-abl-no-rolling | gbm-pooled-l2-delta-no-rolling-dev (a77668d1) | 3.867 | 5.381 | 0.103 | 4200 | 1c90261f1f | a00cfc9edd4c |  | e12-abl-no-rolling |
 | kan78/e05-beta-05 | beta-0.5-dev (18ab9d50) | 3.867 | 5.206 | 0.103 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-05 |
 | kan78/e04-smoother | smoother-dev (da9ad074) | 3.867 | 5.206 | 0.103 | 4200 | a11a322935 | a00cfc9edd4c |  | exploratory |
+| kan78/e12-full-l2-delta | gbm-pooled-l2-delta-dev (76298486) | 3.868 | 5.306 | 0.103 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-full-l2-delta |
 | kan78/e05-beta-09 | beta-0.9-dev (bd8b8f1d) | 3.873 | 5.170 | 0.102 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-09 |
+| kan78/e11-ridge-wx-d2 | ridge_wx_d2-dev (6ae316d1) | 3.874 | 5.283 | 0.102 | 4200 | c87259db19 | a00cfc9edd4c |  | e11-ridge-wx-d2 |
 | kan78/e05-ewma-6h | ewma-6h-dev (d2e50e44) | 3.874 | 5.166 | 0.101 | 4200 | 8c8ce99f82 | a00cfc9edd4c |  | e05-ewma-6h |
+| kan78/e12-abl-no-cross | gbm-pooled-l2-delta-no-cross-dev (8b0006e8) | 3.874 | 5.326 | 0.101 | 4200 | 1c90261f1f | a00cfc9edd4c |  | e12-abl-no-cross |
 | kan78/e05-clim-14d-blend | climatology-14d-blend-dev (90e2b7ff) | 3.874 | 5.393 | 0.101 | 4200 | ecd4bd3e5c | a00cfc9edd4c |  | e05-clim-14d-blend |
+| kan78/e12-core-huber-delta | gbm-pooled-huber-delta-dev (3389761b) | 3.880 | 5.370 | 0.100 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-core-huber-delta |
+| kan78/e11-ridge-wx | ridge_wx-dev (1cebc1f1) | 3.885 | 5.344 | 0.099 | 4200 | c87259db19 | a00cfc9edd4c |  | e11-ridge-wx |
+| kan78/e12-core-l2-delta | gbm-pooled-l2-delta-dev (bd1c1998) | 3.893 | 5.367 | 0.097 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-core-l2-delta |
 | kan78/e05-ewma-12h | ewma-12h-dev (1f8cb1e5) | 3.901 | 5.204 | 0.095 | 4200 | 8c8ce99f82 | a00cfc9edd4c |  | e05-ewma-12h |
 | kan78/e05-clim-7d-blend | climatology-7d-blend-dev (0abc6815) | 3.902 | 5.405 | 0.095 | 4200 | ecd4bd3e5c | a00cfc9edd4c |  | e05-clim-7d-blend |
+| kan78/e12-core-l1-delta | gbm-pooled-l1-delta-dev (6234a85f) | 3.907 | 5.449 | 0.094 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-core-l1-delta |
 | kan78/e05-beta-04 | beta-0.4-dev (bd2be67d) | 3.918 | 5.291 | 0.091 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-04 |
+| kan78/e12-full-huber-delta | gbm-pooled-huber-delta-dev (1c508109) | 3.925 | 5.362 | 0.090 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-full-huber-delta |
+| kan78/e12-full-huber-level | gbm-pooled-huber-level-dev (051733bf) | 3.926 | 5.358 | 0.089 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-full-huber-level |
 | kan78/e05-beta-10 | beta-1.0-dev (72e99bfd) | 3.926 | 5.238 | 0.089 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-10 |
 | kan78/e05-ma-24h | ma-24h-dev (3a4d8f96) | 3.926 | 5.238 | 0.089 | 4200 | 3b16e011b9 | a00cfc9edd4c |  | e05-ma-24h |
+| kan78/e12-abl-no-calendar | gbm-pooled-l2-delta-no-calendar-dev (15237ff4) | 3.932 | 5.348 | 0.088 | 4200 | 1c90261f1f | a00cfc9edd4c |  | e12-abl-no-calendar |
+| kan78/e12-core-huber-level | gbm-pooled-huber-level-dev (cc50a1c0) | 3.940 | 5.412 | 0.086 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-core-huber-level |
+| kan78/e12-core-l2-level | gbm-pooled-l2-level-dev (3af6e1de) | 3.941 | 5.420 | 0.086 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-core-l2-level |
 | kan78/e05-ewma-2h | ewma-2h-dev (208d1c5e) | 3.941 | 5.323 | 0.086 | 4200 | 8c8ce99f82 | a00cfc9edd4c |  | e05-ewma-2h |
+| kan78/e12-full-l2-level | gbm-pooled-l2-level-dev (2b3b3088) | 3.943 | 5.357 | 0.085 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-full-l2-level |
+| kan78/e12-full-l1-delta | gbm-pooled-l1-delta-dev (6b5463ce) | 3.945 | 5.449 | 0.085 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-full-l1-delta |
+| kan78/e11-lgbm-wx-d2 | lgbm_wx_d2-dev (62adf148) | 3.958 | 5.649 | 0.082 | 4200 | c87259db19 | a00cfc9edd4c |  | e11-lgbm-wx-d2 |
+| kan78/e11-lgbm-wx | lgbm_wx-dev (e41b2f96) | 3.970 | 5.771 | 0.079 | 4200 | c87259db19 | a00cfc9edd4c |  | e11-lgbm-wx |
 | kan78/e05-beta-03 | beta-0.3-dev (666ec63c) | 3.989 | 5.404 | 0.075 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-03 |
 | kan78/e05-ma-12h | ma-12h-dev (b5fd1892) | 3.991 | 5.312 | 0.074 | 4200 | 3b16e011b9 | a00cfc9edd4c |  | e05-ma-12h |
+| kan78/e12-core-l1-level | gbm-pooled-l1-level-dev (e7f5f202) | 4.010 | 5.591 | 0.070 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-core-l1-level |
+| kan78/e12-full-l1-level | gbm-pooled-l1-level-dev (dab2d6ce) | 4.012 | 5.513 | 0.069 | 4200 | 0134b04ba4 | a00cfc9edd4c |  | e12-full-l1-level |
 | kan78/e05-ewma-24h | ewma-24h-dev (f740dfd6) | 4.016 | 5.387 | 0.068 | 4200 | 8c8ce99f82 | a00cfc9edd4c |  | e05-ewma-24h |
 | kan78/e05-ma-6h | ma-6h-dev (25e86502) | 4.046 | 5.450 | 0.062 | 4200 | 3b16e011b9 | a00cfc9edd4c |  | e05-ma-6h |
 | kan78/e05-ma-48h | ma-48h-dev (6deab3b4) | 4.064 | 5.397 | 0.057 | 4200 | 3b16e011b9 | a00cfc9edd4c |  | e05-ma-48h |
 | kan78/e05-beta-02 | beta-0.2-dev (c4df6500) | 4.080 | 5.544 | 0.054 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-02 |
 | kan78/e05-ma-3h | ma-3h-dev (2dcd664e) | 4.098 | 5.554 | 0.050 | 4200 | 3b16e011b9 | a00cfc9edd4c |  | e05-ma-3h |
+| kan78/e12-abl-no-lags | gbm-pooled-l2-delta-no-lags-dev (dbdaabc9) | 4.126 | 5.688 | 0.043 | 4200 | 1c90261f1f | a00cfc9edd4c |  | e12-abl-no-lags |
 | kan78/e05-beta-01 | beta-0.1-dev (be67b794) | 4.187 | 5.709 | 0.029 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-01 |
+| kan78/e11-lgbm-base | lgbm_base-dev (edc52985) | 4.282 | 5.989 | 0.007 | 4200 | c87259db19 | a00cfc9edd4c |  | e11-lgbm-base |
 | kan78/e05-beta-00 | beta-0.0-dev (98317dd7) | 4.311 | 5.896 | 0.000 | 4200 | 6cebb58acf | a00cfc9edd4c |  | e05-beta-00 |
 | kan78/e04-persistence | persistence-dev (3ca1e4c4) | 4.311 | 5.896 | 0.000 | 4200 | a11a322935 | a00cfc9edd4c |  | exploratory |
 | kan78/e05-clim-28d-pure | climatology-28d-pure-dev (52a84acc) | 4.506 | 6.177 | -0.045 | 4200 | ecd4bd3e5c | a00cfc9edd4c |  | e05-clim-28d-pure |
