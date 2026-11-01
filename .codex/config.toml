@@ -8,4 +8,4 @@ sandbox_mode = "workspace-write"
 network_access = true
 # Shared MLflow store and frozen snapshots live outside the repo (see START-HERE).
 # Absolute paths: do not rely on `~` being expanded.
-writable_roots = ["/Users/earn/pm25-experiments", "/Users/earn/.cache/uv"]
+writable_roots = ["/Users/earn/pm25-experiments", "/Users/earn/.cache/uv", "/Users/earn/Library/Caches/uv"]
