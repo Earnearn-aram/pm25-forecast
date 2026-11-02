@@ -555,24 +555,49 @@ def _cov_openaq(rd: Reader, now: datetime) -> dict[str, Any]:
     }
 
 
+CAMS_CYCLE_H = 12  # the repo (collector.py) says CAMS refreshes about twice a day
+CAMS_OVERDUE_H = 24  # newest vintage older than this = a cycle was missed (quality.py warns too)
+
+
+def _slot(t: datetime) -> datetime:
+    """Start of the 12 h UTC forecast cycle slot that contains t."""
+    t = t.astimezone(UTC)
+    return t.replace(hour=t.hour - t.hour % CAMS_CYCLE_H, minute=0, second=0, microsecond=0)
+
+
 def _cov_cams(rd: Reader, now: datetime) -> dict[str, Any]:
-    """Expected = one stored CAMS vintage (any station) for every UTC hour of the window, from
-    the first stored vintage (collection started late) to the last hour already due."""
+    """Expected = one stored CAMS vintage for every forecast cycle of the window.
+
+    CAMS refreshes about twice a day and the collector skips snapshots that repeat the previous
+    vintage, so a healthy pipeline stores about one vintage per cycle, not one per hour. A cycle
+    is a 12 h UTC slot (00-12, 12-24); it is covered when any vintage was stored in it. The
+    current slot is open: it counts only once it has a vintage, never as a miss. Windows are 2
+    (24 h) and 14 (7 d) cycles, clamped to the cycle of the first stored vintage.
+    """
     end = _hour(now - PIPELINE_GRACE)
-    since = end - timedelta(hours=max(COVERAGE_HOURS) - 1)
+    cycle = timedelta(hours=CAMS_CYCLE_H)
+    current = _slot(end)
+    since = current - cycle * (max(COVERAGE_HOURS) // CAMS_CYCLE_H)
     params = {"m": CAMS_MODEL_VERSION, "since": since, "now": now}
-    issued = {_hour(r.ts) for r in _rows(CovNewest, rd.query(SELECT_COV_VINTAGES, params))}
+    stored = {r.ts for r in _rows(CovNewest, rd.query(SELECT_COV_VINTAGES, params))}
     newest = _newest(rd, SELECT_COV_NEWEST_VINTAGE, {"m": CAMS_MODEL_VERSION, "now": now}, now)
-    if not issued and newest["newest_at"] is None:
+    if not stored and newest["newest_at"] is None:
         return _cov_unavailable("no_rows")
     first = _first_ts(rd, SELECT_COV_FIRST_VINTAGE, {"m": CAMS_MODEL_VERSION, "now": now})
-    out: dict[str, Any] = {"available": True, **newest}
-    for hours, (start, n) in _windows(end, first).items():
-        out[f"pct_{hours}h"] = _pct(sum(1 for h in issued if start <= h <= end), n)
+    slots = {_slot(t) for t in stored}
+    out: dict[str, Any] = {"available": True, "cycle_hours": CAMS_CYCLE_H, **newest}
+    age = newest["newest_age_min"]
+    out["overdue"] = age is None or age > CAMS_OVERDUE_H * 60
+    for hours in COVERAGE_HOURS:
+        start = current - cycle * (hours // CAMS_CYCLE_H)
+        if first is not None:
+            start = max(start, _slot(first))
+        due = int((current - start) / cycle)  # completed cycles; the open one is not a miss
+        got = sum(1 for t in slots if start <= t < current)
+        got_open = 1 if current in slots else 0
+        out[f"pct_{hours}h"] = _pct(got + got_open, due + got_open)
     out["since"] = _iso(None if first is None else _hour(first))
-    out["clamped"] = first is not None and _hour(first) > end - timedelta(
-        hours=max(COVERAGE_HOURS) - 1
-    )
+    out["clamped"] = first is not None and _slot(first) > since
     return out
 
 
@@ -1661,13 +1686,23 @@ def _coverage_texts(key: str, c: dict[str, Any]) -> tuple[tuple[str, str], tuple
                 f"ช่วงสิ้นสุดที่ชั่วโมงล่าสุดที่ถึงกำหนดแล้ว{since_th} ค่าล่าสุด: {age_th}",
             )
         )
+    over_en = " Overdue: a cycle was missed." if c.get("overdue") else ""
+    over_th = " ล่าช้า: พลาดหนึ่งรอบ" if c.get("overdue") else ""
+    since_en = f" Collected since {_day(c['since'])}." if c.get("clamped") else ""
+    since_th = f" เก็บตั้งแต่ {_day(c['since'])}" if c.get("clamped") else ""
+    n = c.get("cycle_hours", CAMS_CYCLE_H)
     return head, (
         (
-            " Coverage: share of the hourly issue times (UTC) in the window that have at "
-            "least one stored CAMS forecast vintage. Counted since collection started: "
-            f"collected since {_day(c['since'])}. Newest vintage: {age_en}.",
-            " ความครบ: สัดส่วนชั่วโมง (UTC) ในช่วงเวลาที่มีชุดพยากรณ์ CAMS ที่บันทึกไว้อย่างน้อยหนึ่งชุด "
-            f"นับตั้งแต่เริ่มเก็บข้อมูล: เก็บตั้งแต่ {_day(c['since'])} ชุดล่าสุด: {age_th}",
+            f" Coverage: share of forecast cycles that stored a CAMS vintage. CAMS refreshes "
+            f"about twice a day, so a cycle is a {n} h UTC slot (00-12, 12-24). 100% means every "
+            f"cycle in the window has at least one vintage (24 h = 2 cycles, 7 days = 14); the "
+            f"current cycle is not counted as missed until it has ended.{since_en} "
+            f"Newest vintage: {age_en} (expected every ~{n} h).{over_en}",
+            f" ความครบ: สัดส่วนรอบพยากรณ์ที่มีชุดพยากรณ์ CAMS ที่บันทึกไว้ CAMS อัปเดตประมาณวันละ 2 ครั้ง "
+            f"หนึ่งรอบคือช่วง {n} ชม. (UTC) (00-12, 12-24) "
+            f"100% หมายถึงทุกรอบในช่วงเวลามีชุดพยากรณ์อย่างน้อยหนึ่งชุด "
+            f"(24 ชม. = 2 รอบ, 7 วัน = 14 รอบ) รอบปัจจุบันยังไม่นับว่าขาดจนกว่าจะจบรอบ{since_th} "
+            f"ชุดล่าสุด: {age_th} (คาดว่าทุก ~{n} ชม.){over_th}",
         )
     )
 
