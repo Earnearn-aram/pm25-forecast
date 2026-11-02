@@ -285,7 +285,19 @@
     var selectedReading = document.getElementById("selected-map-reading");
     if (selectedReading) selectedReading.textContent = selectedPin ? selectedPin.getAttribute("aria-label") : "";
     if (title && selected) title.textContent = translate("PM2.5 · last 24 h and next 24 h") + " · " + translate(selected.getAttribute("data-label"));
-    pills.forEach(function (pill) { pill.textContent = translate(pill.getAttribute("data-label")); });
+    pills.forEach(function (pill) {
+      var name = translate(pill.getAttribute("data-label"));
+      pill.textContent = name;
+      var note = pill.getAttribute(language === "th" ? "data-stale-th" : "data-stale-en");
+      if (note) {
+        var dot = document.createElement("span");
+        dot.className = "stale-dot";
+        dot.setAttribute("aria-hidden", "true");
+        dot.title = note;
+        pill.appendChild(dot);
+        pill.setAttribute("aria-label", name + ", " + note);
+      }
+    });
     checkLabels.forEach(function (el) { el.title = translate(el.dataset.englishTitle); });
     if (pause) pause.textContent = translate(pause.getAttribute("aria-pressed") === "true" ? "Resume animation" : "Pause animation");
   }

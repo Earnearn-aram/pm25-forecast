@@ -675,3 +675,81 @@ def test_chart_v2_model_only_future_draws_only_model_path(tmp_path):
     svg = _chart_svg((tmp_path / "index.html").read_text())
     assert svg.count('<path class="ln ln-chal') == 1
     assert '<path class="ln ln-pers' not in svg
+
+
+def _chart_station(**over):
+    st = {
+        "id": "02t",
+        "label": "Bansomdejchaopraya",
+        "points": [{"t": NOW.isoformat(), "actual": 20.0, "persistence": None, "challenger": None}],
+        "future_persistence": [],
+        "future_challenger": [],
+        "latest_value": 20.0,
+        "latest_at": (NOW - timedelta(hours=14, minutes=20)).isoformat(),
+    }
+    st.update(over)
+    return st
+
+
+def _chart_html(st):
+    chart = {"stations": [st], "has_challenger": False, "end": NOW.isoformat()}
+    data = {"chart": chart, "generated_at": NOW.isoformat()}
+    return dashboard._section_chart(data)
+
+
+def test_stale_station_explains_missing_forecast_in_en_and_th():
+    html = _chart_html(_chart_station())
+    assert "Waiting for future forecasts." not in html
+    en = (
+        "No forecast: no new reading from this station for 14 h "
+        "(last reading 30 Oct 05:00 Bangkok). Forecasts resume when readings return."
+    )
+    assert f'data-en="{en}"' in html
+    assert "ไม่มีค่าพยากรณ์: สถานีนี้ไม่มีค่าที่ตรวจวัดใหม่มา 14 ชั่วโมง" in html
+    assert "30 ต.ค. 05:00 น." in html
+    assert 'title="no recent reading"' in html
+    assert 'aria-label="Bansomdejchaopraya, no recent reading"' in html
+    assert 'class="stale-dot" aria-hidden="true"' in html
+    assert 'data-stale-th="' in html
+
+
+def test_fresh_station_keeps_generic_waiting_text_and_no_marker():
+    html = _chart_html(_chart_station(latest_at=(NOW - timedelta(minutes=30)).isoformat()))
+    assert "Waiting for future forecasts." in html
+    assert "stale-dot" not in html.replace(".stale-dot", "")
+    assert "No forecast:" not in html
+
+
+def test_stale_station_with_forecasts_lists_them_not_the_note():
+    future = [
+        {
+            "issue_time": NOW.isoformat(),
+            "valid_time": (NOW + timedelta(hours=1)).isoformat(),
+            "value": 21.0,
+        }
+    ]
+    html = _chart_html(_chart_station(future_challenger=future))
+    assert "No forecast:" not in html
+    assert "Challenger forecast" in html
+
+
+def test_station_without_rows_keeps_no_data_text():
+    html = _chart_html(_chart_station(points=[], latest_at=None, latest_value=None))
+    assert "No hourly data for this station yet." in html
+
+
+def test_stale_text_and_label_are_escaped():
+    st = _chart_station(label='<img src=x onerror="a">', id='"><b>')
+    html = _chart_html(st)
+    assert "<img" not in html
+    assert "<b>" not in html
+    assert "&lt;img" in html
+
+
+def test_stale_boundary_180_fresh_181_stale_and_hours_round():
+    fresh = _chart_html(_chart_station(latest_at=(NOW - timedelta(minutes=180)).isoformat()))
+    assert "Waiting for future forecasts." in fresh and "No forecast:" not in fresh
+    stale = _chart_html(_chart_station(latest_at=(NOW - timedelta(minutes=181)).isoformat()))
+    assert "No forecast:" in stale and "for 3 h" in stale
+    late = _chart_html(_chart_station(latest_at=(NOW - timedelta(minutes=239)).isoformat()))
+    assert "for 4 h" in late
