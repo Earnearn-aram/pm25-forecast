@@ -2,8 +2,10 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import duckdb
+import numpy as np
 import pytest
 
+from pm25_forecast import train_model
 from pm25_forecast.features import FEATURE_NAMES
 from pm25_forecast.train_model import (
     InsufficientTrainingDataError,
@@ -11,6 +13,22 @@ from pm25_forecast.train_model import (
     make_training_rows,
     train,
 )
+
+
+def test_training_reports_all_horizons_after_validation_embargo(monkeypatch, tmp_path):
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    data = {h: (np.zeros((20, 3)), np.zeros(20), [now] * 20) for h in (6, 12, 24)}
+    monkeypatch.setattr(
+        train_model, "_validation_indices", lambda _o, _a, h: (list(range(h // 6)), [])
+    )
+    # Each horizon has labels, but the embargo leaves too few training examples.
+    monkeypatch.setattr(
+        train_model,
+        "_make_training_rows_with_availability",
+        lambda *_: (data, {h: [] for h in data}),
+    )
+    with pytest.raises(InsufficientTrainingDataError, match=r"\+6h=1, \+12h=2, \+24h=4"):
+        train(tmp_path / "unused", "test")
 
 
 def test_train_reads_only_local_export_and_writes_feature_manifest(tmp_path):

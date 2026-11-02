@@ -24,7 +24,8 @@ champion, and no retrain decision was logged since that drift run was computed (
 triggered run is the normal run (still recommend-only unless AUTO_PROMOTE).
 
 The RUN_SUMMARY line holds the whole comparison table and the decision. DB down: the run is
-skipped, alerted, exit 1. Configuration error: exit 2. Failed run (e.g. not enough data): exit 1.
+skipped, alerted, exit 1. Configuration error: exit 2. Insufficient training data is reported as
+a skipped run, exit 0; other failed runs exit 1.
 """
 
 from __future__ import annotations
@@ -73,7 +74,7 @@ from pm25_forecast.storage.registry import (
     read_model,
     record_event,
 )
-from pm25_forecast.train_model import build_samples, train
+from pm25_forecast.train_model import InsufficientTrainingDataError, build_samples, train
 
 logger = logging.getLogger(__name__)
 
@@ -465,7 +466,14 @@ def run(
         make_training_export(full, train_copy, holdout_start)
         try:
             artifact, manifest = trainer(train_copy, result.version, as_of=holdout_start)
-        except ValueError as exc:  # too little data before the held-out window
+        except InsufficientTrainingDataError as exc:
+            result.status = "skipped"
+            result.warnings.append(
+                f"training data not ready (cutoff {holdout_start.isoformat()}): {exc}"
+            )
+            _summary(result, settings, skip_reason="insufficient_training_data", **window)
+            return result
+        except ValueError as exc:
             result.status = "failed"
             result.failures.append(f"training rejected: {exc}")
             _summary(result, settings, **window)
@@ -651,6 +659,8 @@ def main(argv: list[str] | None = None) -> int:
     if result.failures:
         safe_alert(alert, "run completed with failures: " + "; ".join(result.failures))
         return EXIT_FAILED
+    if result.status == "skipped" and result.warnings:
+        safe_alert(alert, "; ".join(result.warnings))
     return code
 
 

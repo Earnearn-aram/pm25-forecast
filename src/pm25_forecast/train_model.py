@@ -238,15 +238,19 @@ def train(
     metrics: dict[str, Any] = {}
     first_train: datetime | None = None
     last_train: datetime | None = None
-    for horizon, (features, target, origins) in data.items():
-        train_indices, valid_indices = _validation_indices(
-            origins, label_availabilities[horizon], horizon
+    splits = {
+        horizon: _validation_indices(origins, label_availabilities[horizon], horizon)
+        for horizon, (_, _, origins) in data.items()
+    }
+    counts = {horizon: len(indices[0]) for horizon, indices in splits.items()}
+    if any(count < 20 for count in counts.values()):
+        per_horizon = ", ".join(f"+{h}h={counts[h]}" for h in HORIZONS_H)
+        raise InsufficientTrainingDataError(
+            f"usable training examples after validation embargo ({per_horizon}); "
+            "need 20 per horizon"
         )
-        if len(train_indices) < 20:
-            raise ValueError(
-                f"horizon +{horizon}h has fewer than 20 training examples after the "
-                "validation embargo"
-            )
+    for horizon, (features, target, origins) in data.items():
+        train_indices, valid_indices = splits[horizon]
         train_x, valid_x = features[train_indices], features[valid_indices]
         train_y, valid_y = target[train_indices], target[valid_indices]
         params = {"objective": "regression", "metric": "mae", "verbosity": -1, "seed": 2026}

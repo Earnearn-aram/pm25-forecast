@@ -422,16 +422,28 @@ def test_overlap_with_the_holdout_is_flagged_in_summary_and_alert(caplog):
     assert "overlaps holdout" in summary
 
 
-def test_insufficient_history_fails_without_registering_or_promoting():
+def test_insufficient_history_skips_without_registering_or_promoting():
     reg, alerts = Registry(), []
 
     def tiny(path, _url):
         write_export(path, hours=30)
 
     result = do_run(reg, alerts, export=tiny, settings=settings(auto_promote=True))
-    assert result.status == "failed"
-    assert result.failures and "training rejected" in result.failures[0]
+    assert result.status == "skipped" and not result.failures
+    assert result.warnings and "training data not ready" in result.warnings[0]
+    assert (NOW.replace(minute=0) - timedelta(days=7)).isoformat() in result.warnings[0]
     assert reg.rows == {} and reg.champion is None
+
+
+def test_unrelated_training_value_error_remains_failure():
+    reg = Registry()
+
+    def broken(*_args, **_kwargs):
+        raise ValueError("invalid model configuration")
+
+    result = do_run(reg, [], trainer=broken)
+    assert result.status == "failed"
+    assert "invalid model configuration" in result.failures[0]
 
 
 def test_config_errors():
@@ -490,6 +502,16 @@ def patched_main(monkeypatch):
 def test_main_exit_codes(patched_main, monkeypatch):
     patched_main(lambda *_a, **_k: retrain.RetrainResult(run_id="r"))
     assert retrain.main([]) == 0
+
+    alerts = []
+    monkeypatch.setattr(retrain, "make_alert", lambda *_a, **_k: alerts.append)
+    patched_main(
+        lambda *_a, **_k: retrain.RetrainResult(
+            run_id="r", status="skipped", warnings=["training data not ready"]
+        )
+    )
+    assert retrain.main([]) == 0
+    assert alerts == ["training data not ready"]
 
     patched_main(lambda *_a, **_k: retrain.RetrainResult(run_id="r", failures=["x"]))
     assert retrain.main([]) == 1
