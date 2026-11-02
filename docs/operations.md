@@ -25,16 +25,25 @@ body carries both `text` and `content`). Without it, alerts are logged only, wit
 are UTC.
 
 Stale-station alerts (KAN-109) are de-duplicated without stored state. The outage age is now minus the
-station's newest reading (so the outage start comes from the data). A run alerts only when an age
-threshold was crossed since the previous run (`COLLECTOR_INTERVAL`, 20 min): thresholds are 3 h,
-then +6 h, then every +12 h: 3, 9, 21, 33 h ... (constants `STALE_AFTER`, `STALE_REPEAT_FIRST`,
-`STALE_REPEAT_EVERY`, `COLLECTOR_INTERVAL` in `collector.py`). A 14 h outage gives 2 alerts, not about
-40. Stations are independent. When readings return after an outage of more than 3 h, one
-`station X recovered after N h without readings` message is sent (N = time since the last stored
-reading). Limit: the previous run time is not stored, so a run more than 20 min after the previous
-one (GitHub cron can be 10-40 min late or skipped) can miss a crossing; the next threshold still
-alerts, and a missed recovery message is not repeated. Gap alerts stay one per gap; quality alerts
+station's newest reading (so the outage start comes from the data). A run alerts when a threshold lies within the last
+`ALERT_WINDOW` (2 x `COLLECTOR_INTERVAL` = 40 min) of the age: thresholds are 3 h, then +6 h, then every
++12 h: 3, 9, 21, 33 h ... (constants `STALE_AFTER`, `STALE_REPEAT_FIRST`, `STALE_REPEAT_EVERY`,
+`COLLECTOR_INTERVAL`, `ALERT_WINDOW` in `collector.py`). The run time is not stored, so the window is
+twice the 20 min cadence: run jitter up to 40 min (GitHub cron is often late or skipped) never misses
+a crossing, and each threshold is announced once or twice (repeats are not detected or marked): about
+4 messages for a 14 h outage instead of about 40. A gap above 40 min between runs can still miss one
+threshold; the next threshold alerts. Stations are independent. When readings return after an outage
+of more than 3 h, one `station X recovered after N h without readings` message is sent (N = time since
+the last stored reading); a missed recovery message is not repeated. Gap alerts stay one per gap; quality alerts
 are unchanged.
+
+Follow-up for exactly one message per threshold (needs a migration, so owner approval): a small
+`alert_state` table, one row per (`kind`, `station_id`), e.g. `kind` = 'stale', columns `station_id`,
+`kind`, `outage_start_ts` (the station's last reading when the outage began), `last_alerted_threshold`
+(interval or hours), `last_alerted_at`, primary key (`kind`, `station_id`). Each run would alert
+only when the current threshold index is above `last_alerted_threshold` for the same
+`outage_start_ts`, then update the row in the same transaction; a recovery message is sent and the row
+cleared when readings return. Not implemented here.
 
 Backfill (KAN-12 part 1, KAN-34): `uv run python -m pm25_forecast.backfill [--lookback-days 120]
 [--stations 59t,61t]` upserts whatever hourly history Air4Thai still holds (a rolling window of

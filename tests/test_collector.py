@@ -360,27 +360,49 @@ def test_alert_thresholds_are_3_9_21_33_hours():
     assert hours == [3, 9, 21, 33]
 
 
-def test_14_hour_outage_alerts_at_3h_and_9h_only(tmp_path, fake_db):
+def _per_threshold(stale):
+    return {h: sum(1 for m, _ in stale if m // 60 in (h, h + 1)) for h in (3, 9, 21)}
+
+
+def test_14_hour_outage_alerts_each_threshold_once_or_twice(tmp_path, fake_db):
     stale = _simulate(tmp_path, fake_db, 14)
-    assert [m for m, _ in stale] == [180 + 0, 540]  # 3 h and 9 h after the last reading
+    counts = _per_threshold(stale)
+    assert counts[3] == 2 and counts[9] == 2 and counts[21] == 0  # 20 min runs: twice each
+    assert len(stale) == 4  # not about 40
     assert all("TST01" in msg for _, msg in stale)
 
 
 def test_outage_repeats_every_12_h_after_the_9h_alert(tmp_path, fake_db):
     stale = _simulate(tmp_path, fake_db, 22)
-    assert [m // 60 for m, _ in stale] == [3, 9, 21]
+    assert {m // 60 for m, _ in stale} == {3, 9, 21}
 
 
-def test_skipped_run_in_the_crossing_window_loses_it_but_next_threshold_alerts(tmp_path, fake_db):
-    # run index 9 is the 3 h run (180 min): skipped, so no first alert; 9 h still alerts once
+def test_skipped_run_still_announces_the_threshold(tmp_path, fake_db):
+    # run index 9 (the 3 h run) is skipped; the 3 h 20 min run still covers the crossing
     stale = _simulate(tmp_path, fake_db, 10, skip=(9,))
-    assert [m // 60 for m, _ in stale] == [9]
+    assert [m for m, _ in stale if m < 360] == [200]
+    # two skipped runs in a row leave a 60 min gap: beyond the window, this threshold is missed
+    stale = _simulate(tmp_path, fake_db, 10, skip=(9, 10))
+    assert [m for m, _ in stale if m < 360] == []
 
 
-def test_late_run_after_longer_gap_alerts_once_when_interval_covers_it():
-    gap = timedelta(minutes=50)  # previous run 50 min ago (late cron)
-    assert collector.threshold_crossed(timedelta(hours=3, minutes=30), gap)
-    assert not collector.threshold_crossed(timedelta(hours=3, minutes=51), gap)
+def test_jittered_runs_announce_every_threshold_once_or_twice():
+    steps = [20, 35, 5, 40, 20, 30, 10, 40, 25, 15]  # minutes between runs, all <= 40
+    runs, minute, i = [], 1, 0
+    while minute < 36 * 60:
+        runs.append(minute)
+        minute += steps[i % len(steps)]
+        i += 1
+    announced = [m for m in runs if collector.threshold_crossed(timedelta(minutes=m))]
+    for hours in (3, 9, 21, 33):
+        t = timedelta(hours=hours)
+        n = sum(1 for a in announced if timedelta(minutes=a - 40) < t <= timedelta(minutes=a))
+        assert 1 <= n <= 2, hours
+    assert len(announced) <= 8
+
+
+def test_run_later_than_the_window_can_miss_a_crossing():
+    assert not collector.threshold_crossed(timedelta(hours=3, minutes=41))
 
 
 def _store(fake_db, station, ts):

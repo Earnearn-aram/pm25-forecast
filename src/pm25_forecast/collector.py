@@ -78,10 +78,13 @@ STALE_AFTER = timedelta(hours=3)
 # KAN-109 stale-station alert schedule, stateless: alert when the outage age (now minus the
 # station's newest reading, so the outage start comes from the data) crosses a threshold since
 # the previous run. Thresholds: STALE_AFTER, then +STALE_REPEAT_FIRST, then every
-# STALE_REPEAT_EVERY: 3 h, 9 h, 21 h, 33 h, ... "Since the previous run" is COLLECTOR_INTERVAL
-# (the 20 min cadence of the workflow): the run time is not stored, so a run that comes
-# more than one interval after the previous one can miss a crossing (the next threshold alerts).
+# STALE_REPEAT_EVERY: 3 h, 9 h, 21 h, 33 h, ... The previous run time is not stored, so "since the
+# previous run" is assumed to be at most ALERT_WINDOW = 2 x COLLECTOR_INTERVAL (the 20 min
+# cadence): jitter up to 40 min never misses a crossing, and the price is that each threshold
+# is announced once or twice (about 4 messages for a 14 h outage). Exactly once needs stored
+# state (alert_state table, see docs/operations.md).
 COLLECTOR_INTERVAL = timedelta(minutes=20)
+ALERT_WINDOW = 2 * COLLECTOR_INTERVAL
 STALE_REPEAT_FIRST = timedelta(hours=6)  # first repeat, after the first alert
 STALE_REPEAT_EVERY = timedelta(hours=12)  # every repeat after that
 HISTORY_LOOKBACK_HOURS = 6  # hourly history re-read per station each run (late data, missed runs)
@@ -137,8 +140,8 @@ def alert_thresholds(limit: timedelta) -> list[timedelta]:
     return out
 
 
-def threshold_crossed(age: timedelta, since_previous: timedelta = COLLECTOR_INTERVAL) -> bool:
-    """True when an alert threshold lies in (age - since_previous, age]: alert once per crossing."""
+def threshold_crossed(age: timedelta, since_previous: timedelta = ALERT_WINDOW) -> bool:
+    """True when an alert threshold lies in (age - since_previous, age]: alert a crossing."""
     return any(age - since_previous < t <= age for t in alert_thresholds(age))
 
 
