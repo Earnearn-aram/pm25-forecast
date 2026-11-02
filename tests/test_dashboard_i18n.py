@@ -214,3 +214,17 @@ def test_kpi_tooltip_escapes_text_and_script_toggles_it(tmp_path):
     assert 'e.key !== "Escape"' in js and "aria-expanded" in js
     css = (tmp_path / "dashboard.css").read_text()
     assert ".kpi-tip" in css and "overflow-wrap: anywhere" in css
+
+
+def test_kpi_tooltip_js_handlers_registered(tmp_path):
+    js = (ASSETS / "dashboard.js").read_text()
+    assert re.search(
+        r'document\.addEventListener\("keydown",\s*function \(e\)\s*\{\s*'
+        r'if \(e\.key !== "Escape"\) return;',
+        js,
+    )
+    assert re.search(
+        r'document\.addEventListener\("click",\s*function \(e\)\s*\{\s*tipButtons\.forEach', js
+    )
+    assert "card.contains(e.target)" in js and "button.hidden = false" in js
+    assert re.search(r'button\.addEventListener\("click",.*setTip\(button', js)

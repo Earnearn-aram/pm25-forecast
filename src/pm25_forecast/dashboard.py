@@ -1272,7 +1272,7 @@ def _kpi_tip_texts(key: str, data: dict[str, Any]) -> list[tuple[str, str]]:
         s24 = ((data.get("scores") or {}).get("challenger") or {}).get(str(HEADLINE_H)) or {}
         n = s24.get("n_matched")
         n_en = f" Right now n = {n}." if n else " There are no matched forecasts yet."
-        n_th = f" ขณะนี้ n = {n}" if n else " ยังไม่มีค่าพยากรณ์ที่จับคู่ได้"
+        n_th = f" ขณะนี้ n = {n}." if n else " ยังไม่มีค่าพยากรณ์ที่จับคู่ได้."
         chal = data["challenger_version"]
         model_en = (
             f"Model: {chal} (the shadow challenger). The model changes when the challenger does."
@@ -1345,14 +1345,17 @@ def _kpi_tip_texts(key: str, data: dict[str, Any]) -> list[tuple[str, str]]:
                 "สถานีนับว่ายังส่งข้อมูลถ้าค่าล่าสุดเก่าไม่เกิน 3 ชั่วโมง",
             ),
             (
-                "Reading: Air4Thai updates hourly, so under about 60\u201390 minutes is normal. "
-                "A station with no reading for over 3 hours triggers a collector alert and its "
-                "baseline forecast is skipped (it is also a data quality warning). Over 6 hours "
+                "Reading: Air4Thai updates hourly, so under about 60\u201390 minutes is normal "
+                "(a rule of thumb). "
+                "The collector alerts when a station crosses 3 hours without a reading, and "
+                "forecasts for that station are skipped (it is also a data quality warning). "
+                "Over 6 hours "
                 "is a data quality failure. The minutes show the newest station only; the "
                 "station count shows the rest.",
                 "การอ่านค่า: Air4Thai อัปเดตทุกชั่วโมง จึงปกติถ้าน้อยกว่าประมาณ 60\u201390 นาที "
-                "สถานีที่ไม่มีค่าตรวจวัดเกิน 3 ชั่วโมงจะทำให้ตัวเก็บข้อมูลแจ้งเตือน "
-                "และข้ามการพยากรณ์วิธีพื้นฐานของสถานีนั้น (และเป็นคำเตือนด้านคุณภาพข้อมูลด้วย) "
+                "(เป็นเกณฑ์คร่าว ๆ) "
+                "ตัวเก็บข้อมูลจะแจ้งเตือนเมื่อสถานีไม่มีค่าตรวจวัดเกิน 3 ชั่วโมง "
+                "และข้ามการพยากรณ์ของสถานีนั้น (และเป็นคำเตือนด้านคุณภาพข้อมูลด้วย) "
                 "เกิน 6 ชั่วโมงถือว่าคุณภาพข้อมูลไม่ผ่าน "
                 "ตัวเลขนาทีแสดงเฉพาะสถานีที่ใหม่ที่สุด ส่วนจำนวนสถานีบอกภาพรวมที่เหลือ",
             ),
@@ -1375,11 +1378,14 @@ def _kpi_tip_texts(key: str, data: dict[str, Any]) -> list[tuple[str, str]]:
             "แนวคิด: ข้อมูลนำเข้าช่วงล่าสุดยังคล้ายกับข้อมูลที่โมเดลใช้เรียนรู้หรือไม่",
         ),
         (
-            "Calculation: Population Stability Index (PSI) of the last 7 days against the "
-            "model\u2019s training reference, using 5 quantile bins. The number is the worst "
-            "feature, named under it.",
-            "วิธีคำนวณ: ค่า Population Stability Index (PSI) ของ 7 วันล่าสุดเทียบกับข้อมูลอ้างอิงตอนฝึกโมเดล "
-            "แบ่งเป็น 5 ช่วงตามควอนไทล์ ตัวเลขคือค่าของตัวแปรที่แย่ที่สุด ซึ่งระบุชื่อไว้ด้านล่าง",
+            "Calculation: Population Stability Index (PSI) of the last 7 days against "
+            "same-season training data, using 5 quantile bins, for the inputs and the target. "
+            "The number is the worst feature, named under it, from the latest daily drift run "
+            "(up to about 3 days old).",
+            "วิธีคำนวณ: ค่า Population Stability Index (PSI) ของ 7 วันล่าสุดเทียบกับข้อมูลฝึกช่วงฤดูเดียวกัน "
+            "แบ่งเป็น 5 ช่วงตามควอนไทล์ ครอบคลุมทั้งข้อมูลนำเข้าและค่าเป้าหมาย "
+            "ตัวเลขคือค่าของตัวแปรที่แย่ที่สุด ซึ่งระบุชื่อไว้ด้านล่าง จากการตรวจความเปลี่ยนแปลงรายวันครั้งล่าสุด "
+            "(เก่าได้ถึงประมาณ 3 วัน)",
         ),
         (
             "Reading: below 0.1 means no meaningful change, 0.1 to 0.2 a moderate change, "
