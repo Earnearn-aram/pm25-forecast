@@ -127,3 +127,90 @@ def test_chart_v2_legend_caption_and_labels_have_thai(tmp_path):
     page = (tmp_path / "index.html").read_text()
     for english in ("Measured", "Baseline forecast (tomorrow = today)", "Model forecast"):
         assert f"</i>{english}</span>" in page
+
+
+# --- KAN-103: KPI card tooltips --------------------------------------------------------------
+
+TIP_KEYS = ("skill", "mae", "fresh", "psi")
+
+
+def _card_html(page: str, title: str) -> str:
+    start = page.index(f">{title}</p>")
+    start = page.rindex('<div class="card">', 0, start)
+    return page[start : page.index("</div></div>", page.index('class="kpi-tip"', start))]
+
+
+def test_each_kpi_card_has_an_accessible_bilingual_tooltip(tmp_path):
+    page = pages(tmp_path)["scored"]
+    els = parse(page)
+    for key in TIP_KEYS:
+        btn = next(a for t, a in els if t == "button" and a.get("data-tip") == key)
+        assert btn["type"] == "button" and btn["aria-expanded"] == "false"
+        assert btn["aria-controls"] == f"tip-{key}" and "hidden" in btn  # JS reveals it
+        panel = next(a for t, a in els if a.get("id") == f"tip-{key}")
+        assert panel["role"] == "note" and "hidden" in panel
+    titles = (
+        "Beats the baseline by",
+        "Typical error (MAE, µg/m³)",
+        "Data freshness",
+        "Input drift (PSI)",
+    )
+    for key, title in zip(TIP_KEYS, titles, strict=True):
+        card = _card_html(page, title)
+        assert f'aria-controls="tip-{key}"' in card and f'id="tip-{key}"' in card
+        panel_els = [a for _, a in parse(card.split('class="kpi-tip"', 1)[1]) if "data-en" in a]
+        assert len(panel_els) >= 3
+        for a in panel_els:
+            assert THAI.search(a["data-th"]) and a["data-th"] != a["data-en"]
+
+
+def test_kpi_tooltip_content_matches_the_code(tmp_path):
+    page = pages(tmp_path)["scored"]
+    skill = _card_html(page, "Beats the baseline by")
+    assert "persistence (tomorrow equals now)" in skill
+    assert "(MAE of persistence \u2212 MAE of the model) \u00f7 MAE of persistence" in skill
+    assert "matched station-hours" in skill and "last 7 days at +24 h" in skill
+    assert "Right now n = 96." in skill  # 2 stations x 48 matched issue times
+    assert "not a significance test" in skill
+    assert "Model: " in skill and "(the shadow challenger)" in skill
+    assert "not squared" in _card_html(page, "Typical error (MAE, µg/m³)")
+    fresh = _card_html(page, "Data freshness")
+    for text in ("60\u201390 minutes", "over 3 hours", "Over 6 hours", "at most 3 hours old"):
+        assert text in fresh
+    psi = _card_html(page, "Input drift (PSI)")
+    for text in ("5 quantile bins", "below 0.1", "0.1 to 0.2", "above 0.2", "2 consecutive"):
+        assert text in psi
+    assert "not that the model got worse" in psi
+    assert "Waiting means not comparable yet." in psi
+    no_chal = _card_html(pages(tmp_path)["no_challenger"], "Beats the baseline by")
+    assert "No challenger is configured" in no_chal
+
+
+def test_kpi_tooltip_reuses_drift_reason_when_waiting():
+    data = {
+        "challenger_version": None,
+        "kpi": {"worst_psi": None},
+        "drift": {
+            "features": [
+                {"name": "cams_pm25", "psi": None, "status": "insufficient"},
+                {"name": "target_pm25", "psi": None, "status": "insufficient"},
+            ]
+        },
+    }
+    texts = dashboard._kpi_tip_texts("psi", data)
+    assert dashboard.DRIFT_CAMS in texts and dashboard.DRIFT_ERA in texts
+
+
+def test_kpi_tooltip_escapes_text_and_script_toggles_it(tmp_path):
+    texts = dashboard._kpi_tip_texts("skill", {"challenger_version": "<b>x</b>", "scores": {}})
+    panel = dashboard._kpi_tip_panel(
+        "skill", {"challenger_version": "<b>x</b>", "scores": {}, "kpi": {}}
+    )
+    assert any("<b>x</b>" in en for en, _ in texts)
+    assert "<b>x</b>" not in panel and "&lt;b&gt;x&lt;/b&gt;" in panel
+    build(Fake(), tmp_path)
+    js = (tmp_path / "dashboard.js").read_text()
+    assert 'document.querySelectorAll(".tip-btn")' in js
+    assert 'e.key !== "Escape"' in js and "aria-expanded" in js
+    css = (tmp_path / "dashboard.css").read_text()
+    assert ".kpi-tip" in css and "overflow-wrap: anywhere" in css

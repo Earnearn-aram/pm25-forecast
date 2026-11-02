@@ -385,6 +385,29 @@
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") { stepPinned = null; hideStep(); } });
     document.addEventListener("click", function (e) { if (!e.target.closest(".arch-node")) { stepPinned = null; hideStep(); } });
   }
+  var tipButtons = document.querySelectorAll(".tip-btn");
+  function setTip(button, open) {
+    var panel = document.getElementById(button.getAttribute("aria-controls"));
+    if (!panel) return;
+    panel.hidden = !open;
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  tipButtons.forEach(function (button) {
+    button.hidden = false;
+    button.addEventListener("click", function () { setTip(button, button.getAttribute("aria-expanded") !== "true"); });
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    tipButtons.forEach(function (button) {
+      if (button.getAttribute("aria-expanded") === "true") { setTip(button, false); if (button.contains(document.activeElement) || document.activeElement === document.body) button.focus(); }
+    });
+  });
+  document.addEventListener("click", function (e) {
+    tipButtons.forEach(function (button) {
+      var card = button.closest(".card");
+      if (card && !card.contains(e.target)) setTip(button, false);
+    });
+  });
   window.setInterval(updateControls, 60000);
   document.querySelectorAll(".source-list details").forEach(function (detail) {
     detail.addEventListener("mouseenter", function () { detail.open = true; });
