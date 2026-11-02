@@ -24,6 +24,18 @@ body carries both `text` and `content`). Without it, alerts are logged only, wit
 (`.github/workflows/heartbeat.yml`). Each run logs one `RUN_SUMMARY {json}` line; log timestamps
 are UTC.
 
+Stale-station alerts (KAN-109) are de-duplicated without stored state. The outage age is now minus the
+station's newest reading (so the outage start comes from the data). A run alerts only when an age
+threshold was crossed since the previous run (`COLLECTOR_INTERVAL`, 20 min): thresholds are 3 h,
+then +6 h, then every +12 h: 3, 9, 21, 33 h ... (constants `STALE_AFTER`, `STALE_REPEAT_FIRST`,
+`STALE_REPEAT_EVERY`, `COLLECTOR_INTERVAL` in `collector.py`). A 14 h outage gives 2 alerts, not about
+40. Stations are independent. When readings return after an outage of more than 3 h, one
+`station X recovered after N h without readings` message is sent (N = time since the last stored
+reading). Limit: the previous run time is not stored, so a run more than 20 min after the previous
+one (GitHub cron can be 10-40 min late or skipped) can miss a crossing; the next threshold still
+alerts, and a missed recovery message is not repeated. Gap alerts stay one per gap; quality alerts
+are unchanged.
+
 Backfill (KAN-12 part 1, KAN-34): `uv run python -m pm25_forecast.backfill [--lookback-days 120]
 [--stations 59t,61t]` upserts whatever hourly history Air4Thai still holds (a rolling window of
 about 3 months) into `observations`. Same settings as the collector; idempotent, so it runs daily

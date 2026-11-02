@@ -311,7 +311,7 @@ def test_run_flags_gap_alerts_and_does_not_invent_rows(tmp_path, fake_db):
     alerts: list[str] = []
     result = do_run(tmp_path, fake_db, alert=alerts.append)
     assert [g.missing_hours for g in result.gaps] == [2]
-    assert len(alerts) == 1
+    assert len([a for a in alerts if a.startswith("gap in Air4Thai data")]) == 1  # one per gap
     assert "TST01" in alerts[0]
     assert len(fake_db.rows("observations")) == 4  # the stored one and the three new hours only
 
@@ -339,15 +339,98 @@ def test_stale_station_alerts_once_as_it_crosses_the_threshold(tmp_path, fake_db
     assert alerts == []
 
 
-def test_stale_alert_window_across_runs_is_not_silent(tmp_path, fake_db):
+def _simulate(tmp_path, fake_db, hours, step_min=20, skip=()):
+    """Collector runs every `step_min` minutes while the station stays silent."""
+    alerts: list[tuple[int, str]] = []
+    for i in range(0, hours * 60 // step_min + 1):
+        if i in skip:
+            continue
+        minute = i * step_min
+        do_run(
+            tmp_path,
+            fake_db,
+            now=TST01_TS + timedelta(minutes=minute + 5),  # off the exact threshold
+            alert=lambda m, minute=minute: alerts.append((minute, m)),
+        )
+    return [(m, msg) for m, msg in alerts if "no reading" in msg]
+
+
+def test_alert_thresholds_are_3_9_21_33_hours():
+    hours = [t.total_seconds() / 3600 for t in collector.alert_thresholds(timedelta(hours=40))]
+    assert hours == [3, 9, 21, 33]
+
+
+def test_14_hour_outage_alerts_at_3h_and_9h_only(tmp_path, fake_db):
+    stale = _simulate(tmp_path, fake_db, 14)
+    assert [m for m, _ in stale] == [180 + 0, 540]  # 3 h and 9 h after the last reading
+    assert all("TST01" in msg for _, msg in stale)
+
+
+def test_outage_repeats_every_12_h_after_the_9h_alert(tmp_path, fake_db):
+    stale = _simulate(tmp_path, fake_db, 22)
+    assert [m // 60 for m, _ in stale] == [3, 9, 21]
+
+
+def test_skipped_run_in_the_crossing_window_loses_it_but_next_threshold_alerts(tmp_path, fake_db):
+    # run index 9 is the 3 h run (180 min): skipped, so no first alert; 9 h still alerts once
+    stale = _simulate(tmp_path, fake_db, 10, skip=(9,))
+    assert [m // 60 for m, _ in stale] == [9]
+
+
+def test_late_run_after_longer_gap_alerts_once_when_interval_covers_it():
+    gap = timedelta(minutes=50)  # previous run 50 min ago (late cron)
+    assert collector.threshold_crossed(timedelta(hours=3, minutes=30), gap)
+    assert not collector.threshold_crossed(timedelta(hours=3, minutes=51), gap)
+
+
+def _store(fake_db, station, ts):
+    fake_db.execute(
+        sql.UPSERT_OBSERVATION,
+        {"station_id": station, "ts": ts, "pm25": 9.0, "source": "air4thai"},
+    )
+
+
+def _write(fake_db, now, new, stations=("A", "B")):
+    result = collector.CollectorResult(run_id="r")
+    collector.write_observations(fake_db, new, list(stations), now, result)
+    return result
+
+
+def test_two_stations_alert_independently(fake_db):
+    t0 = datetime(2026, 5, 1, tzinfo=UTC)
+    _store(fake_db, "A", t0)
+    _store(fake_db, "B", t0 - timedelta(hours=6))  # B's outage started 6 h earlier
+    now = t0 + timedelta(hours=3, minutes=10)  # A: 3 h 10 min, B: 9 h 10 min
+    result = _write(fake_db, now, [])
+    assert result.newly_stale_stations == ["A", "B"]
+    later = _write(fake_db, now + timedelta(hours=1), [])
+    assert later.newly_stale_stations == [] and later.stale_stations == ["A", "B"]
+
+
+def test_recovery_message_once_with_outage_length(tmp_path, fake_db):
+    t0 = datetime(2026, 5, 1, tzinfo=UTC)
+    _store(fake_db, "A", t0)
+    now = t0 + timedelta(hours=14)
+    result = _write(fake_db, now, [obs("A", now - timedelta(minutes=10), 7.0)])
+    assert result.recovered_stations == {"A": timedelta(hours=14)}
+    assert result.stale_stations == []
+    # next run: the stored newest reading is the new one, so nothing repeats
+    again = _write(fake_db, now + timedelta(minutes=20), [])
+    assert again.recovered_stations == {}
+
+
+def test_short_gap_is_not_a_recovery(fake_db):
+    t0 = datetime(2026, 5, 1, tzinfo=UTC)
+    _store(fake_db, "A", t0)
+    now = t0 + timedelta(hours=2)
+    assert _write(fake_db, now, [obs("A", now, 7.0)]).recovered_stations == {}
+
+
+def test_recovery_alert_text(tmp_path, fake_db):
     alerts: list[str] = []
-    for offset in (timedelta(hours=2, minutes=55), timedelta(hours=3, minutes=40)):
-        do_run(tmp_path, fake_db, now=TST01_TS + offset, alert=alerts.append)
-        if offset < timedelta(hours=3):
-            assert alerts == []  # not stale yet
-    assert len(alerts) == 1  # fires at 3h40, inside the 60 minute window
-    do_run(tmp_path, fake_db, now=TST01_TS + timedelta(hours=4, minutes=10), alert=alerts.append)
-    assert len(alerts) == 1  # past the window: quiet
+    _store(fake_db, "TST01", TST01_TS - timedelta(hours=10))
+    do_run(tmp_path, fake_db, now=TST01_TS + timedelta(minutes=5), alert=alerts.append)
+    assert any("station TST01 recovered after 10 h" in a for a in alerts)
 
 
 def test_fresh_station_is_not_stale(tmp_path, fake_db):
