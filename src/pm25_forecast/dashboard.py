@@ -828,7 +828,36 @@ def _x_ticks(start: datetime, stop: datetime) -> list[datetime]:
     return ticks
 
 
-def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
+def _stale_age_min(st: dict[str, Any], generated_at: datetime | None) -> int | None:
+    """Minutes since the newest reading when it is older than REPORTING_H, else None (KAN-108)."""
+    if generated_at is None or not st.get("latest_at"):
+        return None
+    age = int((generated_at - datetime.fromisoformat(st["latest_at"])).total_seconds() // 60)
+    return age if age > REPORTING_H * 60 else None
+
+
+def _stale_note(st: dict[str, Any], age_min: int) -> tuple[str, str]:
+    """(English, Thai) reason a stale station has no forecast, computed from the data."""
+    hours = age_min // 60
+    last = _bkk(datetime.fromisoformat(st["latest_at"]))
+    en = (
+        f"No forecast: no new reading from this station for {hours} h "
+        f"(last reading {last} Bangkok). Forecasts resume when readings return."
+    )
+    th = (
+        f"ไม่มีค่าพยากรณ์: สถานีนี้ไม่มีค่าที่ตรวจวัดใหม่มา {hours} ชั่วโมง "
+        f"(ค่าล่าสุดเวลา {last} น. เวลากรุงเทพฯ) ค่าพยากรณ์จะกลับมาเมื่อมีค่าตรวจวัดใหม่"
+    )
+    return en, th
+
+
+def _bilingual(en: str, th: str, cls: str) -> str:
+    return f'<span class="{cls}" data-en="{e(en)}" data-th="{e(th)}">{e(en)}</span>'
+
+
+def _chart_block(
+    st: dict[str, Any], chart: dict[str, Any], first: bool, generated_at: datetime | None = None
+) -> str:
     # Past 24 h of measurements, then forecasts that start at the latest measured point.
     points = st["points"][-25:]
     future_keys = (
@@ -840,6 +869,7 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
     values += [
         p["value"] for key, _, _ in future_keys for p in st.get(key, []) if p["value"] is not None
     ]
+    stale_age = _stale_age_min(st, generated_at)
     if not values:
         body = '<p class="muted small">No hourly data for this station yet.</p>'
         hidden = "" if first else " hidden"
@@ -987,13 +1017,15 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
                 f'<span class="forecast-point"><b>{label} forecast</b> +{hours_ahead} h · '
                 f"{forecast['value']:g} µg/m³ <small>({_bkk(valid)})</small></span>"
             )
+    if future_html:
+        empty = ""
+    elif stale_age is not None:
+        empty = _bilingual(*_stale_note(st, stale_age), "forecast-empty stale-note")
+    else:
+        empty = '<span class="forecast-empty">Waiting for future forecasts.</span>'
     future_block = (
         '<div class="future-forecasts"><strong>Upcoming forecasts</strong>'
-        + (
-            "".join(future_html)
-            if future_html
-            else '<span class="forecast-empty">Waiting for future forecasts.</span>'
-        )
+        + ("".join(future_html) or empty)
         + "</div>"
     )
     body = (
@@ -1002,6 +1034,23 @@ def _chart_block(st: dict[str, Any], chart: dict[str, Any], first: bool) -> str:
     )
     hidden = "" if first else " hidden"
     return f'<div class="chart" data-station="{e(st["id"])}"{hidden}>{body}</div>'
+
+
+def _pill(st: dict[str, Any], first: bool, generated_at: datetime) -> str:
+    label = st["label"]
+    pressed = "true" if first else "false"
+    stale = ""
+    name = label
+    if _stale_age_min(st, generated_at) is not None:
+        en, th = "no recent reading", "ไม่มีค่าตรวจวัดล่าสุด"
+        name = f"{label}, {en}"
+        stale = f' data-stale-en="{e(en)}" data-stale-th="{e(th)}"'
+    dot = '<span class="stale-dot" aria-hidden="true"></span>' if stale else ""
+    return (
+        f'<button type="button" class="pill" data-station="{e(st["id"])}" '
+        f'data-label="{e(label)}" aria-label="{e(name)}"{stale} '
+        f'aria-pressed="{pressed}">{e(label)}{dot}</button>'
+    )
 
 
 def _section_chart(data: dict[str, Any]) -> str:
@@ -1022,13 +1071,9 @@ def _section_chart(data: dict[str, Any]) -> str:
     else:
         sts = chart["stations"]
         title = f"{CHART_TITLE} \u00b7 {sts[0]['label']}"
-        pills = "".join(
-            f'<button type="button" class="pill" data-station="{e(s["id"])}" '
-            f'data-label="{e(s["label"])}" aria-label="{e(s["label"])}" '
-            f'aria-pressed="{"true" if i == 0 else "false"}">{e(s["label"])}</button>'
-            for i, s in enumerate(sts)
-        )
-        inner = "".join(_chart_block(s, chart, i == 0) for i, s in enumerate(sts))
+        generated_at = datetime.fromisoformat(data["generated_at"])
+        pills = "".join(_pill(s, i == 0, generated_at) for i, s in enumerate(sts))
+        inner = "".join(_chart_block(s, chart, i == 0, generated_at) for i, s in enumerate(sts))
     return (
         '<figure class="card wide" style="margin:0"><div class="cardhead">'
         f'<h2 id="chart-title">{e(title)}</h2>'
