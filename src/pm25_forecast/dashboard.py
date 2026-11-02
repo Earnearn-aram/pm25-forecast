@@ -596,7 +596,7 @@ def _cov_cams(rd: Reader, now: datetime) -> dict[str, Any]:
         got = sum(1 for t in slots if start <= t < current)
         got_open = 1 if current in slots else 0
         out[f"pct_{hours}h"] = _pct(got + got_open, due + got_open)
-    out["since"] = _iso(None if first is None else _hour(first))
+    out["since"] = _iso(None if first is None else _slot(first))
     out["clamped"] = first is not None and _slot(first) > since
     return out
 
@@ -1686,8 +1686,8 @@ def _coverage_texts(key: str, c: dict[str, Any]) -> tuple[tuple[str, str], tuple
                 f"ช่วงสิ้นสุดที่ชั่วโมงล่าสุดที่ถึงกำหนดแล้ว{since_th} ค่าล่าสุด: {age_th}",
             )
         )
-    over_en = " Overdue: a cycle was missed." if c.get("overdue") else ""
-    over_th = " ล่าช้า: พลาดหนึ่งรอบ" if c.get("overdue") else ""
+    over_en = " Overdue: the newest vintage is more than 24 h old." if c.get("overdue") else ""
+    over_th = " ล่าช้า: ชุดล่าสุดเก่ากว่า 24 ชม." if c.get("overdue") else ""
     since_en = f" Collected since {_day(c['since'])}." if c.get("clamped") else ""
     since_th = f" เก็บตั้งแต่ {_day(c['since'])}" if c.get("clamped") else ""
     n = c.get("cycle_hours", CAMS_CYCLE_H)
