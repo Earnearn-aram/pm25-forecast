@@ -1247,6 +1247,164 @@ def _drift_reason(f: dict[str, Any]) -> tuple[str, str]:
     return DRIFT_CAMS if f["name"] == "cams_pm25" else DRIFT_ERA
 
 
+KPI_TIP_TITLES = {
+    "skill": ("Beats the baseline by", "แม่นกว่าวิธีพื้นฐาน"),
+    "mae": ("Typical error (MAE, \u00b5g/m\u00b3)", "ความคลาดเคลื่อนเฉลี่ย (MAE, \u00b5g/m\u00b3)"),
+    "fresh": ("Data freshness", "ความใหม่ของข้อมูล"),
+    "psi": ("Input drift (PSI)", "การเปลี่ยนแปลงของข้อมูล (PSI)"),
+}
+
+
+def _kpi_tip_button(key: str, title: str) -> str:
+    """Disclosure button (tap, Enter, Space); JS reveals it and toggles the panel."""
+    en, th = KPI_TIP_TITLES[key]
+    label = _bi(f"About: {en}", f"อธิบาย: {th}", cls="sr-only")
+    return (
+        f'<button type="button" class="tip-btn" data-tip="{key}" aria-expanded="false" '
+        f'aria-controls="tip-{key}" hidden><span aria-hidden="true">i</span>{label}</button>'
+    )
+
+
+def _kpi_tip_texts(key: str, data: dict[str, Any]) -> list[tuple[str, str]]:
+    """(English, Thai) paragraphs. Every number and rule here mirrors score.py, quality.py,
+    collector.py, drift.py and the helpers above; dynamic values come from the page data."""
+    if key == "skill":
+        s24 = ((data.get("scores") or {}).get("challenger") or {}).get(str(HEADLINE_H)) or {}
+        n = s24.get("n_matched")
+        n_en = f" Right now n = {n}." if n else " There are no matched forecasts yet."
+        n_th = f" ขณะนี้ n = {n}." if n else " ยังไม่มีค่าพยากรณ์ที่จับคู่ได้."
+        chal = data["challenger_version"]
+        model_en = (
+            f"Model: {chal} (the shadow challenger). The model changes when the challenger does."
+            if chal
+            else "No challenger is configured, so there is nothing to compare yet."
+        )
+        model_th = (
+            f"โมเดล: {chal} (โมเดลท้าชิงที่ทำงานคู่ขนาน) และจะเปลี่ยนเมื่อโมเดลท้าชิงเปลี่ยน"
+            if chal
+            else "ยังไม่ได้ตั้งค่าโมเดลท้าชิง จึงยังไม่มีอะไรให้เปรียบเทียบ"
+        )
+        return [
+            (
+                "Idea: how much better the model\u2019s +24 h forecast is than the simplest "
+                "baseline, persistence (tomorrow equals now).",
+                "แนวคิด: ค่าพยากรณ์ล่วงหน้า 24 ชั่วโมงของโมเดลแม่นกว่าวิธีพื้นฐานที่สุด "
+                "คือ persistence (พรุ่งนี้เท่ากับตอนนี้) มากแค่ไหน",
+            ),
+            (
+                "Calculation: (MAE of persistence \u2212 MAE of the model) \u00f7 MAE of "
+                "persistence, over the last 7 days at +24 h, only on matched station-hours "
+                f"where both forecasts exist.{n_en}",
+                "วิธีคำนวณ: (MAE ของ persistence \u2212 MAE ของโมเดล) \u00f7 MAE ของ persistence "
+                "ในช่วง 7 วันล่าสุดที่ +24 ชม. เฉพาะสถานีและชั่วโมงที่มีค่าพยากรณ์ของทั้งสองวิธี"
+                f"{n_th}",
+            ),
+            (
+                "Reading: above 0 is better than persistence, 0 is the same, below 0 is worse. "
+                "With a small n the number is noisy. It is not a significance test.",
+                "การอ่านค่า: มากกว่า 0 คือแม่นกว่า persistence, 0 คือเท่ากัน, น้อยกว่า 0 คือแย่กว่า "
+                "ถ้า n น้อยค่านี้จะแกว่งมาก และไม่ใช่การทดสอบนัยสำคัญทางสถิติ",
+            ),
+            (model_en, model_th),
+        ]
+    if key == "mae":
+        return [
+            (
+                "Idea: the average size of a forecast miss, in \u00b5g/m\u00b3 of PM2.5.",
+                "แนวคิด: ขนาดเฉลี่ยของความคลาดเคลื่อนของค่าพยากรณ์ มีหน่วยเป็น \u00b5g/m\u00b3 ของ PM2.5",
+            ),
+            (
+                "Calculation: the mean of |forecast \u2212 actual| over scored forecasts, last "
+                "7 days at +24 h, for the model and for persistence (shown under the number). "
+                "Each average uses all of that method\u2019s scored forecasts, so it can cover "
+                "slightly different hours than the skill above.",
+                "วิธีคำนวณ: ค่าเฉลี่ยของ |ค่าพยากรณ์ \u2212 ค่าจริง| จากค่าพยากรณ์ที่ประเมินแล้ว "
+                "ใน 7 วันล่าสุดที่ +24 ชม. ของโมเดลและของ persistence (แสดงใต้ตัวเลข) "
+                "แต่ละค่าเฉลี่ยใช้ค่าพยากรณ์ที่ประเมินแล้วทั้งหมดของวิธีนั้น "
+                "จึงอาจครอบคลุมชั่วโมงไม่ตรงกับค่า Skill ด้านบนทั้งหมด",
+            ),
+            (
+                "Reading: lower is better. Compare it with persistence. Large misses count in "
+                "proportion to their size (not squared).",
+                "การอ่านค่า: ยิ่งต่ำยิ่งดี ให้เทียบกับ persistence "
+                "ความคลาดเคลื่อนที่ใหญ่นับตามขนาดจริง (ไม่ยกกำลังสอง)",
+            ),
+        ]
+    if key == "fresh":
+        return [
+            (
+                "Idea: how long ago the newest reading arrived, and how many stations are "
+                "still reporting.",
+                "แนวคิด: ค่าตรวจวัดล่าสุดเข้ามานานเท่าไรแล้ว และมีกี่สถานีที่ยังส่งข้อมูลอยู่",
+            ),
+            (
+                "Calculation: minutes since the newest reading across the stations that sent "
+                "data in the last 7 days. A station counts as reporting if its newest reading "
+                "is at most 3 hours old.",
+                "วิธีคำนวณ: จำนวนนาทีนับจากค่าตรวจวัดล่าสุดของทุกสถานีที่ส่งข้อมูลใน 7 วันล่าสุด "
+                "สถานีนับว่ายังส่งข้อมูลถ้าค่าล่าสุดเก่าไม่เกิน 3 ชั่วโมง",
+            ),
+            (
+                "Reading: Air4Thai updates hourly, so under about 60\u201390 minutes is normal "
+                "(a rule of thumb). "
+                "The collector alerts when a station crosses 3 hours without a reading, and "
+                "forecasts for that station are skipped (it is also a data quality warning). "
+                "Over 6 hours "
+                "is a data quality failure. The minutes show the newest station only; the "
+                "station count shows the rest.",
+                "การอ่านค่า: Air4Thai อัปเดตทุกชั่วโมง จึงปกติถ้าน้อยกว่าประมาณ 60\u201390 นาที "
+                "(เป็นเกณฑ์คร่าว ๆ) "
+                "ตัวเก็บข้อมูลจะแจ้งเตือนเมื่อสถานีไม่มีค่าตรวจวัดเกิน 3 ชั่วโมง "
+                "และข้ามการพยากรณ์ของสถานีนั้น (และเป็นคำเตือนด้านคุณภาพข้อมูลด้วย) "
+                "เกิน 6 ชั่วโมงถือว่าคุณภาพข้อมูลไม่ผ่าน "
+                "ตัวเลขนาทีแสดงเฉพาะสถานีที่ใหม่ที่สุด ส่วนจำนวนสถานีบอกภาพรวมที่เหลือ",
+            ),
+        ]
+    reasons = []
+    d = data.get("drift")
+    if data["kpi"]["worst_psi"] is None and d and d.get("features"):
+        seen: dict[tuple[str, str], None] = {}
+        for f in d["features"]:
+            if f["psi"] is None:
+                seen.setdefault(_drift_reason(f), None)
+        reasons = list(seen)
+    waiting = (
+        "Waiting means not comparable yet.",
+        "รอข้อมูล หมายถึงยังเปรียบเทียบไม่ได้",
+    )
+    return [
+        (
+            "Idea: whether recent inputs still look like the data the model learned from.",
+            "แนวคิด: ข้อมูลนำเข้าช่วงล่าสุดยังคล้ายกับข้อมูลที่โมเดลใช้เรียนรู้หรือไม่",
+        ),
+        (
+            "Calculation: Population Stability Index (PSI) of the last 7 days against "
+            "same-season training data, using 5 quantile bins, for the inputs and the target. "
+            "The number is the worst feature, named under it, from the latest daily drift run "
+            "(up to about 3 days old).",
+            "วิธีคำนวณ: ค่า Population Stability Index (PSI) ของ 7 วันล่าสุดเทียบกับข้อมูลฝึกช่วงฤดูเดียวกัน "
+            "แบ่งเป็น 5 ช่วงตามควอนไทล์ ครอบคลุมทั้งข้อมูลนำเข้าและค่าเป้าหมาย "
+            "ตัวเลขคือค่าของตัวแปรที่แย่ที่สุด ซึ่งระบุชื่อไว้ด้านล่าง จากการตรวจความเปลี่ยนแปลงรายวันครั้งล่าสุด "
+            "(เก่าได้ถึงประมาณ 3 วัน)",
+        ),
+        (
+            "Reading: below 0.1 means no meaningful change, 0.1 to 0.2 a moderate change, "
+            "above 0.2 a warning; an alert needs 2 consecutive daily breaches. It says the "
+            "data changed, not that the model got worse.",
+            "การอ่านค่า: ต่ำกว่า 0.1 คือไม่เปลี่ยนอย่างมีนัยสำคัญ, 0.1\u20130.2 คือเปลี่ยนปานกลาง, "
+            "มากกว่า 0.2 คือเตือน และจะแจ้งเตือนจริงเมื่อเกินติดต่อกัน 2 วัน "
+            "ค่านี้บอกว่าข้อมูลเปลี่ยน ไม่ได้บอกว่าโมเดลแย่ลง",
+        ),
+        waiting,
+        *reasons,
+    ]
+
+
+def _kpi_tip_panel(key: str, data: dict[str, Any]) -> str:
+    paras = "".join(_bi(en, th, tag="p") for en, th in _kpi_tip_texts(key, data))
+    return f'<div id="tip-{key}" class="kpi-tip" role="note" hidden>{paras}</div>'
+
+
 def _section_drift(data: dict[str, Any]) -> str:
     d = data["drift"]
     if d is None:
@@ -1541,10 +1699,11 @@ def render_html(data: dict[str, Any]) -> str:
         else f"worst: {k['worst_psi_feature']} \u00b7 warning above 0.2"
     )
 
-    def card(title: str, value: str, sub: str) -> str:
+    def card(title: str, value: str, sub: str, tip_key: str) -> str:
         return (
-            f'<div class="card"><p class="muted small">{e(title)}</p>{value}'
-            f'<p class="muted small">{e(sub)}</p></div>'
+            f'<div class="card"><div class="kpi-head"><p class="muted small">{e(title)}</p>'
+            f"{_kpi_tip_button(tip_key, title)}</div>{value}"
+            f'<p class="muted small">{e(sub)}</p>{_kpi_tip_panel(tip_key, data)}</div>'
         )
 
     cards = "".join(
@@ -1553,14 +1712,21 @@ def render_html(data: dict[str, Any]) -> str:
                 "Beats the baseline by",
                 _val(skill_txt, good=skill is not None and skill > 0),
                 "challenger vs persistence \u00b7 +24 h \u00b7 7 days",
+                "skill",
             ),
-            card("Typical error (MAE, \u00b5g/m\u00b3)", _val(mae_txt), mae_sub),
+            card("Typical error (MAE, \u00b5g/m\u00b3)", _val(mae_txt), mae_sub, "mae"),
             card(
                 "Data freshness",
                 _val(None if fresh is None else f"{fresh:.0f} min"),
                 fresh_sub,
+                "fresh",
             ),
-            card("Input drift (PSI)", _val(None if psi is None else f"{psi:.2f}"), psi_sub),
+            card(
+                "Input drift (PSI)",
+                _val(None if psi is None else f"{psi:.2f}"),
+                psi_sub,
+                "psi",
+            ),
         ]
     )
     answer_cls = {"yes": "yes", "not_yet": "notyet", "waiting": "waiting"}[head["state"]]
@@ -1570,8 +1736,8 @@ def render_html(data: dict[str, Any]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bangkok PM2.5 forecast \u00b7 live MLOps dashboard</title>
-<link rel="stylesheet" href="dashboard.css?v=kan73-chart-v2">
-<script src="dashboard.js?v=kan73-chart-v2" defer></script>
+<link rel="stylesheet" href="dashboard.css?v=kan73-chart-v2-kan103">
+<script src="dashboard.js?v=kan73-chart-v2-kan103" defer></script>
 </head>
 <body>
 <main>
