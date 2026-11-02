@@ -75,9 +75,18 @@ logger = logging.getLogger(__name__)
 STEP = timedelta(hours=1)  # Air4Thai publishes one reading per station per hour
 MAX_FUTURE_SKEW = timedelta(hours=1)  # a reading further ahead than this is a bad timestamp
 STALE_AFTER = timedelta(hours=3)
-# Alert while a station is 3-4 h stale. Stateless, so a crossing alerts 1-3 times (20 min polls,
-# late or skipped runs); persistent alert state is a follow-up (KAN-30/KAN-19).
-STALE_ALERT_WINDOW = timedelta(minutes=60)
+# KAN-109 stale-station alert schedule, stateless: alert when the outage age (now minus the
+# station's newest reading, so the outage start comes from the data) crosses a threshold since
+# the previous run. Thresholds: STALE_AFTER, then +STALE_REPEAT_FIRST, then every
+# STALE_REPEAT_EVERY: 3 h, 9 h, 21 h, 33 h, ... The previous run time is not stored, so "since the
+# previous run" is assumed to be at most ALERT_WINDOW = 2 x COLLECTOR_INTERVAL (the 20 min
+# cadence): jitter up to 40 min never misses a crossing, and the price is that each threshold
+# is announced once or twice (about 4 messages for a 14 h outage). Exactly once needs stored
+# state (alert_state table, see docs/operations.md).
+COLLECTOR_INTERVAL = timedelta(minutes=20)
+ALERT_WINDOW = 2 * COLLECTOR_INTERVAL
+STALE_REPEAT_FIRST = timedelta(hours=6)  # first repeat, after the first alert
+STALE_REPEAT_EVERY = timedelta(hours=12)  # every repeat after that
 HISTORY_LOOKBACK_HOURS = 6  # hourly history re-read per station each run (late data, missed runs)
 AIR4THAI_PAUSE_S = 2.0  # pause between per-station history requests
 AIR4THAI_MAX_ATTEMPTS = 2  # per request (client default 4 would cost ~110 s per dead station)
@@ -113,11 +122,27 @@ class CollectorResult:
     cams_duplicates_skipped: list[str] = field(default_factory=list)
     gaps: list[Gap] = field(default_factory=list)
     stale_stations: list[str] = field(default_factory=list)
-    newly_stale_stations: list[str] = field(default_factory=list)
+    newly_stale_stations: list[str] = field(default_factory=list)  # a threshold was just crossed
+    stale_ages: dict[str, timedelta] = field(default_factory=dict)  # age of every stale station
+    recovered_stations: dict[str, timedelta] = field(default_factory=dict)  # station -> outage
     failures: list[str] = field(default_factory=list)
 
 
 # --- pure helpers ----------------------------------------------------------------------------
+
+
+def alert_thresholds(limit: timedelta) -> list[timedelta]:
+    """Outage ages that alert, up to `limit`: 3 h, then +6 h, then +12 h each (3, 9, 21, 33 ...)."""
+    out, nxt = [STALE_AFTER], STALE_AFTER + STALE_REPEAT_FIRST
+    while nxt <= limit:
+        out.append(nxt)
+        nxt += STALE_REPEAT_EVERY
+    return out
+
+
+def threshold_crossed(age: timedelta, since_previous: timedelta = ALERT_WINDOW) -> bool:
+    """True when an alert threshold lies in (age - since_previous, age]: alert a crossing."""
+    return any(age - since_previous < t <= age for t in alert_thresholds(age))
 
 
 def as_utc(value: Any) -> datetime:
@@ -324,8 +349,15 @@ def write_observations(
         age = now - newest[sid]
         if age > STALE_AFTER:
             result.stale_stations.append(sid)
-            if age <= STALE_AFTER + STALE_ALERT_WINDOW:  # only as it crosses the threshold
+            result.stale_ages[sid] = age
+            if threshold_crossed(age):
                 result.newly_stale_stations.append(sid)
+        # Back after an outage: the previous run (one interval ago) saw it stale, this run has
+        # a reading newer than anything stored.
+        if sid in last_stored and newest[sid] > last_stored[sid]:
+            outage = now - last_stored[sid]
+            if outage - COLLECTOR_INTERVAL > STALE_AFTER and age <= STALE_AFTER:
+                result.recovered_stations[sid] = outage
     for gap in result.gaps:
         logger.warning("GAP %s", gap)
     for sid in result.stale_stations:
@@ -416,7 +448,15 @@ def run(
         safe_alert(
             alert,
             f"stations with no reading for over {STALE_AFTER}: "
-            + ", ".join(result.newly_stale_stations),
+            + ", ".join(
+                f"{sid} ({result.stale_ages[sid].total_seconds() / 3600:.0f} h)"
+                for sid in result.newly_stale_stations
+            ),
+        )
+    for sid, outage in result.recovered_stations.items():
+        safe_alert(
+            alert,
+            f"station {sid} recovered after {outage.total_seconds() / 3600:.0f} h without readings",
         )
 
     # Transaction 2: CAMS vintages.
