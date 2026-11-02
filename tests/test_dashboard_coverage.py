@@ -67,21 +67,56 @@ def test_openaq_coverage_is_history_only_with_range(tmp_path):
     assert "OpenAQ is history only" in dashboard._coverage_texts("openaq", o)[1][0]
 
 
-def test_cams_coverage_counts_hours_with_a_vintage(tmp_path):
+def cams_cycles(fake, days_hours):
+    """One vintage per listed (day, hour) of Oct 2026, minutes irregular like a real collector."""
+    for day, hour in days_hours:
+        put_cams(fake, NOW.replace(day=day, hour=hour, minute=17))
+
+
+HEALTHY = [(d, h) for d in (27, 28, 29) for h in (6, 18)] + [(30, 6)]  # two cycles a day
+
+
+def test_cams_healthy_two_cycles_a_day_is_100(tmp_path):
     fake = Fake()
-    for i in range(1, 13):  # eleven..0 hours back from END, three vintages per hour
-        for minute in (0, 20, 40):
-            put_cams(fake, END - (i - 1) * H + timedelta(minutes=minute))
-    for minute in (0, 20, 40):  # not yet due: the hour of NOW (12:xx) is outside the window
-        put_cams(fake, NOW.replace(minute=0) + timedelta(minutes=minute // 2))
+    cams_cycles(fake, HEALTHY)
     fake.con.commit()
     build(fake, tmp_path)
     c = load(tmp_path)["coverage"]["cams"]
-    # collection started 12 h before END: both windows count since then (00:00..11:00 = 12 h)
-    assert c["since"].startswith("2026-10-30T00:00") and c["clamped"] is True
-    assert c["pct_24h"] == c["pct_168h"] == 100.0
-    assert "collected since 2026-10-30 00:00 UTC" in (tmp_path / "index.html").read_text()
-    assert c["newest_age_min"] is not None
+    assert c["pct_24h"] == 100.0 and c["pct_168h"] == 100.0 and c["clamped"] is True
+    assert c["since"].startswith("2026-10-27T00:00") and c["cycle_hours"] == 12
+    assert c["overdue"] is False and c["newest_age_min"] == 6 * 60 + 3
+    page = (tmp_path / "index.html").read_text()
+    assert "100.0% last 24 h" in page and "a 12 h UTC slot" in page
+    assert "expected every ~12 h" in page and "Overdue" not in page
+    assert "หนึ่งรอบคือช่วง 12 ชม." in page
+
+
+def test_cams_missed_cycle_shows_a_gap(tmp_path):
+    fake = Fake()
+    cams_cycles(fake, [x for x in HEALTHY if x != (29, 18)])
+    fake.con.commit()
+    build(fake, tmp_path)
+    c = load(tmp_path)["coverage"]["cams"]
+    assert c["pct_24h"] == 66.6  # cycles 29 00-12 and 30 00-12 stored, 29 12-24 missed
+    assert c["pct_168h"] == 85.7  # 6 of 7 cycles since the first stored one, floored
+
+
+def test_cams_open_cycle_without_vintage_is_not_a_miss_but_old_newest_is_overdue(tmp_path):
+    fake = Fake()
+    cams_cycles(fake, [x for x in HEALTHY if x != (30, 6)])  # current 00-12 cycle still empty
+    fake.con.commit()
+    build(fake, tmp_path)
+    c = load(tmp_path)["coverage"]["cams"]
+    assert c["pct_24h"] == 100.0 and c["pct_168h"] == 100.0 and c["overdue"] is False
+    fake = Fake()
+    cams_cycles(fake, [(27, 6)])  # one old vintage: cycles since then all missed
+    fake.con.commit()
+    build(fake, tmp_path)
+    c = load(tmp_path)["coverage"]["cams"]
+    assert c["pct_24h"] == 0.0 and c["overdue"] is True
+    assert (
+        "Overdue: the newest vintage is more than 24 h old" in (tmp_path / "index.html").read_text()
+    )
 
 
 def test_no_rows_is_not_available_never_100(tmp_path):
@@ -156,16 +191,41 @@ def test_partly_filled_7d_window_for_air4thai(tmp_path):
     assert a["since"].startswith("2026-10-27T12:00")
 
 
-def test_cams_grace_boundary(tmp_path):
-    """Just after the top of the hour the new hour is not yet due; 45 min later it is."""
-    fake = Fake()
-    for h in range(3):
-        put_cams(fake, END - (h + 1) * H)  # hours before END = 10:00, 09:00, 08:00
+def cams_at(fake, *stamps):
+    for day, hour, minute in stamps:
+        put_cams(fake, NOW.replace(day=day, hour=hour, minute=minute))
     fake.con.commit()
     rd = dashboard.Reader(lambda _u: fake, "x")
     rd.open()
-    early = dashboard._cov_cams(rd, NOW.replace(minute=30))  # 11:45 is due-hour 11:00
-    assert early["pct_24h"] == 75.0  # 08:00..11:00 = 4 hours, 3 present (11:00 missing)
-    on_time = dashboard._cov_cams(rd, NOW.replace(minute=50))  # 12:50 -> 12:00 is due
-    assert on_time["pct_24h"] == 60.0  # 08:00..12:00 = 5 hours, 3 present
+    return rd
+
+
+def test_cams_slot_edges():
+    assert dashboard._slot(NOW.replace(hour=11, minute=59)) == NOW.replace(hour=0, minute=0)
+    assert dashboard._slot(NOW.replace(hour=12, minute=0)) == NOW.replace(hour=12, minute=0)
+    fake = Fake()  # 11:59 belongs to the 00-12 cycle, 12:00 to the 12-24 cycle
+    rd = cams_at(fake, (29, 11, 59), (29, 12, 0), (30, 0, 0))
+    now = NOW.replace(hour=13, minute=0)  # current cycle = 12-24 of the 30th, has no vintage
+    c = dashboard._cov_cams(rd, now)
+    # window = 29 12-24 and 30 00-12, both covered (11:59 -> 00-12, 12:00 -> 12-24)
+    assert c["pct_24h"] == 100.0 and c["since"].startswith("2026-10-29T00:00")
     rd.close()
+
+
+def test_cams_now_exactly_on_a_slot_edge_and_grace_after_12z():
+    fake = Fake()
+    rd = cams_at(fake, (29, 6, 0), (29, 18, 0), (30, 6, 0), (30, 12, 2))
+    c = dashboard._cov_cams(rd, NOW.replace(hour=12, minute=0))  # end 11:00: 12:02 not yet stored
+    assert c["pct_24h"] == 100.0 and c["newest_age_min"] == 360
+    # 12:30: the 12-24 cycle is still not current (grace), its 12:02 vintage is not counted
+    c = dashboard._cov_cams(rd, NOW.replace(hour=12, minute=30))
+    assert c["pct_24h"] == 100.0 and c["pct_168h"] == 100.0
+    # 12:44 inside grace; 12:45 opens the new cycle, so the empty 00-12 one is now a miss
+    fake2 = Fake()
+    rd2 = cams_at(fake2, (29, 6, 0), (29, 18, 0), (30, 12, 2))
+    assert dashboard._cov_cams(rd2, NOW.replace(hour=12, minute=44))["pct_24h"] == 100.0
+    assert (
+        dashboard._cov_cams(rd2, NOW.replace(hour=12, minute=45))["pct_24h"] == 66.6
+    )  # 30 00-12 empty
+    rd.close()
+    rd2.close()
