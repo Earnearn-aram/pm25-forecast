@@ -1,5 +1,9 @@
 # Weekly retrain (KAN-23)
 
+If leakage-safe training data is insufficient, the run is skipped without registering or
+promoting a candidate. The summary reports the cutoff and per-horizon counts, and one readiness
+alert is sent. Other training errors remain failures. The availability checks are unchanged.
+
 `python -m pm25_forecast.retrain` runs every Monday 03:17 UTC (see `retrain-workflow.yml.txt`) and
 on demand.
 
@@ -117,5 +121,6 @@ reference use them as the `cams_pm25` input.
 
 ## Exit codes
 
-0 ok. 1 failed (DB down, not enough data, unscorable champion, crash); the failure is alerted.
+0 ok or skipped because training data is not ready. 1 failed (DB down, unscorable champion,
+other training errors, crash); the failure is alerted.
 2 configuration error (no `DATABASE_URL`; `AUTO_PROMOTE` other than true, false or blank).
