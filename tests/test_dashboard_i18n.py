@@ -175,7 +175,7 @@ def test_kpi_tooltip_content_matches_the_code(tmp_path):
     assert "Model: " in skill and "(the shadow challenger)" in skill
     assert "not squared" in _card_html(page, "Typical error (MAE, µg/m³)")
     fresh = _card_html(page, "Data freshness")
-    for text in ("60\u201390 minutes", "over 3 hours", "Over 6 hours", "at most 3 hours old"):
+    for text in ("60\u201390 minutes", "crosses 3 hours", "Over 6 hours", "at most 3 hours old"):
         assert text in fresh
     psi = _card_html(page, "Input drift (PSI)")
     for text in ("5 quantile bins", "below 0.1", "0.1 to 0.2", "above 0.2", "2 consecutive"):
