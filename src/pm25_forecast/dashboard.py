@@ -828,6 +828,22 @@ def _x_ticks(start: datetime, stop: datetime) -> list[datetime]:
     return ticks
 
 
+THAI_MONTHS = (
+    "ม.ค.",
+    "ก.พ.",
+    "มี.ค.",
+    "เม.ย.",
+    "พ.ค.",
+    "มิ.ย.",
+    "ก.ค.",
+    "ส.ค.",
+    "ก.ย.",
+    "ต.ค.",
+    "พ.ย.",
+    "ธ.ค.",
+)
+
+
 def _stale_age_min(st: dict[str, Any], generated_at: datetime | None) -> int | None:
     """Minutes since the newest reading when it is older than REPORTING_H, else None (KAN-108)."""
     if generated_at is None or not st.get("latest_at"):
@@ -838,15 +854,17 @@ def _stale_age_min(st: dict[str, Any], generated_at: datetime | None) -> int | N
 
 def _stale_note(st: dict[str, Any], age_min: int) -> tuple[str, str]:
     """(English, Thai) reason a stale station has no forecast, computed from the data."""
-    hours = age_min // 60
-    last = _bkk(datetime.fromisoformat(st["latest_at"]))
+    hours = round(age_min / 60)
+    when = datetime.fromisoformat(st["latest_at"]).astimezone(BANGKOK)
+    last = f"{when:%d %b %H:%M}"
+    last_th = f"{when.day:02d} {THAI_MONTHS[when.month - 1]} {when:%H:%M}"
     en = (
         f"No forecast: no new reading from this station for {hours} h "
         f"(last reading {last} Bangkok). Forecasts resume when readings return."
     )
     th = (
         f"ไม่มีค่าพยากรณ์: สถานีนี้ไม่มีค่าที่ตรวจวัดใหม่มา {hours} ชั่วโมง "
-        f"(ค่าล่าสุดเวลา {last} น. เวลากรุงเทพฯ) ค่าพยากรณ์จะกลับมาเมื่อมีค่าตรวจวัดใหม่"
+        f"(ค่าล่าสุดเวลา {last_th} น. เวลากรุงเทพฯ) ค่าพยากรณ์จะกลับมาเมื่อมีค่าตรวจวัดใหม่"
     )
     return en, th
 
@@ -1045,7 +1063,7 @@ def _pill(st: dict[str, Any], first: bool, generated_at: datetime) -> str:
         en, th = "no recent reading", "ไม่มีค่าตรวจวัดล่าสุด"
         name = f"{label}, {en}"
         stale = f' data-stale-en="{e(en)}" data-stale-th="{e(th)}"'
-    dot = '<span class="stale-dot" aria-hidden="true"></span>' if stale else ""
+    dot = f'<span class="stale-dot" aria-hidden="true" title="{e(en)}"></span>' if stale else ""
     return (
         f'<button type="button" class="pill" data-station="{e(st["id"])}" '
         f'data-label="{e(label)}" aria-label="{e(name)}"{stale} '

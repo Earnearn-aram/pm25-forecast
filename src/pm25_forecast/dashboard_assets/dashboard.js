@@ -293,6 +293,7 @@
         var dot = document.createElement("span");
         dot.className = "stale-dot";
         dot.setAttribute("aria-hidden", "true");
+        dot.title = note;
         pill.appendChild(dot);
         pill.setAttribute("aria-label", name + ", " + note);
       }

@@ -706,6 +706,8 @@ def test_stale_station_explains_missing_forecast_in_en_and_th():
     )
     assert f'data-en="{en}"' in html
     assert "ไม่มีค่าพยากรณ์: สถานีนี้ไม่มีค่าที่ตรวจวัดใหม่มา 14 ชั่วโมง" in html
+    assert "30 ต.ค. 05:00 น." in html
+    assert 'title="no recent reading"' in html
     assert 'aria-label="Bansomdejchaopraya, no recent reading"' in html
     assert 'class="stale-dot" aria-hidden="true"' in html
     assert 'data-stale-th="' in html
@@ -742,3 +744,12 @@ def test_stale_text_and_label_are_escaped():
     assert "<img" not in html
     assert "<b>" not in html
     assert "&lt;img" in html
+
+
+def test_stale_boundary_180_fresh_181_stale_and_hours_round():
+    fresh = _chart_html(_chart_station(latest_at=(NOW - timedelta(minutes=180)).isoformat()))
+    assert "Waiting for future forecasts." in fresh and "No forecast:" not in fresh
+    stale = _chart_html(_chart_station(latest_at=(NOW - timedelta(minutes=181)).isoformat()))
+    assert "No forecast:" in stale and "for 3 h" in stale
+    late = _chart_html(_chart_station(latest_at=(NOW - timedelta(minutes=239)).isoformat()))
+    assert "for 4 h" in late
