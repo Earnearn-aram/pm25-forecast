@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 HORIZONS_H = (6, 12, 24)
 
 
+MIN_TRAINING_EXAMPLES = 20
+
+
 class InsufficientTrainingDataError(ValueError):
     """The export does not contain enough causally eligible rows to fit every horizon."""
 
@@ -152,7 +155,9 @@ def _make_training_rows_with_availability(
     result = {}
     label_availabilities = {}
     counts = {horizon: len(rows) for horizon, rows in samples.items()}
-    insufficient = {horizon: count for horizon, count in counts.items() if count < 20}
+    insufficient = {
+        horizon: count for horizon, count in counts.items() if count < MIN_TRAINING_EXAMPLES
+    }
     if insufficient:
         availability_origin_count = sum(
             available <= issue for (_, issue), (_, available) in labels.items()
@@ -165,7 +170,8 @@ def _make_training_rows_with_availability(
         per_horizon = ", ".join(f"+{horizon}h={counts[horizon]}" for horizon in HORIZONS_H)
         raise InsufficientTrainingDataError(
             "Insufficient leakage-safe training data: "
-            f"usable examples by horizon ({per_horizon}); need 20 per horizon. "
+            f"usable examples by horizon ({per_horizon}); "
+            f"need {MIN_TRAINING_EXAMPLES} per horizon. "
             f"{availability_origin_count}/{len(labels)} usable observations have "
             f"available_at <= their observation time; {availability_vintage_count}/"
             f"{sum(map(len, by_station_vintages.values()))} usable forecast vintages have "
@@ -243,11 +249,11 @@ def train(
         for horizon, (_, _, origins) in data.items()
     }
     counts = {horizon: len(indices[0]) for horizon, indices in splits.items()}
-    if any(count < 20 for count in counts.values()):
+    if any(count < MIN_TRAINING_EXAMPLES for count in counts.values()):
         per_horizon = ", ".join(f"+{h}h={counts[h]}" for h in HORIZONS_H)
         raise InsufficientTrainingDataError(
             f"usable training examples after validation embargo ({per_horizon}); "
-            "need 20 per horizon"
+            f"need {MIN_TRAINING_EXAMPLES} per horizon"
         )
     for horizon, (features, target, origins) in data.items():
         train_indices, valid_indices = splits[horizon]
