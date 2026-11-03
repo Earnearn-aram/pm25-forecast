@@ -28,6 +28,28 @@ CREATE TABLE IF NOT EXISTS predictions (
     PRIMARY KEY (station_id, issue_time, valid_time, model_version)
 );
 
+-- The first successful prediction transaction chooses the champion for the whole issue hour.
+-- selected_at is the database selection clock, not proof of commit or state at issue_time.
+CREATE TABLE IF NOT EXISTS serving_issue_decisions (
+    issue_time timestamptz PRIMARY KEY,
+    champion_version text,
+    selected_at timestamptz NOT NULL,
+    selection_run_id text NOT NULL
+);
+
+-- Record the selected persisted forecast per station/horizon; absent means no serving record.
+CREATE TABLE IF NOT EXISTS serving_forecasts (
+    station_id text NOT NULL,
+    issue_time timestamptz NOT NULL,
+    valid_time timestamptz NOT NULL,
+    model_version text NOT NULL,
+    reason text NOT NULL,
+    run_id text NOT NULL,
+    PRIMARY KEY (station_id, issue_time, valid_time),
+    FOREIGN KEY (station_id, issue_time, valid_time, model_version)
+        REFERENCES predictions (station_id, issue_time, valid_time, model_version) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS scores (
     station_id     text             NOT NULL,
     issue_time     timestamptz      NOT NULL,

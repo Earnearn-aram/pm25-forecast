@@ -193,6 +193,8 @@ def build_challenger_rows(
     issue_time: datetime,
     run_id: str,
     result: PredictResult,
+    *,
+    role: str = "challenger",
 ) -> list[dict[str, Any]]:
     """All-or-nothing shadow rows: any error drops every challenger row and fails the run loudly.
 
@@ -215,7 +217,7 @@ def build_challenger_rows(
                     _row(station_id, issue_time, run_id, challenger.model_version, forecast)
                 )
     except Exception as exc:  # a challenger must never cost the baselines
-        msg = f"challenger {challenger.model_version} dropped for this run: {exc!r}"
+        msg = f"{role} {challenger.model_version} dropped for this run: {exc!r}"
         logger.error(msg)
         result.failures.append(msg)
         return []
@@ -251,11 +253,33 @@ def run(
         raise ConfigError("CHALLENGER_MODEL_VERSION must differ from the baseline model versions")
 
     with open_db(connect, settings.database_url.get_secret_value()) as con:
+        decision_insert = con.execute(
+            sql.INSERT_SERVING_DECISION,
+            {"issue_time": issue_time, "run_id": run_id},
+        )
+        decision = con.execute(sql.SELECT_SERVING_DECISION, {"issue_time": issue_time}).fetchone()
+        if decision is None:
+            raise RuntimeError("serving decision was not recorded")
+        champion_version = decision[0]
+        champion = None
+        if champion_version in (
+            PERSISTENCE_MODEL_VERSION,
+            CAMS_PASSTHROUGH_MODEL_VERSION,
+            CAMS_MODEL_VERSION,
+        ):
+            result.failures.append(f"invalid champion version: {champion_version}")
+        elif champion_version:
+            try:
+                champion = load_registered_model(con, champion_version)
+            except (ModelLoadError, ValueError, TypeError, KeyError, UnicodeError) as exc:
+                result.failures.append(f"champion {champion_version} not served: {exc}")
         challenger: ServingModel | SmootherModel | None = None
-        if challenger_version is not None:
+        if challenger_version == champion_version and champion is not None:
+            challenger = champion
+        elif challenger_version is not None:
             try:
                 challenger = load_registered_model(con, challenger_version)
-            except ModelLoadError as exc:
+            except (ModelLoadError, ValueError, TypeError, KeyError, UnicodeError) as exc:
                 msg = f"challenger {challenger_version} not served: {exc}"
                 logger.error(msg)
                 result.failures.append(msg)
@@ -265,17 +289,69 @@ def run(
             rows += build_station_rows(
                 con, station_id, issue_time, now, run_id, result, station_features
             )
-        if challenger is not None:
+        baseline_keys = {(r["station_id"], r["valid_time"]) for r in rows}
+        champion_rows = []
+        if champion is not None:
+            champion_rows = build_challenger_rows(
+                champion, station_features, issue_time, run_id, result, role="champion"
+            )
+            champion_rows = [
+                r for r in champion_rows if (r["station_id"], r["valid_time"]) in baseline_keys
+            ]
+            rows += champion_rows
+        if challenger is not None and challenger is not champion:
             rows += build_challenger_rows(challenger, station_features, issue_time, run_id, result)
         result.rows_built = len(rows)
+        result.rows_written = sql.write_rows(con, sql.INSERT_PREDICTION, rows)
+        result.rows_ignored = len(rows) - result.rows_written
+        champion_keys = {(r["station_id"], r["valid_time"]) for r in champion_rows}
+        serving = []
+        for station_id in station_ids:
+            for target in valid_times(issue_time).values():
+                key = (station_id, target)
+                actual = (
+                    champion_version
+                    if key in champion_keys
+                    else (PERSISTENCE_MODEL_VERSION if key in baseline_keys else None)
+                )
+                if actual is None:
+                    continue  # A later run may recover this station/hour.
+                stored = con.execute(
+                    sql.SELECT_PREDICTION_RUN,
+                    {
+                        "station_id": station_id,
+                        "issue_time": issue_time,
+                        "valid_time": target,
+                        "model_version": actual,
+                    },
+                ).fetchone()
+                if stored is None:
+                    raise RuntimeError("served forecast is missing from predictions")
+                serving.append(
+                    {
+                        "station_id": station_id,
+                        "issue_time": issue_time,
+                        "valid_time": target,
+                        "model_version": actual,
+                        "reason": "champion"
+                        if key in champion_keys
+                        else ("baseline_fallback" if actual else "no_forecast"),
+                        "run_id": stored[0],
+                    }
+                )
+        sql.write_rows(con, sql.INSERT_SERVING_FORECAST, serving)
         served = [PERSISTENCE_MODEL_VERSION]
-        if challenger is not None:
+        if champion is not None:
+            served.append(champion.model_version)
+        if challenger is not None and challenger is not champion:
             served.append(challenger.model_version)
         for model_version in served:
             result.per_model[model_version] = sum(r["model_version"] == model_version for r in rows)
-        result.rows_written = sql.write_rows(con, sql.INSERT_PREDICTION, rows)
-        result.rows_ignored = len(rows) - result.rows_written
-    if not rows:  # nothing to forecast from is an outage of the inputs, not a quiet success
+        if not serving and decision_insert.rowcount == 1:
+            con.execute(
+                sql.DELETE_EMPTY_SERVING_DECISION, {"issue_time": issue_time, "run_id": run_id}
+            )
+    if not serving:  # Shadow-only outputs do not count as a served forecast.
         result.failures.append("no forecasts could be built for any station")
 
     log_summary(
@@ -291,6 +367,7 @@ def run(
             "rows_written": result.rows_written,
             "rows_ignored": result.rows_ignored,
             "per_model": result.per_model,
+            "selected_champion": champion_version,
             "skipped": result.skipped,
             "failures": result.failures,
         },
