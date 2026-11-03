@@ -51,6 +51,31 @@ VALUES (
 ON CONFLICT (station_id, issue_time, valid_time, model_version) DO NOTHING
 """
 
+# First successful run freezes the pointer for the issue hour. Selection and forecasts commit
+# together; a concurrent rerun sees the winning decision after ON CONFLICT has resolved.
+INSERT_SERVING_DECISION = """
+INSERT INTO serving_issue_decisions (issue_time, champion_version, selected_at, selection_run_id)
+VALUES (%(issue_time)s, (SELECT model_version FROM model_champion WHERE slot = 'production'),
+        clock_timestamp(), %(run_id)s)
+ON CONFLICT (issue_time) DO NOTHING
+"""
+SELECT_SERVING_DECISION = """
+SELECT champion_version FROM serving_issue_decisions WHERE issue_time = %(issue_time)s
+"""
+DELETE_EMPTY_SERVING_DECISION = """
+DELETE FROM serving_issue_decisions
+WHERE issue_time = %(issue_time)s AND selection_run_id = %(run_id)s
+"""
+SELECT_PREDICTION_RUN = """
+SELECT run_id FROM predictions WHERE station_id = %(station_id)s AND issue_time = %(issue_time)s
+  AND valid_time = %(valid_time)s AND model_version = %(model_version)s
+"""
+INSERT_SERVING_FORECAST = """
+INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, reason, run_id)
+VALUES (%(station_id)s, %(issue_time)s, %(valid_time)s, %(model_version)s, %(reason)s, %(run_id)s)
+ON CONFLICT (station_id, issue_time, valid_time) DO NOTHING
+"""
+
 UPSERT_SCORE = """
 INSERT INTO scores (station_id, issue_time, valid_time, model_version, pm25_obs, abs_error)
 VALUES (

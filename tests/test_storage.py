@@ -167,6 +167,8 @@ def test_schema_primary_keys_match_conflict_targets():
         "observations": ("station_id", "ts"),
         "features": ("station_id", "ts", "feature_version"),
         "predictions": ("station_id", "issue_time", "valid_time", "model_version"),
+        "serving_issue_decisions": ("issue_time",),
+        "serving_forecasts": ("station_id", "issue_time", "valid_time"),
         "scores": ("station_id", "issue_time", "valid_time", "model_version"),
         "models": ("model_version",),
         "model_champion": ("slot",),

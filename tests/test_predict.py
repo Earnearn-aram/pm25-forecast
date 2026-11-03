@@ -61,6 +61,7 @@ class FakeDb:
 
     def execute(self, statement, params=()):
         params = {k: v.isoformat() if isinstance(v, datetime) else v for k, v in params.items()}
+        statement = statement.replace("clock_timestamp()", "CURRENT_TIMESTAMP")
         return self.con.execute(re.sub(r"%\((\w+)\)s", r":\1", statement), params)
 
     def predictions(self):
@@ -224,6 +225,179 @@ def test_run_writes_only_persistence_for_each_horizon(fake_db):
     assert result.per_model == {PERSISTENCE_MODEL_VERSION: 3}
     assert result.rows_written == 3
     assert all(r[3] != CAMS_PASSTHROUGH_MODEL_VERSION for r in rows)
+
+
+def test_champion_selection_is_frozen_for_the_hour_and_fallback_is_attributed(fake_db, monkeypatch):
+    class Model:
+        horizons = (24,)
+
+        def __init__(self, version):
+            self.model_version = version
+
+        def predict(self, horizon, features):
+            return 21.0
+
+    monkeypatch.setattr(predict, "load_registered_model", lambda _con, version: Model(version))
+    fake_db.con.execute(
+        "INSERT INTO model_champion(slot, model_version) VALUES ('production', 'v1')"
+    )
+    do_run(fake_db, challenger_model_version="v1")
+    fake_db.con.execute("UPDATE model_champion SET model_version = 'v2' WHERE slot = 'production'")
+    do_run(fake_db, now=NOW + timedelta(minutes=20), challenger_model_version="v1")
+    rows = fake_db.con.execute(
+        "SELECT station_id, valid_time, model_version, reason FROM serving_forecasts ORDER BY 1, 2"
+    ).fetchall()
+    assert [(r[0], r[2], r[3]) for r in rows] == [
+        ("59t", PERSISTENCE_MODEL_VERSION, "baseline_fallback"),
+        ("59t", PERSISTENCE_MODEL_VERSION, "baseline_fallback"),
+        ("59t", "v1", "champion"),
+    ]
+    assert fake_db.con.execute(
+        "SELECT champion_version FROM serving_issue_decisions"
+    ).fetchall() == [("v1",)]
+    assert len([r for r in fake_db.predictions() if r[3] == "v1"]) == 1
+    assert not any(r[3] == "v2" for r in fake_db.predictions())
+
+
+def test_unusable_champion_keeps_baseline_and_records_fallback(fake_db, monkeypatch):
+    fake_db.con.execute(
+        "INSERT INTO model_champion(slot, model_version) VALUES ('production', 'bad')"
+    )
+
+    def broken(_con, _version):
+        raise predict.ModelLoadError("invalid model")
+
+    monkeypatch.setattr(predict, "load_registered_model", broken)
+    result = do_run(fake_db)
+    assert result.failures and "champion bad" in result.failures[0]
+    assert any(row[3] == PERSISTENCE_MODEL_VERSION for row in fake_db.predictions())
+    assert fake_db.con.execute(
+        "SELECT DISTINCT reason FROM serving_forecasts WHERE station_id = '59t'"
+    ).fetchall() == [("baseline_fallback",)]
+
+
+def test_serving_attribution_uses_persisted_prediction_run(fake_db):
+    target = ISSUE + timedelta(hours=6)
+    fake_db.con.execute(
+        "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id, "
+        "pm25_pred) VALUES (?, ?, ?, ?, ?, ?)",
+        ("59t", ISSUE.isoformat(), target.isoformat(), PERSISTENCE_MODEL_VERSION, "earlier", 99),
+    )
+    do_run(fake_db)
+    row = fake_db.con.execute(
+        "SELECT model_version, run_id FROM serving_forecasts WHERE station_id = ? "
+        "AND valid_time = ?",
+        ("59t", target.isoformat()),
+    ).fetchone()
+    assert row == (PERSISTENCE_MODEL_VERSION, "earlier")
+
+
+def test_empty_run_does_not_freeze_the_hour(fake_db):
+    fake_db.con.execute("DELETE FROM observations")
+    result = do_run(fake_db)
+    assert result.failures
+    assert fake_db.con.execute("SELECT COUNT(*) FROM serving_issue_decisions").fetchone() == (0,)
+    assert fake_db.con.execute("SELECT COUNT(*) FROM serving_forecasts").fetchone() == (0,)
+    load_inputs(fake_db, cams=False)
+    assert not do_run(fake_db).failures
+
+
+def test_pointer_change_after_empty_run_can_be_selected_in_same_hour(fake_db, monkeypatch):
+    fake_db.con.execute("DELETE FROM observations")
+    assert do_run(fake_db).failures
+    fake_db.con.execute(
+        "INSERT INTO model_champion(slot, model_version) VALUES ('production', 'v2')"
+    )
+
+    class Model:
+        model_version = "v2"
+        horizons = (24,)
+
+        def predict(self, horizon, features):
+            return 20.0
+
+    monkeypatch.setattr(predict, "load_registered_model", lambda *_: Model())
+    load_inputs(fake_db, cams=False)
+    assert not do_run(fake_db, now=NOW + timedelta(minutes=20)).failures
+    assert fake_db.con.execute(
+        "SELECT champion_version FROM serving_issue_decisions"
+    ).fetchone() == ("v2",)
+
+
+def test_empty_retry_with_same_run_id_does_not_remove_existing_decision(fake_db):
+    do_run(fake_db)
+    fake_db.con.execute("DELETE FROM observations")
+    do_run(fake_db)
+    assert fake_db.con.execute("SELECT COUNT(*) FROM serving_issue_decisions").fetchone() == (1,)
+
+
+def test_recovered_champion_does_not_rewrite_same_hour_fallback(fake_db, monkeypatch):
+    fake_db.con.execute(
+        "INSERT INTO model_champion(slot, model_version) VALUES ('production', 'v1')"
+    )
+
+    class Model:
+        model_version = "v1"
+        horizons = (24,)
+
+        def predict(self, horizon, features):
+            return 21.0
+
+    def broken(_con, _version):
+        raise ValueError("malformed model")
+
+    monkeypatch.setattr(predict, "load_registered_model", broken)
+    assert do_run(fake_db).failures
+    monkeypatch.setattr(predict, "load_registered_model", lambda *_: Model())
+    do_run(fake_db, now=NOW + timedelta(minutes=20))
+    assert fake_db.con.execute(
+        "SELECT DISTINCT model_version, reason FROM serving_forecasts WHERE station_id = '59t'"
+    ).fetchall() == [(PERSISTENCE_MODEL_VERSION, "baseline_fallback")]
+
+
+def test_real_invalid_bundle_falls_back_without_rolling_back_baseline(fake_db):
+    import hashlib
+
+    from pm25_forecast.features import SMOOTHER_FEATURE_NAMES
+
+    artifact = b'{"format":1,"smoother":{"beta":0.5,"horizons":"invalid"}}'
+    digest = hashlib.sha256(artifact).hexdigest()
+    manifest = {
+        "version": "bad",
+        "metrics": {},
+        "training_window": {},
+        "feature_list": list(SMOOTHER_FEATURE_NAMES),
+        "data_sha256": "0" * 64,
+        "artifact_sha256": digest,
+    }
+    fake_db.con.execute(
+        "INSERT INTO models(model_version, sha256, artifact, manifest) VALUES (?, ?, ?, ?)",
+        ("bad", digest, artifact, json.dumps(manifest)),
+    )
+    fake_db.con.execute(
+        "INSERT INTO model_champion(slot, model_version) VALUES ('production', 'bad')"
+    )
+    result = do_run(fake_db)
+    assert result.failures and "champion bad" in result.failures[0]
+    assert any(row[3] == PERSISTENCE_MODEL_VERSION for row in fake_db.predictions())
+
+
+def test_champion_prediction_error_reports_role_and_keeps_baseline(fake_db, monkeypatch):
+    fake_db.con.execute(
+        "INSERT INTO model_champion(slot, model_version) VALUES ('production', 'bad')"
+    )
+
+    class BrokenModel:
+        model_version = "bad"
+        horizons = (24,)
+
+        def predict(self, horizon, features):
+            raise ValueError("bad inputs")
+
+    monkeypatch.setattr(predict, "load_registered_model", lambda *_: BrokenModel())
+    result = do_run(fake_db)
+    assert any("champion bad dropped" in error for error in result.failures)
+    assert any(row[3] == PERSISTENCE_MODEL_VERSION for row in fake_db.predictions())
 
 
 def test_predict_ignores_rows_ingested_after_the_issue_time(fake_db):
