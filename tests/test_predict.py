@@ -259,6 +259,42 @@ def test_champion_selection_is_frozen_for_the_hour_and_fallback_is_attributed(fa
     assert not any(r[3] == "v2" for r in fake_db.predictions())
 
 
+def test_shadow_challenger_predictions_never_become_serving_forecasts(fake_db, monkeypatch):
+    class Model:
+        horizons = (24,)
+
+        def __init__(self, version, value):
+            self.model_version = version
+            self.value = value
+
+        def predict(self, horizon, features):
+            return self.value
+
+    models = {"champion-v1": Model("champion-v1", 21.0), "shadow-v2": Model("shadow-v2", 99.0)}
+    monkeypatch.setattr(predict, "load_registered_model", lambda _con, version: models[version])
+    fake_db.con.execute(
+        "INSERT INTO model_champion(slot, model_version) VALUES ('production', 'champion-v1')"
+    )
+
+    result = do_run(fake_db, challenger_model_version="shadow-v2")
+
+    issue_predictions = [row for row in fake_db.predictions() if row[1] == ISSUE.isoformat()]
+    assert {row[3] for row in issue_predictions} == {
+        PERSISTENCE_MODEL_VERSION,
+        "champion-v1",
+        "shadow-v2",
+    }
+    served = fake_db.con.execute(
+        "SELECT valid_time, model_version, reason FROM serving_forecasts ORDER BY valid_time"
+    ).fetchall()
+    assert served == [
+        ((ISSUE + 6 * H).isoformat(), PERSISTENCE_MODEL_VERSION, "baseline_fallback"),
+        ((ISSUE + 12 * H).isoformat(), PERSISTENCE_MODEL_VERSION, "baseline_fallback"),
+        ((ISSUE + 24 * H).isoformat(), "champion-v1", "champion"),
+    ]
+    assert result.per_model["shadow-v2"] == sum(row[3] == "shadow-v2" for row in issue_predictions)
+
+
 def test_unusable_champion_keeps_baseline_and_records_fallback(fake_db, monkeypatch):
     fake_db.con.execute(
         "INSERT INTO model_champion(slot, model_version) VALUES ('production', 'bad')"
