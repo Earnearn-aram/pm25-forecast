@@ -14,7 +14,7 @@ from pm25_forecast.ingest.open_meteo import CAMS_MODEL_VERSION
 from pm25_forecast.models.baselines import CAMS_PASSTHROUGH_MODEL_VERSION, PERSISTENCE_MODEL_VERSION
 from pm25_forecast.score import ScoreResult, ScoreRow, rolling_metrics, run
 from pm25_forecast.settings import Settings
-from pm25_forecast.storage import db
+from pm25_forecast.storage import db, sql
 from pm25_forecast.storage.guard import RunSkipped, run_entrypoint
 from test_predict import DB_PASSWORD, DB_URL, FakeDb
 
@@ -56,6 +56,21 @@ def add_pred(fake, station, issue, h, model, pred):
         "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id,"
         " pm25_pred) VALUES (?, ?, ?, ?, 'r', ?)",
         (station, issue.isoformat(), (issue + h * H).isoformat(), model, pred),
+    )
+    fake.con.commit()
+
+
+def mark_served(fake, station, issue, h, model, run_id="r"):
+    valid = issue + h * H
+    fake.con.execute(
+        "INSERT INTO serving_issue_decisions (issue_time, champion_version, selected_at, "
+        "selection_run_id) VALUES (?, ?, ?, ?) ON CONFLICT (issue_time) DO NOTHING",
+        (issue.isoformat(), model, issue.isoformat(), run_id),
+    )
+    fake.con.execute(
+        "INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, "
+        "reason, run_id) VALUES (?, ?, ?, ?, 'champion', ?)",
+        (station, issue.isoformat(), valid.isoformat(), model, run_id),
     )
     fake.con.commit()
 
@@ -197,6 +212,97 @@ def test_end_to_end_metrics_and_skill(fake):
     assert m[P][24].mae == 10.0 and m[P][24].skill_vs_persistence is None
     assert m[CHALLENGER][24].mae == 5.0
     assert m[CHALLENGER][24].skill_vs_persistence == pytest.approx(0.5)
+
+
+def test_scores_historically_served_model_from_ledger_with_matched_persistence(fake):
+    issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    add_pred(fake, "59t", issue, 24, P, 40.0)
+    add_pred(fake, "59t", issue, 24, "retired-champion-v1", 35.0)
+    add_obs(fake, "59t", issue + 24 * H, 30.0)
+    mark_served(fake, "59t", issue, 24, "retired-champion-v1")
+
+    result = do_run(fake)
+
+    assert result.served_matured == 1
+    assert result.served_waiting == 0
+    assert result.served_status == "ok"
+    assert result.served_metrics["retired-champion-v1"][24].mae == 5.0
+    served = result.served_metrics["retired-champion-v1"][24]
+    assert served.n_matched == 1
+    assert served.skill_vs_persistence == pytest.approx(0.5)
+    assert scores(fake) == [
+        ("59t", (issue + 24 * H).isoformat(), P, 30.0, 10.0),
+        ("59t", (issue + 24 * H).isoformat(), "retired-champion-v1", 30.0, 5.0),
+    ]
+
+
+def test_served_forecast_without_actual_is_reported_waiting(fake):
+    issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    add_pred(fake, "59t", issue, 24, "retired-champion-v1", 35.0)
+    mark_served(fake, "59t", issue, 24, "retired-champion-v1")
+
+    result = do_run(fake)
+
+    assert result.served_matured == 1
+    assert result.served_waiting == 1
+    assert result.served_status == "ok"
+    assert result.served_metrics == {}
+
+
+def test_served_baseline_metrics_exclude_champion_served_keys(fake):
+    issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    for station, actual, baseline, champion in (
+        ("baseline-station", 30.0, 34.0, None),
+        ("champion-station", 30.0, 130.0, 35.0),
+    ):
+        add_pred(fake, station, issue, 24, P, baseline)
+        if champion is not None:
+            add_pred(fake, station, issue, 24, "champion-v2", champion)
+        add_obs(fake, station, issue + 24 * H, actual)
+        mark_served(fake, station, issue, 24, P if champion is None else "champion-v2")
+
+    result = do_run(fake)
+
+    assert result.served_metrics[P][24].n == 1
+    assert result.served_metrics[P][24].mae == 4.0
+    assert result.served_metrics["champion-v2"][24].n == 1
+    assert result.served_metrics["champion-v2"][24].skill_vs_persistence == pytest.approx(0.95)
+
+
+def test_missing_serving_ledger_does_not_abort_legacy_scoring(fake):
+    issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    add_pred(fake, "59t", issue, 24, P, 40.0)
+    add_obs(fake, "59t", issue + 24 * H, 30.0)
+    fake.con.execute("DROP TABLE serving_forecasts")
+    fake.con.commit()
+
+    result = do_run(fake)
+
+    assert result.metrics[P][24].mae == 10.0
+    assert len(scores(fake)) == 1
+    assert result.served_status.startswith("unavailable:")
+
+
+def test_served_failure_after_read_does_not_report_partial_counts(fake, monkeypatch):
+    issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    add_pred(fake, "59t", issue, 24, P, 40.0)
+    add_obs(fake, "59t", issue + 24 * H, 30.0)
+    mark_served(fake, "59t", issue, 24, P)
+    execute = fake.execute
+
+    def fail_after_served_read(statement, params=()):
+        if statement == sql.SELECT_SERVED_SCORES_BETWEEN:
+            raise RuntimeError("simulated partial ledger failure")
+        return execute(statement, params)
+
+    monkeypatch.setattr(fake, "execute", fail_after_served_read)
+    result = do_run(fake)
+
+    assert result.served_status == "unavailable: RuntimeError"
+    assert result.served_matured == 0
+    assert result.served_waiting == 0
+    assert result.served_metrics == {}
+    assert result.metrics[P][24].mae == 10.0
 
 
 def _row(station, issue, h, err):

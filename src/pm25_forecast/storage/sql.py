@@ -155,6 +155,47 @@ WHERE s.model_version = %(model_version)s
   AND s.valid_time >= %(since)s AND s.valid_time <= %(now)s
 """
 
+# KAN-120: score only the immutable forecasts recorded as served. This preserves the model
+# selected for each issue hour even after the mutable champion pointer changes.
+SELECT_MATURED_SERVED_FORECASTS = """
+SELECT sf.station_id, sf.issue_time, sf.valid_time, sf.model_version, p.pm25_pred,
+       o.pm25, s.pm25_obs
+FROM serving_forecasts sf
+JOIN predictions p
+  ON p.station_id = sf.station_id AND p.issue_time = sf.issue_time
+ AND p.valid_time = sf.valid_time AND p.model_version = sf.model_version
+LEFT JOIN observations o
+  ON o.station_id = sf.station_id AND o.ts = sf.valid_time AND o.pm25 IS NOT NULL
+LEFT JOIN scores s
+  ON s.station_id = sf.station_id AND s.issue_time = sf.issue_time
+ AND s.valid_time = sf.valid_time AND s.model_version = sf.model_version
+WHERE sf.valid_time >= %(since)s AND sf.valid_time <= %(now)s
+"""
+
+SELECT_SERVED_SCORES_BETWEEN = """
+SELECT sf.model_version, s.station_id, s.issue_time, s.valid_time, s.abs_error
+FROM serving_forecasts sf
+JOIN scores s
+  ON s.station_id = sf.station_id AND s.issue_time = sf.issue_time
+ AND s.valid_time = sf.valid_time AND s.model_version = sf.model_version
+JOIN observations o
+  ON o.station_id = s.station_id AND o.ts = s.valid_time
+ AND o.pm25 IS NOT NULL AND o.pm25 >= 0
+WHERE s.valid_time >= %(since)s AND s.valid_time <= %(now)s
+"""
+
+SELECT_SERVED_PERSISTENCE_SCORES_BETWEEN = """
+SELECT s.station_id, s.issue_time, s.valid_time, s.abs_error
+FROM serving_forecasts sf
+JOIN scores s
+  ON s.station_id = sf.station_id AND s.issue_time = sf.issue_time
+ AND s.valid_time = sf.valid_time AND s.model_version = %(model_version)s
+JOIN observations o
+  ON o.station_id = s.station_id AND o.ts = s.valid_time
+ AND o.pm25 IS NOT NULL AND o.pm25 >= 0
+WHERE s.valid_time >= %(since)s AND s.valid_time <= %(now)s
+"""
+
 
 def write_rows(
     con: Any,
