@@ -1,4 +1,3 @@
-pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 """KAN-24: model_events log, rollback, registry prune, drift-triggered retrain. Offline."""
 
 import json
