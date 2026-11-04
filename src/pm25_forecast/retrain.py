@@ -1,4 +1,3 @@
-pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 """Weekly retrain with a champion/challenger comparison (KAN-23).
 
 Current safety state (KAN-126): the CLI blocks normal and drift-triggered retraining before any
