@@ -35,6 +35,7 @@
   --accent-hover: #115e59;
   --accent-tint: #ccfbf1;
   --accent-soft: #e6f6f3;
+  --served: #6b21a8;
   --on-accent: #ffffff;
   --warn: #b45309;
   --warn-tint: #fef3c7;
@@ -278,6 +279,7 @@ header {
 .pt-label { font-weight: 600; }
 .pt-label.pers { fill: var(--muted); }
 .pt-label.chal { fill: var(--accent-hover); }
+.pt-label.served { fill: var(--served); }
 .axis-now { font-weight: 600; fill: var(--text); }
 .hover-pt { fill: transparent; stroke: none; }
 .hover-pt:hover { fill: var(--accent); fill-opacity: .25; }
@@ -302,6 +304,10 @@ header {
   stroke: var(--neutral);
   stroke-width: 1.5;
 }
+.ln-served {
+  stroke: var(--served);
+  stroke-width: 2.5;
+}
 .sw {
   width: 20px;
   height: 0;
@@ -316,6 +322,10 @@ header {
 .sw.pers {
   border-color: var(--neutral);
   border-top-width: 1.5px;
+}
+.sw.served {
+  border-color: var(--served);
+  border-top-width: 2.5px;
 }
 .hrow {
   display: flex;
@@ -665,6 +675,9 @@ html[lang="th"] .status {
 .forecast-dot { stroke: var(--card); stroke-width: 1.5; }
 .forecast-dot.ln-pers { fill: var(--neutral); }
 .forecast-dot.ln-chal { fill: var(--accent); }
+.forecast-dot.ln-served { fill: var(--served); }
+.served-point { border-color: var(--served); }
+.served-state { display: block; width: 100%; }
 .story { padding: 24px; }
 .story-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
 .story-grid h3 { font-size: 16px; margin: 0 0 6px; }

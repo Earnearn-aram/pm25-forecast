@@ -134,6 +134,18 @@ class ServingChoiceRow(BaseModel):
     reason: str
 
 
+class ServedChartRow(BaseModel):
+    issue_time: AwareDatetime
+    station_id: str
+    valid_time: AwareDatetime
+    model_version: str
+    reason: str
+    serving_run_id: str
+    prediction_run_id: str | None = None
+    created_at: AwareDatetime | None = None
+    pm25_pred: float | None = None
+
+
 class ServedScoreRow(BaseModel):
     model_version: str
     station_id: str
@@ -173,6 +185,20 @@ SELECT_SERVING = """
 SELECT issue_time, station_id, valid_time, model_version, reason FROM serving_forecasts
 WHERE issue_time = (SELECT max(issue_time) FROM serving_forecasts WHERE issue_time <= %(now)s)
 ORDER BY station_id, valid_time
+"""
+SELECT_LATEST_SERVING_ISSUE = """
+SELECT max(issue_time) FROM serving_forecasts WHERE issue_time <= %(now)s
+"""
+SELECT_SERVING_CHART = """
+SELECT sf.issue_time, sf.station_id, sf.valid_time, sf.model_version, sf.reason, sf.run_id,
+       p.run_id, p.created_at, p.pm25_pred
+FROM serving_forecasts sf
+LEFT JOIN predictions p
+  ON p.station_id = sf.station_id AND p.issue_time = sf.issue_time
+ AND p.valid_time = sf.valid_time AND p.model_version = sf.model_version
+ AND p.run_id = sf.run_id AND p.created_at <= %(now)s
+WHERE sf.issue_time = %(issue_time)s
+ORDER BY sf.station_id, sf.valid_time
 """
 SERVED_REFERENCE = "__served_persistence_reference__"
 SELECT_RETRAIN = """
@@ -411,6 +437,69 @@ def _chart(rd: Reader, obs: list[ObsRow], challenger: str | None, now: datetime)
                     "value": _num(prediction.pm25_pred, 1),
                 }
             )
+    latest_serving_issue: datetime | None = None
+    serving_status = "unavailable"
+    serving_invalid = 0
+    served_by_station: dict[str, list[dict[str, Any]]] = {}
+    served_station_ids: set[str] = set()
+    try:
+        issue_raw = rd.query(SELECT_LATEST_SERVING_ISSUE, {"now": now})
+        issue_value = issue_raw[0][0] if issue_raw else None
+        latest_serving_issue = (
+            TypeAdapter(AwareDatetime).validate_python(issue_value) if issue_value else None
+        )
+        if latest_serving_issue is None:
+            serving_status = "waiting"
+        else:
+            serving_raw = rd.query(
+                SELECT_SERVING_CHART,
+                {"issue_time": latest_serving_issue, "now": now},
+            )
+            parsed_served = _rows(ServedChartRow, serving_raw)
+            serving_invalid = len(serving_raw) - len(parsed_served)
+            for row in parsed_served:
+                if row.station_id in STATION_MAP:
+                    served_station_ids.add(row.station_id)
+                horizon = row.valid_time - row.issue_time
+                if (
+                    row.station_id not in STATION_MAP
+                    or row.reason not in ("champion", "baseline_fallback")
+                    or horizon not in (timedelta(hours=h) for h in HORIZONS_H)
+                    or row.issue_time > now
+                    or row.prediction_run_id != row.serving_run_id
+                    or row.created_at is None
+                    or row.created_at > now
+                    or row.pm25_pred is None
+                    or not math.isfinite(row.pm25_pred)
+                    or row.pm25_pred < 0
+                ):
+                    serving_invalid += 1
+                    continue
+                if row.valid_time <= now or row.valid_time > _hour(now) + timedelta(hours=24):
+                    continue
+                served_by_station.setdefault(row.station_id, []).append(
+                    {
+                        "issue_time": _iso(row.issue_time),
+                        "valid_time": _iso(row.valid_time),
+                        "created_at": _iso(row.created_at),
+                        "run_id": row.serving_run_id,
+                        "model_version": row.model_version,
+                        "reason": row.reason,
+                        "horizon": int(horizon / timedelta(hours=1)),
+                        "value": _num(row.pm25_pred, 1),
+                    }
+                )
+            age = now - latest_serving_issue
+            serving_status = (
+                "degraded"
+                if serving_invalid
+                else "stale"
+                if age > timedelta(hours=REPORTING_H)
+                else "ok"
+            )
+    except Exception as exc:
+        logger.warning("dashboard chart served layer unavailable (%s)", type(exc).__name__)
+        serving_status = "unavailable"
     actual: dict[str, dict[datetime, float]] = {}
     newest_observations: dict[str, ObsRow] = {}
     hourly_observations: dict[tuple[str, datetime], ObsRow] = {}
@@ -436,20 +525,20 @@ def _chart(rd: Reader, obs: list[ObsRow], challenger: str | None, now: datetime)
         t += timedelta(hours=1)
     stations = []
     has_challenger = False
-    for sid in sorted(actual):
+    for sid in sorted(set(actual) | served_station_ids | set(served_by_station)):
         pers = series.get((sid, PERSISTENCE_MODEL_VERSION), {})
         chal = series.get((sid, challenger), {}) if challenger else {}
         has_challenger = has_challenger or bool(chal)
         points = [
             {
                 "t": _iso(h),
-                "actual": _num(actual[sid].get(h), 1),
+                "actual": _num(actual.get(sid, {}).get(h), 1),
                 "persistence": _num(pers.get(h), 1),
                 "challenger": _num(chal.get(h), 1),
             }
             for h in hours
         ]
-        latest = newest_observations[sid]
+        latest = newest_observations.get(sid)
         stations.append(
             {
                 "id": sid,
@@ -461,13 +550,20 @@ def _chart(rd: Reader, obs: list[ObsRow], challenger: str | None, now: datetime)
                 "future_challenger": sorted(
                     future.get((sid, challenger or ""), []), key=lambda p: p["valid_time"]
                 ),
-                "latest_value": _num(latest.pm25, 1),
-                "latest_at": _iso(latest.ts),
+                "future_served": sorted(
+                    served_by_station.get(sid, []), key=lambda p: p["valid_time"]
+                ),
+                "served_issue_time": _iso(latest_serving_issue),
+                "latest_value": _num(latest.pm25, 1) if latest else None,
+                "latest_at": _iso(latest.ts) if latest else None,
             }
         )
     return {
         "stations": stations,
         "has_challenger": has_challenger,
+        "served_status": serving_status,
+        "served_invalid": serving_invalid,
+        "latest_serving_issue": _iso(latest_serving_issue),
         "start": _iso(since),
         "end": _iso(_hour(now)),
     }
@@ -864,6 +960,8 @@ def _collect(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any
         return _chart(rd, obs, challenger, now)
 
     chart = section("chart", chart_section)
+    if chart and chart.get("served_status") in ("degraded", "stale", "unavailable"):
+        sections["chart"] = "degraded"
     quality = section("quality", lambda: _quality(rd, now))
     drift = section("drift", lambda: _drift(rd, challenger, now))
     models = section("models", lambda: _models(rd, challenger))
@@ -1004,6 +1102,43 @@ def _bilingual(en: str, th: str, cls: str) -> str:
     return f'<span class="{cls}" data-en="{e(en)}" data-th="{e(th)}">{e(en)}</span>'
 
 
+def _served_state_notice(chart: dict[str, Any], st: dict[str, Any] | None = None) -> str:
+    issue_at = chart.get("latest_serving_issue")
+    station_issue = st.get("served_issue_time") if st else issue_at
+    if chart.get("served_status") == "unavailable":
+        return _bilingual(
+            "Served forecast history unavailable; comparison lines are not serving evidence.",
+            "ไม่สามารถอ่านประวัติพยากรณ์ที่เสิร์ฟได้ เส้นเปรียบเทียบไม่ใช่หลักฐานการเสิร์ฟ",
+            "forecast-empty served-state",
+        )
+    if chart.get("served_status") == "degraded":
+        return _bilingual(
+            "Served forecast history is incomplete "
+            f"({chart.get('served_invalid', 0)} invalid rows).",
+            f"ประวัติพยากรณ์ที่เสิร์ฟไม่ครบ ({chart.get('served_invalid', 0)} แถวไม่ถูกต้อง)",
+            "forecast-empty served-state",
+        )
+    if chart.get("served_status") == "stale" and station_issue:
+        issue_text = _bkk(datetime.fromisoformat(station_issue))
+        return _bilingual(
+            f"Latest serving issue is stale: {issue_text} Bangkok.",
+            f"ประวัติการเสิร์ฟล่าสุดเก่าแล้ว: {issue_text} เวลากรุงเทพฯ",
+            "forecast-empty served-state",
+        )
+    if chart.get("served_status") and (st is None or not st.get("future_served")):
+        if station_issue:
+            issue_text = _bkk(datetime.fromisoformat(station_issue))
+            en = (
+                "No future served forecasts for this station at the latest issue "
+                f"({issue_text} Bangkok)."
+            )
+            th = f"ไม่มีพยากรณ์ที่เสิร์ฟสำหรับสถานีนี้ในการออกรอบล่าสุด ({issue_text} เวลากรุงเทพฯ)"
+        else:
+            en, th = "No served forecasts are recorded yet.", "ยังไม่มีบันทึกพยากรณ์ที่เสิร์ฟ"
+        return _bilingual(en, th, "forecast-empty served-state")
+    return ""
+
+
 def _chart_block(
     st: dict[str, Any], chart: dict[str, Any], first: bool, generated_at: datetime | None = None
 ) -> str:
@@ -1012,7 +1147,24 @@ def _chart_block(
     future_keys = (
         ("future_persistence", "ln-pers", "Persistence"),
         ("future_challenger", "ln-chal", "Challenger"),
+        ("future_served", "ln-served", "Served"),
     )
+    baseline_keys = {
+        (p["issue_time"], p["valid_time"], PERSISTENCE_MODEL_VERSION)
+        for p in st.get("future_persistence", [])
+    }
+
+    def duplicate_served_baseline(forecast: dict[str, Any]) -> bool:
+        return (
+            forecast.get("reason") == "baseline_fallback"
+            and (
+                forecast.get("issue_time"),
+                forecast.get("valid_time"),
+                forecast.get("model_version"),
+            )
+            in baseline_keys
+        )
+
     has_future = any(p["value"] is not None for key, _, _ in future_keys for p in st.get(key, []))
     values = [p["actual"] for p in points if p["actual"] is not None]
     values += [
@@ -1020,7 +1172,10 @@ def _chart_block(
     ]
     stale_age = _stale_age_min(st, generated_at)
     if not values:
-        body = '<p class="muted small">No hourly data for this station yet.</p>'
+        body = (
+            '<p class="muted small">No hourly data for this station yet.</p>'
+            + _served_state_notice(chart, st)
+        )
         hidden = "" if first else " hidden"
         return f'<div class="chart" data-station="{e(st["id"])}"{hidden}>{body}</div>'
 
@@ -1099,6 +1254,31 @@ def _chart_block(
     # Future series start at the latest measured point so they connect to the actual line.
     future_parts: list[str] = []
     for key, css, _ in future_keys:
+        if key == "future_served":
+            groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for forecast in st.get(key, []):
+                if forecast["value"] is not None and not duplicate_served_baseline(forecast):
+                    groups.setdefault((forecast["model_version"], forecast["reason"]), []).append(
+                        forecast
+                    )
+            for forecasts in groups.values():
+                forecasts.sort(key=lambda forecast: forecast["valid_time"])
+                contiguous: list[list[dict[str, Any]]] = []
+                for forecast in forecasts:
+                    if not contiguous or forecast["horizon"] - contiguous[-1][-1]["horizon"] != 6:
+                        contiguous.append([])
+                    contiguous[-1].append(forecast)
+                for segment in contiguous:
+                    coords = [
+                        (
+                            px(datetime.fromisoformat(forecast["valid_time"])),
+                            py(forecast["value"]),
+                        )
+                        for forecast in segment
+                    ]
+                    start_xy = [anchor] if anchor and segment[0]["horizon"] == 6 else []
+                    future_parts.append(path(start_xy + coords, css + " future-line"))
+            continue
         coords: list[tuple[float, float, dict[str, Any]]] = []
         for forecast in st.get(key, []):
             if forecast["value"] is not None:
@@ -1125,25 +1305,36 @@ def _chart_block(
         for forecast in st.get(key, []):
             if forecast["value"] is None:
                 continue
+            if key == "future_served" and duplicate_served_baseline(forecast):
+                continue
             valid = datetime.fromisoformat(forecast["valid_time"])
             issue = datetime.fromisoformat(forecast["issue_time"])
             ahead = int((valid - issue) / timedelta(hours=1))
             x, y = px(valid), py(forecast["value"])
-            description = (
-                f"{key.replace('future_', '').capitalize()} forecast: "
-                f"{forecast['value']:g} µg/m³, valid {_bkk(valid)}; issued {_bkk(issue)}"
-            )
+            if key == "future_served":
+                created = datetime.fromisoformat(forecast["created_at"])
+                description = (
+                    f"Served {forecast['model_version']} ({forecast['reason']}), +{ahead} h: "
+                    f"{forecast['value']:g} µg/m³, issue {_bkk(issue)}, valid {_bkk(valid)}, "
+                    f"stored {_bkk(created)}, run {forecast['run_id']}"
+                )
+            else:
+                description = (
+                    f"{key.replace('future_', '').capitalize()} forecast: "
+                    f"{forecast['value']:g} µg/m³, valid {_bkk(valid)}; issued {_bkk(issue)}"
+                )
             circle = (
                 f'<circle class="forecast-dot {css}" cx="{x:.1f}" cy="{y:.1f}" r="4.5">'
                 f"<title>{e(description)}</title></circle>"
             )
             label = ""
-            if css == "ln-chal":  # only the model carries value labels
+            if css in ("ln-chal", "ln-served"):
                 edge = x > CH_X1 - 40
                 lx = x - 4 if edge else x
                 ly = min(max(y - 11, CH_Y0 + 10), CH_Y1 - 4)
                 label = (
-                    f'<text class="pt-label chal" x="{lx:.1f}" y="{ly:.1f}" '
+                    f'<text class="pt-label {"served" if css == "ln-served" else "chal"}" '
+                    f'x="{lx:.1f}" y="{ly:.1f}" '
                     f'text-anchor="{"end" if edge else "middle"}">'
                     f"+{ahead}h {forecast['value']:g}</text>"
                 )
@@ -1162,10 +1353,33 @@ def _chart_block(
             issue = datetime.fromisoformat(forecast["issue_time"])
             valid = datetime.fromisoformat(forecast["valid_time"])
             hours_ahead = int((valid - issue) / timedelta(hours=1))
-            future_html.append(
-                f'<span class="forecast-point"><b>{label} forecast</b> +{hours_ahead} h · '
-                f"{forecast['value']:g} µg/m³ <small>({_bkk(valid)})</small></span>"
-            )
+            if key == "future_served":
+                if forecast["reason"] == "baseline_fallback":
+                    reason_en, reason_th = "baseline fallback", "ใช้ค่าพื้นฐานแทน"
+                else:
+                    reason_en, reason_th = "champion", "แชมเปียน"
+                created = datetime.fromisoformat(forecast["created_at"])
+                title = (
+                    f"{forecast['model_version']} ({reason_en}); issue {_bkk(issue)}; "
+                    f"valid {_bkk(valid)}; stored {_bkk(created)}; run {forecast['run_id']}"
+                )
+                future_html.append(
+                    f'<span class="forecast-point served-point" title="{e(title)}">'
+                    f'<b><span data-en="Served" data-th="ที่เสิร์ฟ">Served</span> '
+                    f"{e(forecast['model_version'])} "
+                    f'<span data-en="({reason_en})" data-th="({reason_th})">({reason_en})</span>'
+                    f"</b> +{hours_ahead} h · {forecast['value']:g} µg/m³ "
+                    f'<small><span data-en="Issue" data-th="เวลาออก">Issue</span> {_bkk(issue)} · '
+                    f'<span data-en="valid" data-th="เวลาที่พยากรณ์">valid</span> {_bkk(valid)} · '
+                    f'<span data-en="stored" data-th="บันทึกเมื่อ">stored</span> '
+                    f"{_bkk(created)}</small></span>"
+                )
+            else:
+                future_html.append(
+                    f'<span class="forecast-point"><b>{label} forecast</b> +{hours_ahead} h · '
+                    f"{forecast['value']:g} µg/m³ <small>({_bkk(valid)})</small></span>"
+                )
+    served_notice = _served_state_notice(chart, st)
     if future_html:
         empty = ""
     elif stale_age is not None:
@@ -1175,6 +1389,7 @@ def _chart_block(
     future_block = (
         '<div class="future-forecasts"><strong>Upcoming forecasts</strong>'
         + ("".join(future_html) or empty)
+        + served_notice
         + "</div>"
     )
     body = (
@@ -1207,14 +1422,22 @@ def _section_chart(data: dict[str, Any]) -> str:
     legend = (
         '<div class="legend"><span><i class="sw actual"></i>Measured</span>'
         '<span><i class="sw pers"></i>Baseline forecast (tomorrow = today)</span>'
-        '<span><i class="sw chal"></i>Model forecast</span></div>'
+        '<span><i class="sw chal"></i><span data-en="Model forecast" '
+        'data-th="พยากรณ์จากโมเดล">Model forecast</span> '
+        '<small data-en="(configured shadow)" data-th="(โมเดลเงา)">'
+        "(configured shadow)</small></span>"
+        '<span><i class="sw served"></i><span data-en="Actually served" '
+        'data-th="พยากรณ์ที่เสิร์ฟจริง">Actually served</span></span></div>'
     )
     if chart is None:
         inner = _unavailable("The chart")
         pills = ""
         title = CHART_TITLE
     elif not chart["stations"]:
-        inner = '<p class="muted small">Waiting for the first observations.</p>'
+        inner = (
+            '<p class="muted small">Waiting for the first observations.</p>'
+            + _served_state_notice(chart)
+        )
         pills = ""
         title = CHART_TITLE
     else:
