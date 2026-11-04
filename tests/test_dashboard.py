@@ -77,6 +77,40 @@ def build(fake, out: Path, **kw) -> int:
     return dashboard.run(settings(**kw), out, connect=fake, clock=lambda: NOW)
 
 
+def add_served_forecast(
+    fake: Fake,
+    station: str,
+    issue: datetime,
+    horizon: int,
+    model: str,
+    reason: str,
+    *,
+    run_id: str = "served-run",
+    ledger_run_id: str | None = None,
+    value: float = 24.0,
+    created_at: datetime | None = None,
+) -> None:
+    valid = issue + horizon * H
+    fake.con.execute(
+        "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id, "
+        "pm25_pred, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            station,
+            issue.isoformat(),
+            valid.isoformat(),
+            model,
+            run_id,
+            value,
+            (created_at or NOW - timedelta(minutes=5)).isoformat(),
+        ),
+    )
+    fake.con.execute(
+        "INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, "
+        "reason, run_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (station, issue.isoformat(), valid.isoformat(), model, reason, ledger_run_id or run_id),
+    )
+
+
 def load(out: Path) -> dict:
     return json.loads((out / "data.json").read_text())
 
@@ -591,6 +625,152 @@ def test_future_chart_has_no_prediction_when_none_is_stored(tmp_path):
     assert "Waiting for future forecasts." in (tmp_path / "index.html").read_text()
 
 
+def test_chart_uses_one_latest_serving_issue_and_keeps_model_roles_separate(tmp_path):
+    fake = Fake()
+    seed(fake)
+    previous = NOW.replace(minute=0, second=0, microsecond=0) - H
+    issue = NOW.replace(minute=0, second=0, microsecond=0)
+    add_served_forecast(fake, "59t", previous, 24, "retired-v1", "champion")
+    add_served_forecast(fake, "59t", issue, 6, "champ-v2", "champion", value=28.0)
+    add_served_forecast(fake, "59t", issue, 12, P, "baseline_fallback", value=24.0)
+    add_served_forecast(fake, "59t", issue, 24, "champ-v2", "champion", value=35.0)
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    chart = load(tmp_path)["chart"]
+    station = next(s for s in chart["stations"] if s["id"] == "59t")
+    assert chart["latest_serving_issue"] == issue.isoformat()
+    assert chart["served_status"] == "ok"
+    assert {p["issue_time"] for p in station["future_served"]} == {issue.isoformat()}
+    assert {p["model_version"] for p in station["future_served"]} == {"champ-v2", P}
+    assert {p["reason"] for p in station["future_served"]} == {"champion", "baseline_fallback"}
+    page = (tmp_path / "index.html").read_text()
+    svg = _chart_svg(page)
+    assert 'class="ln ln-served' in svg
+    assert "retired-v1" not in svg
+    assert "stored 30 Oct" in svg and "served-run" in svg
+    assert "Served</span> champ-v2" in page and "baseline fallback" in page
+    served_paths = re.findall(r'<path class="ln ln-served future-line" d="([^"]+)"', svg)
+    # The champion +24h point must not be reconnected to the measured anchor across +12h fallback.
+    assert all(len(path.split(" L")) <= 2 for path in served_paths)
+
+
+def test_nonduplicate_served_fallback_is_labelled_from_recorded_reason(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0, second=0, microsecond=0)
+    add_served_forecast(fake, "59t", issue, 12, "fallback-v1", "baseline_fallback")
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    page = (tmp_path / "index.html").read_text()
+    assert "fallback-v1" in page
+    assert "(baseline fallback)" in page
+    assert "fallback-v1 (champion)" not in page
+
+
+def test_missing_ledger_notice_is_visible_without_station_data(tmp_path):
+    fake = Fake()
+    seed(fake)
+    fake.con.execute("DROP TABLE serving_forecasts")
+    fake.con.execute("DELETE FROM observations")
+    fake.con.execute("DELETE FROM predictions")
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    page = (tmp_path / "index.html").read_text()
+    assert "Waiting for the first observations." in page
+    assert "Served forecast history unavailable" in page
+
+
+def test_chart_does_not_reuse_an_older_station_choice_at_newer_global_issue(tmp_path):
+    fake = Fake()
+    seed(fake)
+    previous = NOW.replace(minute=0, second=0, microsecond=0) - H
+    latest = NOW.replace(minute=0, second=0, microsecond=0)
+    add_served_forecast(fake, "61t", previous, 24, "old-champ", "champion")
+    add_served_forecast(fake, "59t", latest, 6, "new-champ", "champion")
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    chart = load(tmp_path)["chart"]
+    station = next(s for s in chart["stations"] if s["id"] == "61t")
+    assert chart["latest_serving_issue"] == latest.isoformat()
+    assert station["served_issue_time"] == latest.isoformat()
+    assert station["future_served"] == []
+    assert "No future served forecasts for this station" in (tmp_path / "index.html").read_text()
+
+
+def test_served_forecast_remains_visible_when_station_has_no_recent_observation(tmp_path):
+    fake = Fake()
+    seed(fake)
+    fake.con.execute("DELETE FROM observations WHERE station_id = '61t'")
+    issue = NOW.replace(minute=0, second=0, microsecond=0)
+    add_served_forecast(fake, "61t", issue, 6, "champ-v1", "champion")
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    station = next(s for s in load(tmp_path)["chart"]["stations"] if s["id"] == "61t")
+    assert station["latest_at"] is None
+    assert len(station["future_served"]) == 1
+    page = (tmp_path / "index.html").read_text()
+    assert "Served</span> champ-v1" in page
+
+
+def test_chart_marks_run_mismatch_degraded_and_preserves_comparison_series(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0, second=0, microsecond=0)
+    add_served_forecast(
+        fake,
+        "59t",
+        issue,
+        6,
+        CHALLENGER,
+        "champion",
+        run_id="prediction-run",
+        ledger_run_id="different-run",
+    )
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+    station = next(s for s in data["chart"]["stations"] if s["id"] == "59t")
+    assert data["chart"]["served_status"] == "degraded"
+    assert data["chart"]["served_invalid"] == 1
+    assert station["future_served"] == []
+    assert data["sections"]["chart"] == "degraded"
+    assert data["sections"]["models"] == "ok"
+    page = (tmp_path / "index.html").read_text()
+    assert "Model forecast" in page and "configured shadow" in page
+    assert "history is incomplete (1 invalid rows)" in page
+
+
+def test_missing_serving_ledger_keeps_comparison_chart_and_marks_served_layer_unavailable(
+    tmp_path,
+):
+    fake = Fake()
+    seed(fake)
+    fake.con.execute("DROP TABLE serving_forecasts")
+    issue = NOW.replace(minute=0, second=0, microsecond=0)
+    fake.con.execute(
+        "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id, "
+        "pm25_pred) VALUES ('59t', ?, ?, ?, 'shadow-run', 31.0)",
+        (issue.isoformat(), (issue + 6 * H).isoformat(), CHALLENGER),
+    )
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+    station = next(s for s in data["chart"]["stations"] if s["id"] == "59t")
+    assert station["future_challenger"]
+    assert data["chart"]["served_status"] == "unavailable"
+    assert data["sections"]["chart"] == "degraded"
+    page = (tmp_path / "index.html").read_text()
+    assert "Served forecast history unavailable" in page
+    assert "Model forecast" in page and "configured shadow" in page
+
+
 def test_map_uses_newest_observation_and_marks_old_reading(tmp_path):
     fake = Fake()
     station = "59t"
@@ -790,7 +970,11 @@ def test_chart_axes_legend_and_series_markup(tmp_path):
     for swatch in ("sw actual", "sw pers", "sw chal"):
         assert f'<i class="{swatch}">' in page
     for text in ("Measured", "Baseline forecast (tomorrow = today)", "Model forecast"):
-        assert f"</i>{text}</span>" in page
+        if text == "Model forecast":
+            assert 'data-en="Model forecast"' in page
+        else:
+            assert f"</i>{text}</span>" in page
+    assert "configured shadow" in page
     assert 'class="forecast-boundary"' in page
     hover = r'<circle class="hover-pt"[^>]*><title>Measured: [\d.]+ \u00b5g/m\u00b3 at '
     assert re.search(hover, page)
