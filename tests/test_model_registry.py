@@ -22,6 +22,8 @@ class InMemoryRegistry:
         self.champion = None
         self.events = []
         self.lock = threading.Lock()
+        self.pointer_lock = threading.RLock()
+        self.transaction = threading.local()
 
     @property
     def row(self):
@@ -32,15 +34,50 @@ class InMemoryRegistry:
         self.rows["test-v1"] = value
 
     def __enter__(self):
+        self.transaction.in_context = True
         return self
 
     def __exit__(self, *_):
+        self.transaction.in_context = False
+        self._release_pointer_lock()
         return False
 
+    def _release_pointer_lock(self):
+        depth = getattr(self.transaction, "pointer_lock_depth", 0)
+        self.transaction.pointer_lock_depth = 0
+        for _ in range(depth):
+            self.pointer_lock.release()
+
     def execute(self, statement, params):
-        if statement.lstrip().startswith("INSERT INTO model_events"):
+        if "pg_advisory_xact_lock" in statement:
+            self.pointer_lock.acquire()
+            self.transaction.pointer_lock_depth = (
+                getattr(self.transaction, "pointer_lock_depth", 0) + 1
+            )
+        elif statement.lstrip().startswith("INSERT INTO model_events"):
             with self.lock:
                 self.events.append(params)
+            if not getattr(self.transaction, "in_context", False):
+                self._release_pointer_lock()
+        elif "SELECT action, previous_version, metrics FROM model_events" in statement:
+            with self.lock:
+                version = params["model_version"]
+                decisions = [
+                    event
+                    for event in self.events
+                    if event["actor"] == "retrain"
+                    and event["action"] in ("recommend", "keep")
+                    and event["model_version"] == version
+                ]
+                self._selected = (
+                    (
+                        decisions[-1]["action"],
+                        decisions[-1]["previous_version"],
+                        decisions[-1]["metrics"],
+                    )
+                    if decisions
+                    else None
+                )
         elif "FROM model_events" in statement:
             with self.lock:
                 changes = [e for e in self.events if e["action"] in ("promote", "rollback")]
@@ -49,6 +86,10 @@ class InMemoryRegistry:
                     self._selected = None
                 else:
                     self._selected = (last["model_version"], last["previous_version"])
+            if "ORDER BY id DESC LIMIT 1" in statement and not getattr(
+                self.transaction, "in_context", False
+            ):
+                self._release_pointer_lock()
         elif statement.lstrip().startswith("INSERT INTO models"):
             with self.lock:
                 self.rows.setdefault(

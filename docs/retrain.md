@@ -31,7 +31,8 @@ also supports on-demand runs. Both currently stop at the KAN-126 safety block de
 
 1. Export the latest hosted history to DuckDB.
 2. Train a candidate, version `retrain-YYYYMMDD` (UTC date; `-2`, `-3` on a same-day re-run). The
-   training data stops at the start of a held-out window (the last 7 days, `--holdout-days`).
+   training data stops before a fixed 28-day evaluation window that ends one +24h horizon before
+   the current UTC hour. `--holdout-days` only accepts the approved value 28.
 3. Register the candidate (`publish_model`). Registering never changes production.
 4. On the held-out window, score the candidate, the current champion, the current challenger
    (`CHALLENGER_MODEL_VERSION`, if set) and `persistence-24h` on identical
@@ -43,7 +44,7 @@ also supports on-demand runs. Both currently stop at the KAN-126 safety block de
 
 There is no refit on full history. The candidate is trained only on data known before the held-out
 window (rows dated before it and ingested before it), so the registered artifact is exactly the one
-scored. The price: a promoted model has not seen the last 7 days. A champion or challenger whose
+scored. The price: a promoted model has not seen the last 28 complete evaluation days. A champion or challenger whose
 training window reaches into the held-out window is flagged "overlaps holdout" in the RUN_SUMMARY
 and the alert, because its scores may be optimistic. The RUN_SUMMARY also logs the candidate
 artifact size (`candidate_artifact_bytes`); old models are cleaned up with `registry_cli prune`
@@ -59,13 +60,18 @@ candidate is also kept out if it is worse than the champion by more than 2% rela
 other horizon both serve (+6/+12 h). A champion that cannot be loaded or scored is never replaced
 (the run fails and alerts).
 
-Retraining is recommend-only. `AUTO_PROMOTE=true` returns
-`blocked_owner_review_required` before export or registry access. Manual promotion is also blocked
-while KAN-117's open policy decisions remain unresolved. The owner must first approve the
-per-station sample and coverage thresholds, acceptable station-level degradation, evaluation
-period, and overlap handling. After those decisions are approved and implemented, the owner can
-review matched coverage, metrics, provenance and artifact identity, then explicitly authorize an
-operator to use the manual registry command below.
+The owner-approved station gate also requires at least 20 matched pairs per eligible station, 80%
+coverage among stations with at least 20 mature actual outcomes, and no more than 10% candidate MAE
+degradation against the incumbent per eligible station (persistence when there is no incumbent).
+Stations without candidate forecasts count against coverage. The candidate and incumbent training
+outcomes must end before the evaluation window; unknown or overlapping training bounds block the
+decision. The station report, window and rejection reasons are included in the retrain summary and
+decision event.
+
+Retraining remains recommend-only. `AUTO_PROMOTE=true` returns `blocked_owner_review_required`
+before export or registry access. The owner-approved policy is now implemented in the evaluation
+gate, but evaluation still remains unavailable until KAN-126's trusted locked-holdout boundary is
+verified. Manual promotion requires an eligible, recorded recommendation and owner review.
 
 ## Promote manually
 
@@ -75,7 +81,9 @@ python -m pm25_forecast.registry_cli promote retrain-20261102 --confirm
 ```
 
 Run `check` only after the policy preconditions above are met. Verify the registered model version
-and artifact identity against the reviewed evaluation record before authorizing `promote`.
+and artifact identity against the reviewed evaluation record before authorizing `promote`. The
+command also refuses a recommendation if the live champion differs from the exact champion recorded
+at evaluation time; rerun evaluation against the new champion first.
 
 `DATABASE_URL` comes from the environment or `.env`. `champion` shows the current pointer.
 
@@ -86,9 +94,9 @@ Every champion change and every retrain decision is one row in `model_events` (m
 `action` (`promote`, `rollback`, `recommend`, `keep`),
 `model_version`, `previous_version`, `actor` (`cli`, `retrain` or `auto`), `metrics` (JSON, the
 comparison numbers) and `reason`. A `promote` or `rollback` row is written in the same transaction
-as the champion pointer change, so the log and the pointer cannot disagree. The pointer row is
-locked (`SELECT ... FOR UPDATE`) before the previous champion is read, so two concurrent promotes or
-rollbacks are serialised. Retrain writes `recommend` (and alerts) or `keep`; it cannot write an
+as the champion pointer change, so the log and the pointer cannot disagree. Champion changes take
+a transaction-scoped advisory lock before the pointer row lock (`SELECT ... FOR UPDATE`), so
+concurrent promotes and rollbacks are serialized even before the first champion row exists. Retrain writes `recommend` (and alerts) or `keep`; it cannot write an
 automatic `promote`. The manual registry command writes a `promote` row (actor `cli`) atomically
 with the pointer.
 

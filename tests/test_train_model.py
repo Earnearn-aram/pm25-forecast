@@ -133,6 +133,11 @@ def test_training_fails_closed_with_all_horizon_availability_counts(tmp_path):
     assert "strict feature policy requires available_at <= simulated issue time" in message
 
 
+def test_training_cli_no_longer_exposes_direct_promotion():
+    with pytest.raises(SystemExit, match="2"):
+        train_model.main(["--promote"])
+
+
 def test_validation_embargo_excludes_labels_that_arrived_after_fold_start():
     start = datetime(2026, 1, 1, tzinfo=UTC)
     origins = [start + timedelta(hours=i) for i in range(10)]

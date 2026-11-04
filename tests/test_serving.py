@@ -187,6 +187,26 @@ def cli(reg, *argv):
     return code, "\n".join(lines)
 
 
+def add_eligible_recommendation(reg, version):
+    registry.record_event(
+        reg,
+        "recommend",
+        version,
+        actor="retrain",
+        previous_version=reg.champion,
+        metrics={
+            "station_policy": {
+                "passed": True,
+                "locked_holdout_boundary_verified": True,
+                "candidate_training_window_verified": True,
+                "incumbent_training_window_verified": True,
+                "evaluation_start": "2026-01-01T00:00:00+00:00",
+                "evaluation_end": "2026-01-29T00:00:00+00:00",
+            }
+        },
+    )
+
+
 def test_cli_register_check_and_manual_promote(tmp_path):
     reg = InMemoryRegistry()
     art = single_bundle()
@@ -202,6 +222,7 @@ def test_cli_register_check_and_manual_promote(tmp_path):
     assert cli(reg, "champion") == (0, "no production champion is set")
     code, text = cli(reg, "promote", "kan15")
     assert code == 1 and "--confirm" in text and reg.champion is None
+    add_eligible_recommendation(reg, "kan15")
     assert cli(reg, "promote", "kan15", "--confirm") == (0, "production champion: none -> kan15")
     assert cli(reg, "champion") == (0, "production champion: kan15")
 
@@ -215,6 +236,7 @@ def test_cli_refuses_to_promote_an_unservable_model():
         art,
         json.dumps(manifest("bad", art, features)),
     )
+    add_eligible_recommendation(reg, "bad")
     code, text = cli(reg, "promote", "bad", "--confirm")
     assert code == 1 and "shared feature builder" in text and reg.champion is None
 
