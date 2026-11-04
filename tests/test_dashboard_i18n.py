@@ -125,8 +125,9 @@ def test_chart_v2_legend_caption_and_labels_have_thai(tmp_path):
     assert "PM2\\.5 \u00b7 last 24 h and next 24 h" in js
     build(Fake(), tmp_path)
     page = (tmp_path / "index.html").read_text()
-    for english in ("Measured", "Baseline forecast (tomorrow = today)", "Model forecast"):
+    for english in ("Measured", "Baseline forecast (tomorrow = today)"):
         assert f"</i>{english}</span>" in page
+    assert 'data-en="Model forecast"' in page and "configured shadow" in page
 
 
 # --- KAN-103: KPI card tooltips --------------------------------------------------------------
