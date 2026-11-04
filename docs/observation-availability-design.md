@@ -33,6 +33,15 @@ Commit time alone does not prove that a particular feature reader could see a ro
 
 The required contract is a durable **feature-read visibility snapshot**: for each forecast issue, establish a database snapshot (for example, PostgreSQL's `pg_current_snapshot()`) in a short read-only repeatable-read transaction before feature reads; perform all feature queries under that same transaction snapshot. Preserve that exact snapshot token and transaction/feature provenance with the forecast record. Event records carry their creating transaction ID. A replay may use an event only if the stored issue snapshot proves that event transaction was visible; it then applies the recorded source precedence and correction order. The later persistence time of the forecast record does not replace or backdate the captured snapshot. A missing snapshot, missing event provenance, or ambiguous visibility blocks the affected station/horizon. If a newer effective-state change is unproven, replay must not fall back to an older value and pretend that was still current.
 
+### Nominal issue hour versus actual feature time
+
+Current prediction code floors run time to a UTC `issue_time` hour, while database reads happen later at the actual workflow time. A snapshot taken at 10:07 cannot establish which corrected value was visible at the nominal 10:00 issue boundary; it may include a 10:05 commit. Treating that later snapshot as an as-of-10:00 snapshot would leak future-to-origin state. A future implementation must choose and test one explicit contract before any training reader consumes the snapshots:
+
+- Keep the nominal hour as the origin and capture a trusted visibility boundary at or before that hour; if it is missed, mark that origin unusable. Feature versions committed after the nominal boundary must be excluded.
+- Or make the actual feature snapshot/issuance time the canonical forecast origin, persist it separately from the nominal hourly bucket, and align target lead times, maturity cutoffs, and scoring with that actual origin. This is a forecast/scoring contract change requiring its own reviewed scope.
+
+Until one contract is selected and implemented consistently by prediction, training, and scoring, a later snapshot cannot be used as proof for the floored nominal issue time. The existing hourly issue key alone is insufficient provenance; KAN-118/KAN-126 stay blocked.
+
 For simulated historical origins that have no saved feature snapshot, availability cannot be reconstructed exactly from mutable rows or from receipt timestamps. Start producing immutable origin snapshots prospectively at the actual forecast/training-example origin; no pre-capture backfill may fabricate them. Only examples with retained, verifiable snapshots are eligible. Before implementation, prove that the supported PostgreSQL service can export/capture, persist, retain, and later evaluate snapshot visibility safely across transaction-ID wraparound, vacuum, failover, and restore. PostgreSQL commit-timestamp tracking may help diagnostics but is optional and its records are routinely removed during vacuum; it is not a substitute for the issue snapshot. Until the snapshot contract and retention behavior pass integration tests, the design remains blocked and KAN-118/KAN-126 stay fail-closed.
 
 ## As-of replay and leakage rules
@@ -66,6 +75,7 @@ Use synthetic fixtures for deterministic tests and PostgreSQL integration tests 
 - Concurrent writers on the same key serialize; retries cannot erase or reorder a correction.
 - Event plus serving update roll back atomically; delayed/crashed snapshot persistence leaves the affected origin unusable, with no retrospective replacement snapshot.
 - Feature reads use one recorded repeatable-read snapshot; an event committed after that snapshot is excluded, even if it commits before forecast output is written.
+- An event committed after a nominal hour but before a later feature snapshot is never treated as available at the earlier nominal origin; tests cover both contract options and the +6/+12/+24h target and maturity implications.
 - Persisting a previously captured snapshot after an issue boundary preserves that exact snapshot; it must never be replaced by a later snapshot. If the process crashes before that token is durably associated with the forecast, the origin stays unusable. Missing/ambiguous transaction visibility and newer unproven corrections fail closed without stale fallback.
 - Backfill is eligible only when the exact issue snapshot proves visibility; observation and receipt times never change eligibility.
 - Migration seed/writer overlap cannot lose a change; restart/resume is idempotent; rollback disables reads without deleting captures.
