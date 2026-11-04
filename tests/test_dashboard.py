@@ -33,6 +33,7 @@ TOP_KEYS = {
     "quality",
     "drift",
     "models",
+    "serving",
     "coverage",
 }
 
@@ -78,6 +79,199 @@ def build(fake, out: Path, **kw) -> int:
 
 def load(out: Path) -> dict:
     return json.loads((out / "data.json").read_text())
+
+
+def test_latest_recorded_serving_choices_distinguish_shadow_and_fallback(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0, second=0, microsecond=0) - H
+    valid = issue + 24 * H
+    for station, version, reason in (
+        ("59t", "champ-v1", "champion"),
+        ("61t", P, "baseline_fallback"),
+    ):
+        fake.con.execute(
+            "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, run_id, "
+            "pm25_pred) VALUES (?, ?, ?, ?, 'r', 20)",
+            (station, issue.isoformat(), valid.isoformat(), version),
+        )
+        fake.con.execute(
+            "INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, "
+            "reason, run_id) VALUES (?, ?, ?, ?, ?, 'r')",
+            (station, issue.isoformat(), valid.isoformat(), version, reason),
+        )
+    fake.con.commit()
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+    assert data["serving"]["issue_time"] == issue.isoformat()
+    assert {c["reason"] for c in data["serving"]["choices"]} == {"champion", "baseline_fallback"}
+    page = (tmp_path / "index.html").read_text()
+    assert "champ-v1: 1 station-horizons (champion)" in page
+    assert "baseline fallback" in page
+    assert "Accuracy below uses mature forecasts marked as served" in page
+    assert "Current UTC hour: 0/15" in page  # The latest record is from the previous hour.
+    assert "No current-valid served scores are available in the last 7 days" in page
+
+
+def test_current_serving_coverage_and_malformed_rows_are_visible(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0, second=0, microsecond=0)
+    for station, reason in (("59t", "baseline_fallback"), ("61t", "unexpected")):
+        valid = issue + 24 * H
+        fake.con.execute(
+            "INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, "
+            "reason, run_id) VALUES (?, ?, ?, ?, ?, 'r')",
+            (station, issue.isoformat(), valid.isoformat(), P, reason),
+        )
+    fake.con.commit()
+    assert build(fake, tmp_path, challenger_model_version=None) == 0
+    data = load(tmp_path)
+    assert data["sections"]["serving"] == "degraded"
+    assert data["serving"]["recorded"] == 1 and data["serving"]["invalid"] == 1
+    page = (tmp_path / "index.html").read_text()
+    assert "Current UTC hour: 1/15" in page
+    assert "1 records could not be interpreted" in page
+    assert "any configured shadow forecasts" in page
+
+
+def test_serving_timestamp_displays_date_across_bangkok_midnight():
+    issue = datetime(2026, 11, 2, 18, tzinfo=UTC)
+    data = {
+        "models": None,
+        "serving": {
+            "issue_time": issue.isoformat(),
+            "choices": [{"model_version": P, "reason": "baseline_fallback", "station_horizons": 1}],
+            "recorded": 1,
+            "expected": 15,
+            "invalid": 0,
+            "is_current_hour": True,
+        },
+    }
+    page = dashboard._section_models(data)
+    assert "02 Nov 2026 18:00 UTC" in page
+    assert "03 Nov 2026 01:00 Bangkok" in page
+
+
+def test_all_invalid_serving_rows_are_not_reported_as_empty(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0, second=0, microsecond=0)
+    fake.con.execute(
+        "INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, "
+        "reason, run_id) VALUES (?, ?, ?, ?, ?, 'r')",
+        ("59t", issue.isoformat(), (issue + 24 * H).isoformat(), P, "unexpected"),
+    )
+    fake.con.commit()
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+    assert data["sections"]["serving"] == "degraded"
+    assert data["serving"]["invalid"] == 1
+    page = (tmp_path / "index.html").read_text()
+    assert "Serving records are malformed" in page
+
+
+def test_missing_serving_ledger_is_unavailable_without_losing_model_registry(tmp_path):
+    fake = Fake()
+    seed(fake)
+    fake.con.execute("DROP TABLE serving_forecasts")
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+    assert data["sections"]["serving"] == "unavailable"
+    assert data["sections"]["models"] == "ok"
+    assert "Serving history unavailable" in (tmp_path / "index.html").read_text()
+
+
+def test_dashboard_shows_accuracy_for_ledger_selected_model_only(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0, second=0, microsecond=0) - 26 * H
+    valid = issue + 24 * H
+    fake.con.execute(
+        "INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, "
+        "reason, run_id) VALUES (?, ?, ?, ?, 'champion', 'r')",
+        ("59t", issue.isoformat(), valid.isoformat(), CHALLENGER),
+    )
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+
+    accuracy = data["serving"]["accuracy"]
+    assert accuracy["status"] == "ok"
+    assert accuracy["models"][CHALLENGER]["24"]["n"] == 1
+    assert accuracy["models"][CHALLENGER]["24"]["mae"] == 5.0
+    assert accuracy["models"][CHALLENGER]["24"]["skill"] == 0.5
+    page = (tmp_path / "index.html").read_text()
+    assert f"{CHALLENGER} +24h: MAE 5.0 µg/m³" in page
+    assert "n=1 matched" in page
+
+
+def test_dashboard_excludes_scores_for_corrected_actuals(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW - timedelta(days=6)
+    valid = issue + 24 * H
+    fake.con.execute(
+        "INSERT INTO observations (station_id, ts, pm25, source) VALUES ('59t', ?, 40, 'test')",
+        (valid.isoformat(),),
+    )
+    for model, prediction, error in ((P, 50.0, 10.0), (CHALLENGER, 45.0, 5.0)):
+        fake.con.execute(
+            "INSERT INTO predictions (station_id, issue_time, valid_time, model_version, "
+            "run_id, pm25_pred) VALUES ('59t', ?, ?, ?, 'r', ?)",
+            (issue.isoformat(), valid.isoformat(), model, prediction),
+        )
+        fake.con.execute(
+            "INSERT INTO scores (station_id, issue_time, valid_time, model_version, pm25_obs, "
+            "abs_error) VALUES ('59t', ?, ?, ?, 40, ?)",
+            (issue.isoformat(), valid.isoformat(), model, error),
+        )
+    fake.con.execute(
+        "INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, "
+        "reason, run_id) VALUES ('59t', ?, ?, ?, 'champion', 'r')",
+        (issue.isoformat(), valid.isoformat(), CHALLENGER),
+    )
+    fake.con.execute(
+        "UPDATE observations SET pm25 = 35 WHERE station_id = '59t' AND ts = ?",
+        (valid.isoformat(),),
+    )
+    fake.con.execute(
+        "UPDATE scores SET pm25_obs = 35, abs_error = 15 WHERE station_id = '59t' "
+        "AND issue_time = ? AND model_version = ?",
+        (issue.isoformat(), P),
+    )
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    accuracy = load(tmp_path)["serving"]["accuracy"]
+    assert accuracy["status"] == "waiting"
+    assert accuracy["models"] == {}
+
+
+def test_dashboard_marks_malformed_served_scores_incomplete(tmp_path):
+    fake = Fake()
+    seed(fake)
+    issue = NOW.replace(minute=0, second=0, microsecond=0) - 26 * H
+    valid = issue + 24 * H
+    fake.con.execute(
+        "INSERT INTO serving_forecasts (station_id, issue_time, valid_time, model_version, "
+        "reason, run_id) VALUES ('59t', ?, ?, ?, 'champion', 'r')",
+        (issue.isoformat(), valid.isoformat(), CHALLENGER),
+    )
+    fake.con.execute(
+        "UPDATE scores SET abs_error = ? WHERE station_id = '59t' AND issue_time = ? "
+        "AND valid_time = ? AND model_version = ?",
+        (float("inf"), issue.isoformat(), valid.isoformat(), CHALLENGER),
+    )
+    fake.con.commit()
+
+    assert build(fake, tmp_path) == 0
+    data = load(tmp_path)
+    assert data["serving"]["accuracy"]["status"] == "degraded"
+    assert data["serving"]["accuracy"]["malformed"] == 1
+    assert data["sections"]["serving"] == "degraded"
+    assert "1 score rows were unusable" in (tmp_path / "index.html").read_text()
 
 
 def seed(fake: FakeDb, *, challenger_scores: bool = True) -> None:
