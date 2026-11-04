@@ -134,6 +134,14 @@ class ServingChoiceRow(BaseModel):
     reason: str
 
 
+class ServedScoreRow(BaseModel):
+    model_version: str
+    station_id: str
+    issue_time: AwareDatetime
+    valid_time: AwareDatetime
+    abs_error: float
+
+
 class RetrainRow(BaseModel):
     model_version: str
     created_at: AwareDatetime
@@ -166,6 +174,7 @@ SELECT issue_time, station_id, valid_time, model_version, reason FROM serving_fo
 WHERE issue_time = (SELECT max(issue_time) FROM serving_forecasts WHERE issue_time <= %(now)s)
 ORDER BY station_id, valid_time
 """
+SERVED_REFERENCE = "__served_persistence_reference__"
 SELECT_RETRAIN = """
 SELECT model_version, created_at FROM models WHERE model_version LIKE %(prefix)s
 ORDER BY created_at DESC LIMIT 1
@@ -735,6 +744,11 @@ def _serving(rd: Reader, now: datetime) -> dict[str, Any]:
     for row in choices:
         key = (row.model_version, row.reason)
         counts[key] = counts.get(key, 0) + 1
+    try:
+        accuracy = _serving_accuracy(rd, now)
+    except Exception as exc:  # keep recorded choice visibility if score history is unavailable
+        logger.warning("dashboard served accuracy unavailable (%s)", type(exc).__name__)
+        accuracy = {"status": "unavailable", "window_days": WINDOW.days, "models": {}}
     return {
         "issue_time": _iso(choices[0].issue_time) if choices else None,
         "is_current_hour": bool(choices and _hour(choices[0].issue_time) == _hour(now)),
@@ -745,6 +759,50 @@ def _serving(rd: Reader, now: datetime) -> dict[str, Any]:
             {"model_version": version, "reason": reason, "station_horizons": count}
             for (version, reason), count in sorted(counts.items())
         ],
+        "accuracy": accuracy,
+    }
+
+
+def _serving_accuracy(rd: Reader, now: datetime) -> dict[str, Any]:
+    """Accuracy only for ledger-selected forecasts, paired with persistence on the same keys."""
+    since = now - WINDOW
+    raw_served = rd.query(sql.SELECT_SERVED_SCORES_BETWEEN, {"since": since, "now": now})
+    parsed_served = _rows(ServedScoreRow, raw_served)
+    served_rows = [
+        row for row in parsed_served if math.isfinite(row.abs_error) and row.abs_error >= 0
+    ]
+    raw_reference = rd.query(
+        sql.SELECT_SERVED_PERSISTENCE_SCORES_BETWEEN,
+        {"model_version": PERSISTENCE_MODEL_VERSION, "since": since, "now": now},
+    )
+    parsed_reference = _rows(ScoreRow, raw_reference)
+    reference_rows = [
+        row for row in parsed_reference if math.isfinite(row.abs_error) and row.abs_error >= 0
+    ]
+    malformed = len(raw_served) - len(served_rows) + len(raw_reference) - len(reference_rows)
+    scores: dict[str, list[ScoreRow]] = {SERVED_REFERENCE: reference_rows}
+    for row in served_rows:
+        scores.setdefault(row.model_version, []).append(row)
+    metrics = rolling_metrics(scores, reference=SERVED_REFERENCE)
+    metrics.pop(SERVED_REFERENCE, None)
+    models = {
+        model: {
+            str(horizon): {
+                "n": metric.n,
+                "mae": _num(metric.mae),
+                "rmse": _num(metric.rmse),
+                "skill": _num(metric.skill_vs_persistence, 4),
+                "n_matched": metric.n_matched,
+            }
+            for horizon, metric in sorted(by_horizon.items())
+        }
+        for model, by_horizon in sorted(metrics.items())
+    }
+    return {
+        "status": "degraded" if malformed else "ok" if models else "waiting",
+        "window_days": WINDOW.days,
+        "malformed": malformed,
+        "models": models,
     }
 
 
@@ -810,7 +868,9 @@ def _collect(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any
     drift = section("drift", lambda: _drift(rd, challenger, now))
     models = section("models", lambda: _models(rd, challenger))
     serving = section("serving", lambda: _serving(rd, now))
-    if serving and serving["invalid"]:
+    if serving and (
+        serving["invalid"] or serving["accuracy"]["status"] in ("degraded", "unavailable")
+    ):
         sections["serving"] = "degraded"
     coverage = section("coverage", lambda: _coverage(rd, now))
     if coverage and any(c.get("reason") == "query_failed" for c in coverage.values()):
@@ -1666,11 +1726,77 @@ def _section_models(data: dict[str, Any]) -> str:
             + incomplete
             + f"<ul>{''.join(items)}</ul>"
             + _bi(
-                "These are recorded choices, not a measure of accuracy. "
-                "The chart, when available, shows baseline and any configured shadow forecasts.",
-                "นี่คือรายการที่บันทึกไว้ ไม่ใช่ค่าความแม่นยำ กราฟแสดง baseline และโมเดลท้าชิงที่ตั้งค่าไว้เมื่อมีข้อมูล",
+                "Accuracy below uses mature forecasts marked as served and compares with "
+                "persistence on matched cases. The chart still shows baseline and any "
+                "configured shadow forecasts.",
+                "ค่าความแม่นยำด้านล่างคำนวณจากพยากรณ์ที่บันทึกว่าใช้งานและมีผลจริงแล้ว "
+                "โดยเทียบกับ persistence ในกรณีเดียวกัน กราฟยังแสดง baseline และ shadow ที่ตั้งค่าไว้",
             )
         )
+    accuracy = (
+        serving.get("accuracy", {"status": "waiting", "window_days": WINDOW.days, "models": {}})
+        if serving is not None
+        else {"status": "unavailable", "window_days": WINDOW.days, "models": {}}
+    )
+    if accuracy["status"] == "unavailable":
+        accuracy_body = _bi(
+            "Served forecast accuracy is unavailable; recorded model choices are still shown.",
+            "ไม่สามารถโหลดค่าความแม่นยำของพยากรณ์ที่ใช้งานได้ แต่ยังแสดงรายการโมเดลที่บันทึกไว้",
+        )
+    else:
+        accuracy_items = []
+        for version, horizons in accuracy["models"].items():
+            for horizon, metric in horizons.items():
+                mae = "unavailable" if metric["mae"] is None else f"{metric['mae']:.1f}"
+                skill_en, skill_th = (
+                    ("matched persistence unavailable", "ไม่มีข้อมูล persistence ที่จับคู่กัน")
+                    if metric["skill"] is None
+                    else (
+                        f"skill vs persistence {metric['skill'] * 100:+.1f}% "
+                        f"(n={metric['n_matched']} matched)",
+                        f"skill เทียบ persistence {metric['skill'] * 100:+.1f}% "
+                        f"(จับคู่ {metric['n_matched']} รายการ)",
+                    )
+                )
+                accuracy_items.append(
+                    "<li>"
+                    + _bi(
+                        f"{version} +{horizon}h: MAE {mae} µg/m³, {skill_en}; n={metric['n']}",
+                        f"{version} +{horizon}h: MAE {mae} µg/m³, {skill_th}; n={metric['n']}",
+                    )
+                    + "</li>"
+                )
+        accuracy_body = ""
+        if accuracy["status"] == "degraded":
+            accuracy_body += _bi(
+                f"{accuracy['malformed']} score rows were unusable; "
+                "these results may be incomplete.",
+                f"มีข้อมูลคะแนน {accuracy['malformed']} รายการที่ใช้ไม่ได้ ผลลัพธ์นี้อาจไม่ครบถ้วน",
+            )
+            accuracy_body += "<br>"
+        if accuracy_items:
+            accuracy_body += f"<ul>{''.join(accuracy_items)}</ul>"
+        elif accuracy["status"] == "degraded":
+            accuracy_body += _bi(
+                "No valid served scores are available in this window.",
+                "ไม่มีคะแนนที่ใช้ได้ของพยากรณ์ที่ใช้งานในช่วงเวลานี้",
+            )
+        else:
+            accuracy_body += _bi(
+                f"No current-valid served scores are available in the last "
+                f"{accuracy['window_days']} days; actuals may be pending or "
+                "scores may need refresh.",
+                f"ยังไม่มีคะแนนพยากรณ์ที่ใช้งานซึ่งตรงกับค่าจริงล่าสุดใน "
+                f"{accuracy['window_days']} วันที่ผ่านมา ข้อมูลจริงอาจยังไม่มาหรือรอคำนวณใหม่",
+            )
+    serving_body += (
+        '<div class="served-accuracy"><strong>'
+        + _bi(
+            f"Served forecast accuracy · last {accuracy['window_days']} days",
+            f"ความแม่นยำของพยากรณ์ที่ใช้งาน · {accuracy['window_days']} วันล่าสุด",
+        )
+        + f"</strong>{accuracy_body}</div>"
+    )
     return (
         f'<section class="card"><h2>Models</h2>{body}<div class="muted small">'
         f"{serving_body}</div></section>"

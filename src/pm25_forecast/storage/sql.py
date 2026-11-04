@@ -150,7 +150,7 @@ SELECT_SCORES_BETWEEN = """
 SELECT s.station_id, s.issue_time, s.valid_time, s.abs_error FROM scores s
 JOIN observations o
   ON o.station_id = s.station_id AND o.ts = s.valid_time
- AND o.pm25 IS NOT NULL AND o.pm25 >= 0
+ AND o.pm25 IS NOT NULL AND o.pm25 >= 0 AND o.pm25 < 1e308
 WHERE s.model_version = %(model_version)s
   AND s.valid_time >= %(since)s AND s.valid_time <= %(now)s
 """
@@ -180,7 +180,8 @@ JOIN scores s
  AND s.valid_time = sf.valid_time AND s.model_version = sf.model_version
 JOIN observations o
   ON o.station_id = s.station_id AND o.ts = s.valid_time
- AND o.pm25 IS NOT NULL AND o.pm25 >= 0
+ AND o.pm25 IS NOT NULL AND o.pm25 >= 0 AND o.pm25 < 1e308
+ AND s.pm25_obs = o.pm25
 WHERE s.valid_time >= %(since)s AND s.valid_time <= %(now)s
 """
 
@@ -192,7 +193,8 @@ JOIN scores s
  AND s.valid_time = sf.valid_time AND s.model_version = %(model_version)s
 JOIN observations o
   ON o.station_id = s.station_id AND o.ts = s.valid_time
- AND o.pm25 IS NOT NULL AND o.pm25 >= 0
+ AND o.pm25 IS NOT NULL AND o.pm25 >= 0 AND o.pm25 < 1e308
+ AND s.pm25_obs = o.pm25
 WHERE s.valid_time >= %(since)s AND s.valid_time <= %(now)s
 """
 
