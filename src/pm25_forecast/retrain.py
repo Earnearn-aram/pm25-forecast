@@ -1,3 +1,4 @@
+pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 """Weekly retrain with a champion/challenger comparison (KAN-23).
 
 Current safety state (KAN-126): the CLI blocks normal and drift-triggered retraining before any
@@ -18,15 +19,15 @@ Intended post-gate run:
    shared feature code, per horizon the bundle serves (+6/+12/+24 h), on matched
    (station, issue_time, valid_time) pairs only: MAE and RMSE.
 5. ``decide`` (the single decision function) returns promote or keep.
-6. Production changes only when ``AUTO_PROMOTE=true``. Otherwise a promote decision is logged and
-   alerted as "recommend promote <version>" and the champion pointer is left alone.
-7. Every outcome is written to ``model_events`` (KAN-24): ``promote`` (actor ``auto``, in the same
-   transaction as the pointer change), ``recommend`` or ``keep`` (with the comparison metrics).
+6. Production changes only through owner-reviewed manual promotion. ``AUTO_PROMOTE=true`` is
+   blocked before data or registry access until an owner-approved automated policy is implemented.
+7. Every evaluation outcome is written to ``model_events`` (KAN-24): ``recommend`` or ``keep``
+   with comparison metrics. The separate manual registry command records an approved ``promote``.
 
 ``--if-drift`` (KAN-24) makes the run conditional: it exits 0 without training unless the latest
 drift run has an alert for the challenger (``CHALLENGER_MODEL_VERSION``) or the production
 champion, and no retrain decision was logged since that drift run was computed (cooldown). A
-triggered run is the normal run (still recommend-only unless AUTO_PROMOTE).
+triggered run is the normal run (recommend-only; promotion requires the reviewed manual command).
 
 The RUN_SUMMARY line holds the whole comparison table and the decision. DB down: the run is
 skipped, alerted, exit 1. Configuration error: exit 2. Insufficient training data is reported as
@@ -74,7 +75,6 @@ from pm25_forecast.storage.registry import (
     SELECT_CHAMPION,
     is_smoother_bundle,
     last_retrain_event_at,
-    promote_model,
     publish_model,
     read_champion,
     read_model,
@@ -89,6 +89,12 @@ BLOCKED_RETRAIN_STATUS = "blocked_locked_holdout_boundary_unverified"
 BLOCKED_RETRAIN_REASON = (
     "Retraining is unavailable: no trusted, versioned provenance currently verifies that the "
     "operational export excludes the locked holdout. No data or model registry was accessed."
+)
+BLOCKED_AUTO_PROMOTE_STATUS = "blocked_owner_review_required"
+BLOCKED_AUTO_PROMOTE_REASON = (
+    "Automatic model promotion is disabled until an owner-approved automated promotion policy is "
+    "implemented. Set AUTO_PROMOTE=false and use the reviewed manual promotion command. No data or "
+    "model registry was accessed."
 )
 HOLDOUT_DAYS = 7
 MIN_PAIRS = 100
@@ -353,7 +359,7 @@ def drift_gate(con: Any, settings: Settings, now: datetime) -> tuple[list[str], 
 
     Runs only if the latest drift run has an alert for the challenger OR the champion, and no
     retrain decision was logged within ``RETRAIN_MIN_GAP`` (7 days; cooldown). Persistent drift,
-    a "keep" result, a same-day re-run or AUTO_PROMOTE off therefore cannot retrain every day.
+    a "keep" result or a same-day re-run therefore cannot retrain every day.
     The last decision's ``at`` is the database clock and ``now`` the (UTC) job clock; both are
     timezone-aware UTC, so they differ only by clock skew, which is negligible against 7 days.
     """
@@ -482,6 +488,14 @@ def run(
             block_reason="locked_holdout_boundary_unverified",
         )
         return blocked
+    if settings.auto_promote:
+        blocked = RetrainResult(
+            run_id=default_run_id(now),
+            status=BLOCKED_AUTO_PROMOTE_STATUS,
+            warnings=[BLOCKED_AUTO_PROMOTE_REASON],
+        )
+        _summary(blocked, settings, if_drift=if_drift, block_reason="owner_review_required")
+        return blocked
     url = settings.database_url.get_secret_value()
     if if_drift:
         with open_db(connect, url) as con:
@@ -607,41 +621,23 @@ def run(
     note = f" Warning: {'; '.join(result.warnings)}." if result.warnings else ""
     event_metrics = {**result.decision.metrics, "comparison": result.comparison}
     if result.decision.action == "promote":
-        if settings.auto_promote:
-            with open_db(connect, url) as con:
-                # One transaction: the pointer change and its model_events row commit together.
-                promote_model(
-                    con,
-                    result.version,
-                    actor="auto",
-                    reason=result.decision.reason,
-                    metrics=event_metrics,
-                )
-                promoted_version, promoted_artifact, _ = read_champion(con)
-            if promoted_version != result.version or promoted_artifact != artifact:
-                raise ValueError("production champion readback does not match promoted model")
-            result.promoted = True
-            safe_alert(
-                alert, f"AUTO_PROMOTE: {result.version} is now the production champion.{note}"
+        result.recommended = True
+        with open_db(connect, url) as con:
+            record_event(
+                con,
+                "recommend",
+                result.version,
+                previous_version=champion_version,
+                actor="retrain",
+                metrics=event_metrics,
+                reason=result.decision.reason,
             )
-        else:
-            result.recommended = True
-            with open_db(connect, url) as con:
-                record_event(
-                    con,
-                    "recommend",
-                    result.version,
-                    previous_version=champion_version,
-                    actor="retrain",
-                    metrics=event_metrics,
-                    reason=result.decision.reason,
-                )
-            safe_alert(
-                alert,
-                f"recommend promote {result.version}: {result.decision.reason}. Not applied "
-                "(AUTO_PROMOTE is off). Run: python -m pm25_forecast.registry_cli promote "
-                f"{result.version} --confirm.{note}",
-            )
+        safe_alert(
+            alert,
+            f"recommend promote {result.version}: {result.decision.reason}. Not applied "
+            "(owner review required). Run: python -m pm25_forecast.registry_cli promote "
+            f"{result.version} --confirm.{note}",
+        )
     else:
         with open_db(connect, url) as con:
             record_event(
@@ -700,8 +696,13 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(result, RunSkipped):  # DB down: the guard has already alerted
         log_summary(logger, "retrain", {"status": "db_unreachable"})
         return code
-    if result.status == BLOCKED_RETRAIN_STATUS:
-        if safe_alert(alert, BLOCKED_RETRAIN_REASON):
+    if result.status in (BLOCKED_RETRAIN_STATUS, BLOCKED_AUTO_PROMOTE_STATUS):
+        reason = (
+            BLOCKED_RETRAIN_REASON
+            if result.status == BLOCKED_RETRAIN_STATUS
+            else BLOCKED_AUTO_PROMOTE_REASON
+        )
+        if safe_alert(alert, reason):
             _mark_workflow_alert_sent()
         return EXIT_FAILED
     if result.failures:
