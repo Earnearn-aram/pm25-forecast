@@ -32,7 +32,7 @@ The serving table continues to apply the existing precedence and NULL rules. Per
 An event is not eligible merely because its insert row contains a timestamp. The initial implementation should use a two-step, conservative publication protocol:
 
 1. In one short transaction, append the event and update the serving row under the per-key serialization lock. Commit. A database-generated transaction-start timestamp may be retained for diagnostics only.
-2. Only after the writer receives successful commit acknowledgement, obtain a trusted UTC time from the database in a new short operation. Round `available_at` **up** to the next UTC hour boundary (the forecasting issue grid) plus the configured maximum clock uncertainty. This deliberately delays eligibility; it cannot move an event earlier.
+2. Only after the writer receives successful commit acknowledgement, obtain a trusted UTC time from the database in a new short operation. Add the configured maximum clock uncertainty, then round `available_at` **up** to the next UTC hour boundary (the forecasting issue grid). This deliberately delays eligibility; it cannot move an event earlier.
 3. Persist the publication marker in a separate transaction keyed to the event ID. Readers ignore every event without a valid marker. If the process crashes after event commit and before marker commit, the event remains ineligible. A reconciler may mark it using recovery time plus the same uncertainty/rounding rule, never the earlier insert or receive time.
 4. If clocks are unsynchronized, the uncertainty bound is unknown, the marker is missing/duplicated, or event and serving state disagree, reject that event for training and report a readiness error. Do not infer a boundary from operator input.
 
