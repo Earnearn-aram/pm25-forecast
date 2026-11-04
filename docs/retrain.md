@@ -1,4 +1,3 @@
-pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 # Weekly retrain (KAN-23)
 
 ## Temporary safety block (KAN-126)
