@@ -1,9 +1,11 @@
 """KAN-23: weekly retrain with champion/challenger comparison. Offline, synthetic data only."""
 
 import json
+import logging
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 import psycopg
@@ -135,7 +137,12 @@ def settings(**kw) -> Settings:
 
 def do_run(reg, alerts, *, now=NOW, export=export_fake, **kw):
     s = kw.pop("settings", None) or settings()
-    return retrain.run(s, connect=reg, clock=lambda: now, export=export, alert=alerts.append, **kw)
+    # Existing downstream decision tests simulate a future verified-boundary caller. The
+    # production entrypoint itself fails closed; dedicated tests below assert that behavior.
+    with patch.object(retrain, "_trusted_holdout_boundary_verified", return_value=True):
+        return retrain.run(
+            s, connect=reg, clock=lambda: now, export=export, alert=alerts.append, **kw
+        )
 
 
 # --- decide: boundaries ------------------------------------------------------------------------
@@ -454,6 +461,104 @@ def test_config_errors():
         retrain.run(settings(), connect=reg, clock=lambda: NOW, holdout_days=0)
 
 
+@pytest.mark.parametrize("if_drift", [False, True])
+@pytest.mark.parametrize("auto_promote", [False, True])
+def test_unverified_holdout_boundary_blocks_before_any_data_or_registry_access(
+    if_drift, auto_promote, monkeypatch, caplog
+):
+    caplog.set_level(logging.INFO, logger="pm25_forecast.retrain")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("retraining must block before this operation")
+
+    for name in (
+        "build_samples",
+        "drift_gate",
+        "publish_model",
+        "compare",
+        "read_champion",
+        "read_model",
+        "promote_model",
+        "record_event",
+        "_registered",
+    ):
+        monkeypatch.setattr(retrain, name, forbidden)
+    alerts = []
+    result = retrain.run(
+        settings(auto_promote=auto_promote),
+        connect=forbidden,
+        export=forbidden,
+        trainer=forbidden,
+        clock=lambda: NOW,
+        alert=alerts.append,
+        if_drift=if_drift,
+    )
+    assert result.status == retrain.BLOCKED_RETRAIN_STATUS
+    assert result.warnings == [retrain.BLOCKED_RETRAIN_REASON]
+    assert not result.version and not result.promoted and not result.recommended
+    assert f'"status":"{retrain.BLOCKED_RETRAIN_STATUS}"' in caplog.text.replace(" ", "")
+    assert alerts == []  # run returns a result; the CLI sends exactly one operational alert
+
+
+@pytest.mark.parametrize("argv", [[], ["--if-drift"]])
+def test_main_alerts_once_and_exits_nonzero_when_boundary_is_unverified(
+    argv, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(retrain, "get_settings", lambda: settings(auto_promote=True))
+    alerts = []
+    monkeypatch.setattr(retrain, "make_alert", lambda *_args, **_kwargs: alerts.append)
+    output_file = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+
+    assert retrain.main(argv) == retrain.EXIT_FAILED
+    assert alerts == [retrain.BLOCKED_RETRAIN_REASON]
+    assert output_file.read_text(encoding="utf-8") == "failure_alert_sent=true\n"
+
+
+def test_workflow_alert_marker_is_scoped_to_runner_output(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path / "runner"))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "outside-output"))
+    retrain._mark_workflow_alert_sent()
+    assert not (tmp_path / "outside-output").exists()
+
+    monkeypatch.delenv("GITHUB_OUTPUT")
+    retrain._mark_workflow_alert_sent()  # Missing Actions output is a harmless no-op.
+
+
+def test_failed_block_alert_leaves_generic_workflow_fallback_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(retrain, "get_settings", lambda: settings())
+
+    def fail_alert(*_args, **_kwargs):
+        def fail(_message):
+            raise RuntimeError("webhook unavailable")
+
+        return fail
+
+    monkeypatch.setattr(retrain, "make_alert", fail_alert)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    output_file = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    assert retrain.main([]) == retrain.EXIT_FAILED
+    assert not output_file.exists()
+
+
+def test_retrain_workflows_use_specific_alert_before_generic_fallback():
+    root = Path(__file__).parents[1]
+    workflow_paths = (
+        root / ".github/workflows/retrain.yml",
+        root / "docs/retrain-workflow.yml.txt",
+        root / "docs/drift-workflow.yml.txt",
+    )
+    for path in workflow_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "steps.retrain.outputs.failure_alert_sent != 'true'" in text
+        assert "(failure() || cancelled())" in text
+
+
 # --- AUTO_PROMOTE setting ---------------------------------------------------------------------
 
 
@@ -478,11 +583,12 @@ def test_db_down_skips_alerts_and_exits_nonzero_without_leaking_the_url(caplog):
         raise psycopg.OperationalError(f"connection refused {DB_URL}")
 
     alerts: list[str] = []
-    result, code = run_entrypoint(
-        lambda: retrain.run(settings(), connect=refuse, clock=lambda: NOW),
-        alerts.append,
-        connection_errors=db.CONNECTION_ERRORS,
-    )
+    with patch.object(retrain, "_trusted_holdout_boundary_verified", return_value=True):
+        result, code = run_entrypoint(
+            lambda: retrain.run(settings(), connect=refuse, clock=lambda: NOW),
+            alerts.append,
+            connection_errors=db.CONNECTION_ERRORS,
+        )
     assert isinstance(result, RunSkipped)
     assert code == 1
     assert len(alerts) == 1 and "OperationalError" in alerts[0]

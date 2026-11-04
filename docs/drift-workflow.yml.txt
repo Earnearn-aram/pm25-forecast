@@ -93,14 +93,18 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --no-dev
       - name: Retrain if drift
+        id: retrain
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           CHALLENGER_MODEL_VERSION: ${{ vars.CHALLENGER_MODEL_VERSION }} # unset = no challenger
           AUTO_PROMOTE: ${{ vars.AUTO_PROMOTE }} # unset = recommend only; "true" = promote
         run: uv run --no-dev python -m pm25_forecast.retrain --if-drift
+      # The retrain CLI sends a reason-specific alert and marks it in GITHUB_OUTPUT. This is only
+      # the fallback when setup/import failed before that alert, or cancellation happens before
+      # the CLI writes its marker.
       - name: Alert on failure
-        if: failure() || cancelled()
+        if: ${{ (failure() || cancelled()) && steps.retrain.outputs.failure_alert_sent != 'true' }}
         timeout-minutes: 2
         env:
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
