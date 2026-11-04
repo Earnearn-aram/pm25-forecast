@@ -1,3 +1,4 @@
+pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 """KAN-23: weekly retrain with champion/challenger comparison. Offline, synthetic data only."""
 
 import json
@@ -19,7 +20,7 @@ from pm25_forecast.storage import db
 from pm25_forecast.storage.guard import RunSkipped, run_entrypoint
 from pm25_forecast.storage.registry import (
     artifact_sha256,
-    read_champion,
+    promote_model,
     read_model,
     write_model,
 )
@@ -333,19 +334,58 @@ def test_training_window_ends_before_the_holdout_window():
     assert manifest["holdout_start"] == HOLDOUT_START.isoformat()
 
 
-def test_auto_promote_true_moves_the_champion_pointer():
+def test_auto_promote_true_is_blocked_before_data_or_registry_access():
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("automatic promotion must block before data or registry access")
+
+    alerts = []
+    with patch.object(retrain, "_trusted_holdout_boundary_verified", return_value=True):
+        result = retrain.run(
+            settings(auto_promote=True),
+            connect=forbidden,
+            export=forbidden,
+            trainer=forbidden,
+            clock=lambda: NOW,
+            alert=alerts.append,
+        )
+
+    assert result.status == retrain.BLOCKED_AUTO_PROMOTE_STATUS
+    assert result.warnings == [retrain.BLOCKED_AUTO_PROMOTE_REASON]
+    assert not result.version and not result.promoted and not result.recommended
+    assert alerts == []  # run returns a result; the CLI sends the reason-specific alert
+
+
+def test_manual_promotion_uses_the_exact_evaluated_candidate_artifact(monkeypatch):
     reg, alerts = Registry(), []
-    result = do_run(reg, alerts, settings=settings(auto_promote=True))
-    assert result.promoted and not result.recommended
+    evaluated = {}
+    real_publish = retrain.publish_model
+
+    def capture_publish(url, version, artifact, manifest, **kwargs):
+        evaluated[version] = artifact
+        return real_publish(url, version, artifact, manifest, **kwargs)
+
+    monkeypatch.setattr(retrain, "publish_model", capture_publish)
+    result = do_run(reg, alerts)
+
+    assert result.recommended and not result.promoted
+    assert reg.champion is None
+    stored_artifact, _manifest = read_model(reg, result.version)
+    assert stored_artifact == evaluated[result.version]
+
+    # The reviewed manual command promotes that exact immutable registry version.
+    promote_model(reg, result.version, actor="cli", reason="owner reviewed candidate")
     assert reg.champion == result.version
-    assert read_champion(reg)[0] == result.version
-    assert not any("recommend promote" in a for a in alerts)
+    promote_events = [event for event in reg.events if event["action"] == "promote"]
+    assert len(promote_events) == 1
+    assert promote_events[0]["model_version"] == result.version
+    assert promote_events[0]["actor"] == "cli"
 
 
 def test_same_day_rerun_gets_suffix_and_is_compared_with_the_champion():
     reg = Registry()
-    first = do_run(reg, [], settings=settings(auto_promote=True))
-    second = do_run(reg, [], now=NOW + timedelta(hours=2))  # auto off
+    first = do_run(reg, [])
+    reg.champion = first.version  # owner-approved manual promotion for the fixture
+    second = do_run(reg, [], now=NOW + timedelta(hours=2))
 
     assert second.version == f"{first.version}-2"
     assert reg.champion == first.version  # auto off: pointer unchanged whatever the decision
@@ -382,7 +422,7 @@ def test_unloadable_champion_means_keep_and_a_failed_run():
     write_model(reg, "bad-champion", artifact, bad)
     reg.champion = "bad-champion"
 
-    result = do_run(reg, alerts, now=NOW + timedelta(hours=1), settings=settings(auto_promote=True))
+    result = do_run(reg, alerts, now=NOW + timedelta(hours=1))
     assert result.decision.action == "keep"
     assert result.status == "failed" and result.failures
     assert reg.champion == "bad-champion"  # never promoted over a champion we could not score
@@ -394,7 +434,7 @@ def test_champion_that_cannot_be_scored_means_keep_never_promote():
     register_variant(reg, first.version, "partial-champion", horizons={"6"})  # no +24 h booster
     reg.champion = "partial-champion"
 
-    result = do_run(reg, alerts, now=NOW + timedelta(hours=1), settings=settings(auto_promote=True))
+    result = do_run(reg, alerts, now=NOW + timedelta(hours=1))
     assert result.decision.action == "keep"
     assert "could not be scored" in result.decision.reason
     assert result.status == "failed"
@@ -435,7 +475,7 @@ def test_insufficient_history_skips_without_registering_or_promoting():
     def tiny(path, _url):
         write_export(path, hours=30)
 
-    result = do_run(reg, alerts, export=tiny, settings=settings(auto_promote=True))
+    result = do_run(reg, alerts, export=tiny)
     assert result.status == "skipped" and not result.failures
     assert result.warnings and "training data not ready" in result.warnings[0]
     assert (NOW.replace(minute=0) - timedelta(days=7)).isoformat() in result.warnings[0]
@@ -478,7 +518,6 @@ def test_unverified_holdout_boundary_blocks_before_any_data_or_registry_access(
         "compare",
         "read_champion",
         "read_model",
-        "promote_model",
         "record_event",
         "_registered",
     ):
@@ -514,6 +553,21 @@ def test_main_alerts_once_and_exits_nonzero_when_boundary_is_unverified(
 
     assert retrain.main(argv) == retrain.EXIT_FAILED
     assert alerts == [retrain.BLOCKED_RETRAIN_REASON]
+    assert output_file.read_text(encoding="utf-8") == "failure_alert_sent=true\n"
+
+
+def test_main_alerts_once_when_auto_promotion_requires_owner_review(monkeypatch, tmp_path):
+    monkeypatch.setattr(retrain, "get_settings", lambda: settings(auto_promote=True))
+    monkeypatch.setattr(retrain, "_trusted_holdout_boundary_verified", lambda: True)
+    alerts = []
+    monkeypatch.setattr(retrain, "make_alert", lambda *_args, **_kwargs: alerts.append)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    output_file = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+
+    assert retrain.main([]) == retrain.EXIT_FAILED
+    assert alerts == [retrain.BLOCKED_AUTO_PROMOTE_REASON]
     assert output_file.read_text(encoding="utf-8") == "failure_alert_sent=true\n"
 
 
