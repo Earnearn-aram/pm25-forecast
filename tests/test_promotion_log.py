@@ -303,17 +303,13 @@ def test_prune_keeps_the_rollback_target_and_never_deletes_it():
 # --- retrain: events and --if-drift -----------------------------------------------------------
 
 
-def test_auto_promote_logs_a_promote_event_with_the_comparison():
+def test_auto_promote_is_blocked_without_writing_a_promotion_event():
     reg = Registry()
     result = do_run(reg, [], settings=settings(auto_promote=True))
-    (event,) = reg.events
-    assert (event["action"], event["actor"], event["model_version"]) == (
-        "promote",
-        "auto",
-        result.version,
-    )
-    assert event["previous_version"] is None
-    assert json.loads(event["metrics"])["comparison"]["+24h"]["n_pairs"] >= 100
+    assert result.status == retrain.BLOCKED_AUTO_PROMOTE_STATUS
+    assert result.version == ""
+    assert reg.events == []
+    assert reg.champion is None
 
 
 def test_recommend_only_run_logs_a_recommend_event_and_leaves_the_pointer_alone():

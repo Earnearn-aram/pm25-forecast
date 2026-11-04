@@ -10,6 +10,10 @@ generic duplicate; if notification fails, the generic alert is the fallback. `AU
 not bypass this block. Prediction, Score, dashboard reads, and serving the existing champion are
 unaffected.
 
+After the holdout-boundary gate is lifted, `AUTO_PROMOTE=true` is still blocked before data or
+registry access until an owner-approved automated-promotion policy is implemented. Evaluation remains
+recommend-only; a reviewed operator must use the manual registry command to promote.
+
 This is a temporary reduction in retraining functionality. The system has no trusted, versioned
 provenance source that binds an operational export to the experiment holdout boundary. Do not
 provide an operator-entered date or environment override as a substitute. Retraining can resume
@@ -55,8 +59,13 @@ candidate is also kept out if it is worse than the champion by more than 2% rela
 other horizon both serve (+6/+12 h). A champion that cannot be loaded or scored is never replaced
 (the run fails and alerts).
 
-Production changes only if the repo variable `AUTO_PROMOTE` is `true` (default: unset = off).
-Otherwise a promote decision only alerts `recommend promote <version>`.
+Retraining is recommend-only. `AUTO_PROMOTE=true` returns
+`blocked_owner_review_required` before export or registry access. Manual promotion is also blocked
+while KAN-117's open policy decisions remain unresolved. The owner must first approve the
+per-station sample and coverage thresholds, acceptable station-level degradation, evaluation
+period, and overlap handling. After those decisions are approved and implemented, the owner can
+review matched coverage, metrics, provenance and artifact identity, then explicitly authorize an
+operator to use the manual registry command below.
 
 ## Promote manually
 
@@ -64,6 +73,9 @@ Otherwise a promote decision only alerts `recommend promote <version>`.
 python -m pm25_forecast.registry_cli check retrain-20261102
 python -m pm25_forecast.registry_cli promote retrain-20261102 --confirm
 ```
+
+Run `check` only after the policy preconditions above are met. Verify the registered model version
+and artifact identity against the reviewed evaluation record before authorizing `promote`.
 
 `DATABASE_URL` comes from the environment or `.env`. `champion` shows the current pointer.
 
@@ -76,9 +88,9 @@ Every champion change and every retrain decision is one row in `model_events` (m
 comparison numbers) and `reason`. A `promote` or `rollback` row is written in the same transaction
 as the champion pointer change, so the log and the pointer cannot disagree. The pointer row is
 locked (`SELECT ... FOR UPDATE`) before the previous champion is read, so two concurrent promotes or
-rollbacks are serialised. `retrain` writes a
-`promote` row (actor `auto`) when `AUTO_PROMOTE=true`, otherwise `recommend` (and alerts), and a
-`keep` row when the candidate is not good enough.
+rollbacks are serialised. Retrain writes `recommend` (and alerts) or `keep`; it cannot write an
+automatic `promote`. The manual registry command writes a `promote` row (actor `cli`) atomically
+with the pointer.
 
 ```sql
 SELECT at, action, model_version, previous_version, actor, reason
@@ -97,7 +109,7 @@ changes nothing, if there is no champion, no previous champion is recorded (the 
 promote), that model cannot be served (same check as `promote`), or the latest logged change is not
 the live champion (the pointer was moved by hand outside the log; use `promote <version>`).
 A second `rollback` goes back to the version you just left, so use `promote <version>` to pick an
-older one. Also unset `AUTO_PROMOTE` if auto-promotion caused the problem.
+older one. Automatic promotion is currently blocked.
 
 ## Drift-triggered retrain
 
@@ -110,8 +122,8 @@ drift run (`drift.latest_drift_alert`, at most 36 h old) has an alert for
 Cooldown: after the safety block is lifted, it also skips if a retrain decision (any `model_events` row by actor `retrain` or `auto`)
 was logged within the last 7 days (`RETRAIN_MIN_GAP`), so persistent drift, a "keep" result or a
 same-day re-run cannot retrain every day. When it does run it is
-the normal retrain: the candidate is registered and, unless
-`AUTO_PROMOTE=true`, only recommended. The `drift-retrain` job in `drift-workflow.yml.txt` runs it
+the normal retrain: the candidate is registered and only recommended. The `drift-retrain` job in
+`drift-workflow.yml.txt` runs it
 after the daily drift check and shares the weekly retrain's concurrency group.
 
 ## Prune old models
