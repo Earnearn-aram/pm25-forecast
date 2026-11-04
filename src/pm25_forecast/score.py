@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 EXIT_FAILED, EXIT_CONFIG = 1, 2
 RESCORE_LOOKBACK = timedelta(hours=72)
 METRICS_WINDOW = timedelta(days=7)
+SERVED_REFERENCE = "__served_persistence_reference__"
 REFERENCE_MODEL_VERSION = PERSISTENCE_MODEL_VERSION
 
 Key = tuple[str, datetime, datetime]  # (station_id, issue_time, valid_time)
@@ -64,11 +65,19 @@ class MaturedRow(BaseModel):
     stored_obs: float | None
 
 
+class ServedMaturedRow(MaturedRow):
+    model_version: str
+
+
 class ScoreRow(BaseModel):
     station_id: str
     issue_time: AwareDatetime
     valid_time: AwareDatetime
     abs_error: float
+
+
+class ServedScoreRow(ScoreRow):
+    model_version: str
 
 
 @dataclass(frozen=True)
@@ -99,6 +108,10 @@ class ScoreResult:
     waiting: dict[str, int] = field(default_factory=dict)
     written: dict[str, int] = field(default_factory=dict)
     metrics: dict[str, dict[int, Metric]] = field(default_factory=dict)
+    served_metrics: dict[str, dict[int, Metric]] = field(default_factory=dict)
+    served_matured: int = 0
+    served_waiting: int = 0
+    served_status: str = "unavailable"
     failures: list[str] = field(default_factory=list)
 
 
@@ -234,6 +247,82 @@ def run(
             scores[model_version] = _validated(
                 ScoreRow, raw, ("station_id", "issue_time", "valid_time", "abs_error")
             )
+        # Keep an absent/unreadable KAN-119 ledger from aborting legacy scoring. PostgreSQL
+        # marks a transaction failed after a missing-table error, so isolate the optional path.
+        con.execute("SAVEPOINT served_ledger_score", {})
+        try:
+            served_raw = con.execute(
+                sql.SELECT_MATURED_SERVED_FORECASTS,
+                {"since": rescore_from, "now": now},
+            ).fetchall()
+            served_rows = _validated(
+                ServedMaturedRow,
+                served_raw,
+                (
+                    "station_id",
+                    "issue_time",
+                    "valid_time",
+                    "model_version",
+                    "pm25_pred",
+                    "pm25_obs",
+                    "stored_obs",
+                ),
+            )
+            result.served_matured = len(served_rows)
+            served_scores: dict[str, list[ScoreRow]] = {}
+            by_served_model: dict[str, list[ServedMaturedRow]] = {}
+            for row in served_rows:
+                by_served_model.setdefault(row.model_version, []).append(row)
+            for model_version, rows_for_model in by_served_model.items():
+                write_rows, waiting = score_rows(rows_for_model, model_version)
+                result.served_waiting += waiting
+                sql.write_rows(con, sql.UPSERT_SCORE, write_rows)
+            for model_version, params in (
+                ("served", {"since": now - METRICS_WINDOW, "now": now}),
+                (
+                    "reference",
+                    {
+                        "model_version": REFERENCE_MODEL_VERSION,
+                        "since": now - METRICS_WINDOW,
+                        "now": now,
+                    },
+                ),
+            ):
+                statement = (
+                    sql.SELECT_SERVED_SCORES_BETWEEN
+                    if model_version == "served"
+                    else sql.SELECT_SERVED_PERSISTENCE_SCORES_BETWEEN
+                )
+                raw = con.execute(statement, params).fetchall()
+                if model_version == "served":
+                    served_score_rows = _validated(
+                        ServedScoreRow,
+                        raw,
+                        ("model_version", "station_id", "issue_time", "valid_time", "abs_error"),
+                    )
+                    for row in served_score_rows:
+                        served_scores.setdefault(row.model_version, []).append(row)
+                else:
+                    # This comparator covers all served keys, even where persistence was not
+                    # selected; keep it under a private key so it cannot masquerade as served.
+                    served_scores[SERVED_REFERENCE] = _validated(
+                        ScoreRow,
+                        raw,
+                        ("station_id", "issue_time", "valid_time", "abs_error"),
+                    )
+            served_metrics = rolling_metrics(served_scores, reference=SERVED_REFERENCE)
+            served_metrics.pop(SERVED_REFERENCE, None)
+            result.served_metrics = served_metrics
+            con.execute("RELEASE SAVEPOINT served_ledger_score", {})
+            result.served_status = "ok"
+        except Exception as exc:
+            con.execute("ROLLBACK TO SAVEPOINT served_ledger_score", {})
+            con.execute("RELEASE SAVEPOINT served_ledger_score", {})
+            result.served_matured = 0
+            result.served_waiting = 0
+            result.served_metrics = {}
+            logger.warning("served-ledger scoring unavailable (%s)", type(exc).__name__)
+            result.served_status = f"unavailable: {type(exc).__name__}"
     result.metrics = rolling_metrics(scores)
 
     log_summary(
@@ -256,6 +345,20 @@ def run(
                     for h in HORIZONS_H
                 }
                 for m in models
+            },
+            "served_matured": result.served_matured,
+            "served_waiting_for_actuals": result.served_waiting,
+            "served_status": result.served_status,
+            "served_rescore_window_hours": int(RESCORE_LOOKBACK.total_seconds() / 3600),
+            "served_metrics_window_days": METRICS_WINDOW.days,
+            "served_metrics": {
+                m: {
+                    f"+{h}h": result.served_metrics[m][h].as_dict()
+                    if h in result.served_metrics.get(m, {})
+                    else {"n": 0}
+                    for h in HORIZONS_H
+                }
+                for m in result.served_metrics
             },
             "failures": result.failures,
         },
