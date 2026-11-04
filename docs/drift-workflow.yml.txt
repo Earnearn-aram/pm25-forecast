@@ -1,4 +1,3 @@
-pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 # DRAFT for KAN-22. The agent token has no `workflow` scope, so this is committed as text.
 # Owner: copy to .github/workflows/drift.yml (drop the .txt), then:
 #   1. Same secrets/variables as Predict: DATABASE_URL, ALERT_WEBHOOK_URL (secrets),
