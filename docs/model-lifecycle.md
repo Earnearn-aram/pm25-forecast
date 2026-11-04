@@ -1,3 +1,4 @@
+pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 # Model lifecycle and promotion policy (KAN-117)
 
 Status: proposed operational target pending owner approval; implementation gaps are identified below. This policy does not
@@ -44,10 +45,9 @@ rejects a candidate worse than the incumbent by more than 2% at another mutually
 These operational checks are minimum evidence, not proof of statistical significance. If a
 champion cannot be loaded or scored, do not replace it based on incomplete evidence.
 
-The proposed policy is owner-reviewed manual promotion. The current implementation permits
-`AUTO_PROMOTE=true`; it does not enforce that policy. Keep `AUTO_PROMOTE` unset/false pending an
-owner decision; no model becomes champion
-solely because it was registered or ran in shadow. The reviewer checks matched coverage,
+The operational path is owner-reviewed manual promotion. KAN-120 blocks `AUTO_PROMOTE=true`
+before export or registry access; no model becomes champion solely because it was registered or
+ran in shadow. The reviewer checks matched coverage,
 per-station behavior, data readiness, leakage safety, artifact identity and evaluation limitations;
 if evidence is insufficient, retain the current champion or baseline. Record the decision and
 reason. KAN-120 implements the unified enforcement and audit; existing registry events already
