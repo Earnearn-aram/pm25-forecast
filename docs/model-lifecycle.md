@@ -1,4 +1,3 @@
-pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 # Model lifecycle and promotion policy (KAN-117)
 
 Status: proposed operational target pending owner approval; implementation gaps are identified below. This policy does not
