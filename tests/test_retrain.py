@@ -1,4 +1,3 @@
-pyenv: cannot rehash: /Users/earn/.pyenv/shims isn't writable
 """KAN-23: weekly retrain with champion/challenger comparison. Offline, synthetic data only."""
 
 import json
