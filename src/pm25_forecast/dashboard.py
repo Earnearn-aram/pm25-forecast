@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 30340)
-Total output lines: 2384
-
 """Public dashboard builder (KAN-25). Run with ``python -m pm25_forecast.dashboard --out site/``.
 
 Reads the database (read-only SELECTs, one read-only connection for the whole build) and writes
@@ -1445,7 +1442,37 @@ def _section_chart(data: dict[str, Any]) -> str:
         title = CHART_TITLE
     else:
         sts = chart["stations"]
-        title = f"{CHART_TI…340 tokens truncated…rmat(data["generated_at"])
+        title = f"{CHART_TITLE} \u00b7 {sts[0]['label']}"
+        generated_at = datetime.fromisoformat(data["generated_at"])
+        pills = "".join(_pill(s, i == 0, generated_at) for i, s in enumerate(sts))
+        inner = "".join(_chart_block(s, chart, i == 0, generated_at) for i, s in enumerate(sts))
+    return (
+        '<figure class="card wide" style="margin:0"><div class="cardhead">'
+        f'<h2 id="chart-title">{e(title)}</h2>'
+        f'<div class="pills" role="group" aria-label="Station">{pills}</div></div>'
+        f"{legend}{inner}"
+        '<p class="chart-note muted small">Accuracy of past forecasts: see Typical error and '
+        "Skill by horizon above.</p>"
+        '<figcaption class="muted small">Times in Bangkok time (UTC+7). Forecast lines start at '
+        "the latest measured value and join only the horizons available."
+        "</figcaption></figure>"
+    )
+
+
+def _section_map(data: dict[str, Any]) -> str:
+    stations = (data.get("chart") or {}).get("stations", [])
+    pins = []
+    for st in stations:
+        coords = STATION_MAP.get(st["id"])
+        if not coords:
+            continue
+        lat, lon = coords
+        value = st.get("latest_value")
+        if value is None:
+            continue
+        label = _station_label(st["id"])
+        latest_at = datetime.fromisoformat(st["latest_at"])
+        generated_at = datetime.fromisoformat(data["generated_at"])
         age = int((generated_at - latest_at).total_seconds() // 60)
         stale = age > REPORTING_H * 60
         pins.append(
