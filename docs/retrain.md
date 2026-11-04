@@ -1,13 +1,29 @@
 # Weekly retrain (KAN-23)
 
-If leakage-safe training data is insufficient, the run is skipped without registering or
+## Temporary safety block (KAN-126)
+
+Scheduled/manual retraining and `--if-drift` currently stop before opening a database connection,
+exporting observations, building samples, reading the model registry, training, comparing, or
+promoting. The result status is `blocked_locked_holdout_boundary_unverified`; the CLI exits 1 and
+attempts one reason-specific alert. After that alert is logged/sent, the workflow suppresses its
+generic duplicate; if notification fails, the generic alert is the fallback. `AUTO_PROMOTE` does
+not bypass this block. Prediction, Score, dashboard reads, and serving the existing champion are
+unaffected.
+
+This is a temporary reduction in retraining functionality. The system has no trusted, versioned
+provenance source that binds an operational export to the experiment holdout boundary. Do not
+provide an operator-entered date or environment override as a substitute. Retraining can resume
+only after a separately reviewed implementation establishes an authoritative, atomic boundary and
+provenance source, with tests for revisions and concurrent boundary transitions.
+
+After the KAN-126 safety block is removed, if leakage-safe training data is insufficient, the run is skipped without registering or
 promoting a candidate. The summary reports the cutoff and per-horizon counts, and one readiness
 alert is sent. Other training errors remain failures. The availability checks are unchanged.
 
-`python -m pm25_forecast.retrain` runs every Monday 03:17 UTC (see `retrain-workflow.yml.txt`) and
-on demand.
+The `retrain` workflow is scheduled every Monday 03:17 UTC (see `retrain-workflow.yml.txt`) and
+also supports on-demand runs. Both currently stop at the KAN-126 safety block described above.
 
-## What runs
+## Intended workflow after the safety block is lifted
 
 1. Export the latest hosted history to DuckDB.
 2. Train a candidate, version `retrain-YYYYMMDD` (UTC date; `-2`, `-3` on a same-day re-run). The
@@ -85,11 +101,13 @@ older one. Also unset `AUTO_PROMOTE` if auto-promotion caused the problem.
 
 ## Drift-triggered retrain
 
-`python -m pm25_forecast.retrain --if-drift` exits 0 without training unless the latest drift run
-(`drift.latest_drift_alert`, at most 36 h old) has an alert for `CHALLENGER_MODEL_VERSION` OR for
-the production champion (both are checked). With neither it does nothing.
+`python -m pm25_forecast.retrain --if-drift` currently receives the same KAN-126 safety block as
+normal retraining and does not query drift or connect to the database. After trusted boundary
+provenance is implemented and reviewed, it is intended to skip without training unless the latest
+drift run (`drift.latest_drift_alert`, at most 36 h old) has an alert for
+`CHALLENGER_MODEL_VERSION` or the production champion (both are checked).
 
-Cooldown: it also skips if a retrain decision (any `model_events` row by actor `retrain` or `auto`)
+Cooldown: after the safety block is lifted, it also skips if a retrain decision (any `model_events` row by actor `retrain` or `auto`)
 was logged within the last 7 days (`RETRAIN_MIN_GAP`), so persistent drift, a "keep" result or a
 same-day re-run cannot retrain every day. When it does run it is
 the normal retrain: the candidate is registered and, unless
@@ -121,6 +139,9 @@ reference use them as the `cams_pm25` input.
 
 ## Exit codes
 
-0 ok or skipped because training data is not ready. 1 failed (DB down, unscorable champion,
-other training errors, crash); the failure is alerted.
+0 ok or skipped because training data is not ready. 1 retraining blocked because the holdout
+boundary is unverified, or failed (DB down, unscorable champion, other training errors, crash);
+the condition is alerted. The retrain CLI's specific alert suppresses the workflow's generic
+failure alert when it completes; the generic alert remains the fallback if notification fails
+before the CLI can mark its output. External webhook delivery cannot be guaranteed.
 2 configuration error (no `DATABASE_URL`; `AUTO_PROMOTE` other than true, false or blank).

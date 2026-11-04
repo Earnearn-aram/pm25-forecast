@@ -1,6 +1,11 @@
 """Weekly retrain with a champion/challenger comparison (KAN-23).
 
-Run with ``python -m pm25_forecast.retrain``. One run:
+Current safety state (KAN-126): the CLI blocks normal and drift-triggered retraining before any
+database or export access, reports ``blocked_locked_holdout_boundary_unverified``, alerts and exits
+1. See ``docs/retrain.md``. The workflow below describes the intended lifecycle after a trusted,
+versioned holdout-boundary source is implemented and reviewed.
+
+Intended post-gate run:
 
 1. Export the latest hosted history to DuckDB (``export_history``).
 2. Train a candidate with ``train_model.train`` on a copy of the export cut at ``holdout_start``
@@ -33,6 +38,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -79,6 +85,11 @@ from pm25_forecast.train_model import InsufficientTrainingDataError, build_sampl
 logger = logging.getLogger(__name__)
 
 EXIT_FAILED, EXIT_CONFIG = 1, 2
+BLOCKED_RETRAIN_STATUS = "blocked_locked_holdout_boundary_unverified"
+BLOCKED_RETRAIN_REASON = (
+    "Retraining is unavailable: no trusted, versioned provenance currently verifies that the "
+    "operational export excludes the locked holdout. No data or model registry was accessed."
+)
 HOLDOUT_DAYS = 7
 MIN_PAIRS = 100
 RETRAIN_MIN_GAP = timedelta(days=7)  # --if-drift: at most one retrain decision per this period
@@ -420,6 +431,26 @@ def _summary(result: RetrainResult, settings: Settings, **extra: Any) -> None:
     )
 
 
+def _trusted_holdout_boundary_verified() -> bool:
+    """Fail closed until a trusted, versioned boundary source is implemented."""
+    return False
+
+
+def _mark_workflow_alert_sent() -> None:
+    """Tell the retrain workflow not to send its generic duplicate failure notification."""
+    output = os.environ.get("GITHUB_OUTPUT")
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if os.environ.get("GITHUB_ACTIONS") != "true" or not output or not runner_temp:
+        return
+    try:
+        output_path = Path(output).resolve()
+        output_path.relative_to(Path(runner_temp).resolve())
+        with output_path.open("a", encoding="utf-8") as stream:
+            stream.write("failure_alert_sent=true\n")
+    except (OSError, ValueError):
+        logger.warning("could not mark the GitHub Actions alert as sent")
+
+
 def run(
     settings: Settings,
     *,
@@ -438,6 +469,19 @@ def run(
         raise ConfigError("DATABASE_URL is not set")
     if holdout_days < 1:
         raise ConfigError("--holdout-days must be at least 1")
+    if not _trusted_holdout_boundary_verified():
+        blocked = RetrainResult(
+            run_id=default_run_id(now),
+            status=BLOCKED_RETRAIN_STATUS,
+            warnings=[BLOCKED_RETRAIN_REASON],
+        )
+        _summary(
+            blocked,
+            settings,
+            if_drift=if_drift,
+            block_reason="locked_holdout_boundary_unverified",
+        )
+        return blocked
     url = settings.database_url.get_secret_value()
     if if_drift:
         with open_db(connect, url) as con:
@@ -656,6 +700,10 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(result, RunSkipped):  # DB down: the guard has already alerted
         log_summary(logger, "retrain", {"status": "db_unreachable"})
         return code
+    if result.status == BLOCKED_RETRAIN_STATUS:
+        if safe_alert(alert, BLOCKED_RETRAIN_REASON):
+            _mark_workflow_alert_sent()
+        return EXIT_FAILED
     if result.failures:
         safe_alert(alert, "run completed with failures: " + "; ".join(result.failures))
         return EXIT_FAILED
