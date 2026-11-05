@@ -103,7 +103,15 @@ def test_calendar_bangkok_time_cyclic_weekend_holiday():
 
 def test_holidays_2027_from_bot_notification_37_2569():
     assert frozenset({2026, 2027}) == v2.HOLIDAY_YEARS
-    assert sum(d.year == 2027 for d in v2.THAI_HOLIDAYS) == 18
+    # Full nationwide list, BoT Notification 37/2569 items 1-18
+    bot_2027 = {
+        date(2027, m, d)
+        for m, d in (
+            (1, 1), (2, 22), (4, 6), (4, 13), (4, 14), (4, 15), (5, 3), (5, 4), (5, 20),
+            (6, 3), (7, 19), (7, 28), (8, 12), (10, 13), (10, 25), (12, 6), (12, 10), (12, 31),
+        )
+    }  # fmt: skip
+    assert {d for d in v2.THAI_HOLIDAYS if d.year == 2027} == bot_2027
     for h in (
         datetime(2027, 1, 1, 5, tzinfo=UTC),
         datetime(2027, 2, 22, 5, tzinfo=UTC),
