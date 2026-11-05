@@ -1,6 +1,6 @@
 import math
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -98,7 +98,42 @@ def test_calendar_bangkok_time_cyclic_weekend_holiday():
     # 2026-10-22 18:00 UTC is Fri 2026-10-23 01:00 local: Chulalongkorn Day
     assert v2._calendar(datetime(2026, 10, 22, 18, tzinfo=UTC))["is_thai_holiday"] == 1.0
     # Outside the static table: unknown, not a silent 0
-    assert v2._calendar(datetime(2027, 3, 3, 5, tzinfo=UTC))["is_thai_holiday"] is None
+    assert v2._calendar(datetime(2028, 3, 3, 5, tzinfo=UTC))["is_thai_holiday"] is None
+
+
+def test_holidays_2027_from_bot_notification_37_2569():
+    assert frozenset({2026, 2027}) == v2.HOLIDAY_YEARS
+    # Full nationwide list, BoT Notification 37/2569 items 1-18
+    bot_2027 = {
+        date(2027, m, d)
+        for m, d in (
+            (1, 1), (2, 22), (4, 6), (4, 13), (4, 14), (4, 15), (5, 3), (5, 4), (5, 20),
+            (6, 3), (7, 19), (7, 28), (8, 12), (10, 13), (10, 25), (12, 6), (12, 10), (12, 31),
+        )
+    }  # fmt: skip
+    assert {d for d in v2.THAI_HOLIDAYS if d.year == 2027} == bot_2027
+    for h in (
+        datetime(2027, 1, 1, 5, tzinfo=UTC),
+        datetime(2027, 2, 22, 5, tzinfo=UTC),
+        datetime(2027, 12, 6, 5, tzinfo=UTC),
+    ):
+        assert v2._calendar(h)["is_thai_holiday"] == 1.0
+    # Tue 2027-03-02 is an ordinary workday
+    workday = v2._calendar(datetime(2027, 3, 2, 5, tzinfo=UTC))
+    assert (workday["is_weekend"], workday["is_thai_holiday"]) == (0.0, 0.0)
+    # 2027-12-31 17:30 UTC is Sat 2028-01-01 local: outside the table
+    assert v2._calendar(datetime(2027, 12, 31, 17, 30, tzinfo=UTC))["is_thai_holiday"] is None
+
+
+def test_holiday_table_is_not_about_to_run_out():
+    end = date(max(v2.HOLIDAY_YEARS), 12, 31)
+    today = datetime.now(UTC).date()
+    assert today < end - timedelta(days=30), (
+        f"Thai holiday table ends {end}; today is {today}. Add next year's Bank of Thailand "
+        "holidays to THAI_HOLIDAYS and HOLIDAY_YEARS in "
+        "src/pm25_forecast/features/library_v2.py (served ridge returns no forecast after the "
+        "table ends)."
+    )
 
 
 def test_cross_station_mean_deviation_and_nearest():

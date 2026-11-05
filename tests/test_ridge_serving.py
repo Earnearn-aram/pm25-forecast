@@ -248,8 +248,8 @@ def test_serving_import_needs_no_experiments_code():
     assert done.returncode == 0, done.stderr
 
 
-def test_2027_holiday_gap_is_imputed_and_logged_under_train_mean(fitted, caplog):
-    origin = datetime(2027, 1, 2, 3, tzinfo=UTC)
+def test_2028_holiday_gap_is_imputed_and_logged_under_train_mean(fitted, caplog):
+    origin = datetime(2028, 1, 2, 3, tzinfo=UTC)
     obs = [
         Observation("a", origin - k * HOUR, 30.0 + k % 5, origin - (k - 1) * HOUR)
         for k in range(1, 80)
@@ -271,8 +271,8 @@ def test_more_than_a_quarter_of_features_missing_gives_no_forecast(fitted):
 
 
 def test_holiday_table_coverage_warning():
-    assert ridge.holiday_table_warning(datetime(2026, 10, 1, tzinfo=UTC)) is None
-    assert "KAN-106" in ridge.holiday_table_warning(datetime(2026, 11, 20, tzinfo=UTC))
+    assert ridge.holiday_table_warning(datetime(2027, 10, 1, tzinfo=UTC)) is None
+    assert "KAN-106" in ridge.holiday_table_warning(datetime(2027, 11, 20, tzinfo=UTC))
 
 
 def test_loader_rejects_a_manifest_without_the_lag(fitted):

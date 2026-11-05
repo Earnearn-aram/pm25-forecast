@@ -26,7 +26,7 @@ Performance: call ``prepare_series`` once per snapshot/fold and pass the result 
 ``build_features_v2`` / ``build_feature_set``; raw records are re-indexed on every call (fine for
 live serving, quadratic in a walk-forward). Only the groups of the requested names are computed.
 
-Holidays: the table covers 2026 only; other years give ``None`` for ``is_thai_holiday``.
+Holidays: the table covers 2026 and 2027; other years give ``None`` for ``is_thai_holiday``.
 """
 
 from __future__ import annotations
@@ -52,9 +52,11 @@ BANGKOK_OFFSET = timedelta(hours=7)
 
 # Thai public holidays (including substitution days and cabinet special days), Bangkok local
 # dates; cross-checked 2026-11-01 against secondary lists of the Bank of Thailand calendar.
-# TODO(KAN-86): extend the table BEFORE 2027-01-01 (serving needs it); training is 2026 only.
+# 2027: Bank of Thailand Notification No. 37/2569 (Royal Gazette 2026-08-25), nationwide
+# holidays only (18), https://www.bot.or.th/content/dam/bot/fipcs/documents/FPG/2569/EngPDF/25690175.pdf
+# TODO(KAN-86): extend the table BEFORE 2028-01-01 (serving needs it).
 # Static table: years outside HOLIDAY_YEARS give None for the holiday flag, not a silent 0.
-HOLIDAY_YEARS: frozenset[int] = frozenset({2026})
+HOLIDAY_YEARS: frozenset[int] = frozenset({2026, 2027})
 THAI_HOLIDAYS: frozenset[date] = frozenset(
     date(2026, m, d)
     for m, d in (
@@ -78,6 +80,28 @@ THAI_HOLIDAYS: frozenset[date] = frozenset(
         (10, 23),
         (12, 5),
         (12, 7),
+        (12, 10),
+        (12, 31),
+    )
+) | frozenset(
+    date(2027, m, d)
+    for m, d in (
+        (1, 1),
+        (2, 22),  # substitution for Makha Bucha Day (Sun 21 Feb)
+        (4, 6),
+        (4, 13),
+        (4, 14),
+        (4, 15),
+        (5, 3),  # substitution for National Labour Day (Sat 1 May)
+        (5, 4),
+        (5, 20),
+        (6, 3),
+        (7, 19),  # substitution for Asarnha Bucha Day (Sun 18 Jul)
+        (7, 28),
+        (8, 12),
+        (10, 13),
+        (10, 25),  # substitution for Chulalongkorn Day (Sat 23 Oct)
+        (12, 6),  # substitution for Father's Day / National Day (Sun 5 Dec)
         (12, 10),
         (12, 31),
     )
