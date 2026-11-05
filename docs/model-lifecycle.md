@@ -52,13 +52,24 @@ if evidence is insufficient, retain the current champion or baseline. Record the
 reason. KAN-120 implements the unified enforcement and audit; existing registry events already
 record pointer changes.
 
-Open decisions blocking model promotion: minimum per-station sample and coverage thresholds,
-acceptable station-level degradation, the required evaluation period and how to handle overlap
-between the incumbent's training data and the evaluation window. Until the owner approves these,
-the current 100-pair and 2% checks alone do not authorize promotion under this proposed policy.
+Owner-approved promotion gates (2026-11-04): each station needs at least 20 matched pairs to
+qualify for station-level review; at least 80% of eligible stations must qualify. Eligible stations
+have at least 20 mature actual outcomes in the complete 28-day issue-time evaluation window, and
+missing candidate forecasts count against coverage. Candidate MAE may be at most 10% worse than the
+incumbent on any eligible station; without an incumbent, compare against persistence. Any station
+over the degradation limit blocks promotion. Use only mature outcomes. Candidate and incumbent
+training outcomes must end before the evaluation window; block if training bounds are unknown or
+overlap. Never use the locked experiment holdout, and block if its exclusion cannot be verified.
+These station gates supplement the existing +24 h overall pair/gain/persistence checks and the
+other-horizon degradation check.
+
+KAN-128 implements and tests these approved gates, including rejecting a recommendation if the live
+champion changed after evaluation. KAN-126 still blocks operational evaluation until the trusted
+locked-holdout boundary is verified, so the approved policy is not yet usable for a live retrain or
+promotion.
 
 The experiment programme's locked holdout and its stricter pre-registered selection gates are
-separate from the rolling seven-day operational window. This agent must never score the locked
+separate from the rolling 28-day operational window. This agent must never score the locked
 holdout. Before any operational evaluation, check whether its evaluation data overlaps a locked
 experiment holdout; exclude that period or block the run if exclusion cannot be verified. Do not
 use holdout results for tuning. KAN-99 controls the planned re-evaluation; coordinate KAN-94

@@ -224,16 +224,18 @@ hash, and artifact hash. Registry writes verify that manifest hashes match the e
 
 Model versions remain immutable. The separate `model_champion` table stores one mutable
 `production` pointer to a registered version; moving it never changes a model row. A freshly
-trained version is stored without changing the pointer by default. To explicitly register and
-promote a model in the same run, add `--promote` to the training command (`--promote` requires
-`--push`). `storage.registry.read_champion` returns the pointer plus the content-verified bundle
-for a consumer. Hourly prediction does not select this pointer yet; that integration remains in
-KAN-29.
+trained version is stored without changing the pointer. The training command has no promotion
+option: a candidate must first have an eligible recorded retrain recommendation, then an owner
+reviews and promotes it with `registry_cli`. `storage.registry.read_champion` returns the pointer
+plus the content-verified bundle for a consumer. Hourly Predict snapshots the champion pointer in
+the KAN-119 `serving_issue_decisions` ledger once per issue hour and serves from that recorded
+decision. If no serving decision has been recorded yet for the current issue hour, a promotion may
+be selected in that hour; otherwise it takes effect in the next issue hour.
 
-Promotions update the single production row. The chosen concurrent-write policy is last successful
-upsert wins if PostgreSQL serializes competing writes on that row; there is no compare-and-swap or
-model ranking guard. The registry test covers sequential replacement only; it does not verify
-concurrent PostgreSQL behavior.
+Every champion change takes the same transaction-scoped advisory lock before locking the pointer
+row, including the first promotion when no pointer row exists. Manual promotion also verifies that
+the live champion is the exact version used for the recommendation. This serializes promote and
+rollback operations and rejects stale evaluations.
 
 Training uses a strict as-of policy: an observation can be an input only when its exported
 `available_at` is no later than the simulated issue time, and a target must be present in the
@@ -278,9 +280,10 @@ uv run python -m pm25_forecast.registry_cli promote kan15-retrospective-24h --co
 ```
 
 `register` publishes and reads back without moving the champion. `check` loads a version exactly
-as the predict step would. `promote` is the manual champion flip; it needs `--confirm` and refuses
-a version the serving loader rejects. The hourly baselines do not read the champion pointer yet;
-automatic champion/challenger selection is KAN-23.
+as the predict step would. `promote` is the manual champion flip; it needs `--confirm`, requires an
+eligible retrain recommendation for that same live champion, and refuses a version the serving
+loader rejects. Predict records the serving choice per issue hour (KAN-119); automatic model
+promotion remains a separate workflow.
 
 Ridge challenger (KAN-100, stage 1: servable, not yet wired into Predict). The KAN-84 best variant
 (`ridge-pool-raw-chg`: pooled ridge, raw target, prediction = latest reading + predicted change,

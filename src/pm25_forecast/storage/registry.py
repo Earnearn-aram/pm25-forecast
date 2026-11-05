@@ -28,6 +28,8 @@ SELECT_CHAMPION = """
 SELECT model_version
 FROM model_champion WHERE slot = 'production'
 """
+# Serializes champion changes even before the first `model_champion` row exists.
+LOCK_CHAMPION_POINTER = "SELECT pg_advisory_xact_lock(703923492601)"
 UPSERT_CHAMPION = """
 INSERT INTO model_champion (slot, model_version)
 VALUES ('production', %(model_version)s)
@@ -52,6 +54,12 @@ WHERE action IN ('promote', 'rollback') ORDER BY id DESC LIMIT 1
 # When retrain last logged a decision (actor 'auto' is retrain's own auto-promote).
 SELECT_LAST_RETRAIN_EVENT = """
 SELECT max(at) FROM model_events WHERE actor IN ('retrain', 'auto')
+"""
+SELECT_LAST_PROMOTION_RECOMMENDATION = """
+SELECT action, previous_version, metrics FROM model_events
+WHERE actor = 'retrain' AND action IN ('recommend', 'keep')
+  AND model_version = %(model_version)s
+ORDER BY id DESC LIMIT 1
 """
 SELECT_ALL_MODELS = "SELECT model_version, created_at FROM models ORDER BY created_at DESC"
 SELECT_RECENT_PREDICTION_MODELS = """
@@ -264,6 +272,8 @@ def promote_model(
     action: str = "promote",
     reason: str | None = None,
     metrics: Mapping[str, Any] | None = None,
+    expected_previous_version: str | None = None,
+    require_previous_match: bool = False,
 ) -> str | None:
     """Point production at an existing, content-verified model version and log the change.
 
@@ -277,8 +287,18 @@ def promote_model(
     # Verify existence and artifact integrity before changing the pointer. The database foreign
     # key is an additional guard against a dangling pointer.
     read_model(con, model_version)
+    # A row lock alone cannot serialize the empty-pointer case because there is no row to lock.
+    # This transaction-scoped lock also makes the evaluated-champion comparison race-safe on the
+    # first promotion. Keep it before the pointer row lock to give all writers one lock order.
+    con.execute(LOCK_CHAMPION_POINTER, {})
     before = con.execute(SELECT_CHAMPION_LOCK, {}).fetchone()
     previous = None if before is None else before[0]
+    if require_previous_match and previous != expected_previous_version:
+        raise ValueError(
+            "production champion changed since the candidate was evaluated "
+            f"(evaluated against {expected_previous_version or 'none'}, "
+            f"currently {previous or 'none'})"
+        )
     con.execute(UPSERT_CHAMPION, {"model_version": model_version})
     row = con.execute(SELECT_CHAMPION, {}).fetchone()
     if row is None or row[0] != model_version:
@@ -300,8 +320,10 @@ def previous_champion(con: Any) -> str:
 
     Raises LookupError if the log has no change, the latest change had no previous champion, or
     the log disagrees with the live pointer (the pointer was changed outside the log). Call it in
-    the transaction that then does the rollback: it locks the pointer row (``FOR UPDATE``).
+    the transaction that then does the rollback. It takes the advisory lock before the row lock,
+    matching the lock order used by every champion change.
     """
+    con.execute(LOCK_CHAMPION_POINTER, {})
     current = con.execute(SELECT_CHAMPION_LOCK, {}).fetchone()
     if current is None:
         raise LookupError("production champion model is not set; nothing to roll back")
@@ -380,6 +402,26 @@ def last_retrain_event_at(con: Any) -> datetime | None:
     if isinstance(value, str):
         value = datetime.fromisoformat(value)
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def last_promotion_recommendation(
+    con: Any, model_version: str
+) -> tuple[str, str | None, dict[str, Any]] | None:
+    """Return the latest retrain decision and metrics for a candidate version, if any."""
+    row = con.execute(
+        SELECT_LAST_PROMOTION_RECOMMENDATION, {"model_version": model_version}
+    ).fetchone()
+    if row is None:
+        return None
+    action, previous_version, raw_metrics = row
+    if raw_metrics is None:
+        metrics: dict[str, Any] = {}
+    elif isinstance(raw_metrics, str):
+        parsed = json.loads(raw_metrics)
+        metrics = parsed if isinstance(parsed, dict) else {}
+    else:
+        metrics = dict(raw_metrics)
+    return str(action), previous_version, metrics
 
 
 def read_champion(con: Any) -> tuple[str, bytes, dict[str, Any]]:

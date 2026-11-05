@@ -29,6 +29,7 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Sequence
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -134,9 +135,43 @@ def run(
             if not args.confirm:
                 out("refused: promote changes production; re-run with --confirm")
                 return EXIT_FAILED
+            decision = registry.last_promotion_recommendation(con, args.version)
+            if decision is None or decision[0] != "recommend":
+                out("refused: no current eligible retrain recommendation exists for this version")
+                return EXIT_FAILED
+            evaluated_champion, metrics = decision[1], decision[2]
+            policy = metrics.get("station_policy", {})
+            if (
+                policy.get("passed") is not True
+                or policy.get("locked_holdout_boundary_verified") is not True
+                or policy.get("candidate_training_window_verified") is not True
+                or policy.get("incumbent_training_window_verified") is not True
+            ):
+                out(
+                    "refused: the recorded evaluation does not satisfy the approved promotion gates"
+                )
+                return EXIT_FAILED
+            try:
+                evaluation_start = datetime.fromisoformat(policy["evaluation_start"])
+                evaluation_end = datetime.fromisoformat(policy["evaluation_end"])
+            except (KeyError, TypeError, ValueError):
+                out("refused: the eligible recommendation has no valid evaluation window")
+                return EXIT_FAILED
+            if (
+                evaluation_start.tzinfo is None
+                or evaluation_end.tzinfo is None
+                or evaluation_end - evaluation_start != timedelta(days=28)
+            ):
+                out("refused: the eligible recommendation is not for a complete 28-day window")
+                return EXIT_FAILED
             load_registered_model(con, args.version)  # never promote an unservable model
             previous = registry.promote_model(
-                con, args.version, actor="cli", reason="manual promote"
+                con,
+                args.version,
+                actor="cli",
+                reason="manual promote",
+                expected_previous_version=evaluated_champion,
+                require_previous_match=True,
             )
         out(f"production champion: {previous or 'none'} -> {args.version}")
         return 0

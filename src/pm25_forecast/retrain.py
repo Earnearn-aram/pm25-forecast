@@ -9,7 +9,7 @@ Intended post-gate run:
 
 1. Export the latest hosted history to DuckDB (``export_history``).
 2. Train a candidate with ``train_model.train`` on a copy of the export cut at ``holdout_start``
-   (now floored to the hour minus ``--holdout-days``, default 7). Nothing at or after
+   (a fixed 28-day evaluation window ending one +24h horizon before now). Nothing at or after
    ``holdout_start`` reaches training, so the held-out window is unseen by the candidate.
    Version ``retrain-YYYYMMDD`` (UTC date), ``-2``, ``-3`` ... for a same-day re-run.
 3. Register the candidate with ``publish_model`` (always; registering changes nothing live).
@@ -95,10 +95,14 @@ BLOCKED_AUTO_PROMOTE_REASON = (
     "implemented. Set AUTO_PROMOTE=false and use the reviewed manual promotion command. No data or "
     "model registry was accessed."
 )
-HOLDOUT_DAYS = 7
+HOLDOUT_DAYS = 28
 MIN_PAIRS = 100
 RETRAIN_MIN_GAP = timedelta(days=7)  # --if-drift: at most one retrain decision per this period
 MIN_REL_GAIN = 0.02
+MIN_PAIRS_PER_STATION = 20
+MIN_STATION_COVERAGE = 0.80
+MAX_STATION_REL_DEGRADATION = 0.10
+EVALUATION_HORIZON_H = HEADLINE_HORIZON_H
 _LATEST_INDEX = FEATURE_NAMES.index("pm25_latest")  # persistence = the latest observation
 
 
@@ -219,6 +223,149 @@ class Comparison:
     metrics: dict[str, tuple[float, float]]
 
 
+def station_policy(
+    mature_actuals: Mapping[str, int],
+    matched_pairs: Mapping[str, Sequence[tuple[float, float, float]]],
+) -> dict[str, Any]:
+    """Apply approved per-station evidence, coverage, and degradation gates.
+
+    ``mature_actuals`` counts actual outcomes available by the evaluation cutoff. A station is
+    eligible at 20 actuals. ``matched_pairs`` contains (candidate, reference, actual) tuples on
+    identical keys; a reference is the incumbent, or persistence when no incumbent exists.
+    Missing predictions therefore reduce a station's qualified pair count without shrinking the
+    eligible denominator.
+    """
+    eligible = {
+        station: count
+        for station, count in mature_actuals.items()
+        if count >= MIN_PAIRS_PER_STATION
+    }
+    stations: dict[str, dict[str, Any]] = {}
+    qualified = 0
+    degraded: list[str] = []
+    for station, actual_count in eligible.items():
+        pairs = matched_pairs.get(station, ())
+        entry: dict[str, Any] = {
+            "mature_actuals": actual_count,
+            "matched_pairs": len(pairs),
+            "minimum_pairs": MIN_PAIRS_PER_STATION,
+            "candidate_mae": None,
+            "reference_mae": None,
+            "relative_degradation": None,
+            "degradation_passed": None,
+        }
+        if len(pairs) >= MIN_PAIRS_PER_STATION:
+            qualified += 1
+            candidate_mae = sum(abs(candidate - actual) for candidate, _, actual in pairs) / len(
+                pairs
+            )
+            reference_mae = sum(abs(reference - actual) for _, reference, actual in pairs) / len(
+                pairs
+            )
+            relative = (
+                candidate_mae / reference_mae - 1.0
+                if reference_mae > 0
+                else (0.0 if candidate_mae == 0 else math.inf)
+            )
+            passed = candidate_mae <= reference_mae * (1 + MAX_STATION_REL_DEGRADATION) + 1e-12
+            entry.update(
+                candidate_mae=candidate_mae,
+                reference_mae=reference_mae,
+                relative_degradation=relative,
+                degradation_passed=passed,
+            )
+            if not passed:
+                degraded.append(station)
+        stations[station] = entry
+
+    eligible_count = len(eligible)
+    coverage = qualified / eligible_count if eligible_count else 0.0
+    reasons = []
+    if not eligible_count:
+        reasons.append("no station has 20 mature actual outcomes in the evaluation window")
+    if eligible_count and coverage + 1e-12 < MIN_STATION_COVERAGE:
+        reasons.append(f"station coverage {coverage:.1%} is below {MIN_STATION_COVERAGE:.0%}")
+    if degraded:
+        reasons.append(
+            "candidate exceeds the 10% station MAE degradation limit for: "
+            + ", ".join(sorted(degraded))
+        )
+    return {
+        "passed": not reasons,
+        "horizon_h": EVALUATION_HORIZON_H,
+        "minimum_pairs_per_station": MIN_PAIRS_PER_STATION,
+        "minimum_station_coverage": MIN_STATION_COVERAGE,
+        "maximum_station_relative_degradation": MAX_STATION_REL_DEGRADATION,
+        "eligible_station_count": eligible_count,
+        "qualified_station_count": qualified,
+        "station_coverage": coverage,
+        "stations": stations,
+        "reasons": reasons,
+    }
+
+
+def _station_matched_pairs(
+    samples: Mapping[int, Sequence[tuple]],
+    labels: Mapping[tuple[str, datetime], tuple[float, datetime]],
+    candidate: ServingModel,
+    reference: ServingModel | None,
+    evaluation_start: datetime,
+    evaluation_end: datetime,
+    as_of: datetime,
+) -> tuple[dict[str, int], dict[str, list[tuple[float, float, float]]]]:
+    """Build +24h station comparisons and mature actual counts for the exact issue window."""
+    horizon = EVALUATION_HORIZON_H
+    actual_counts: dict[str, int] = {}
+    for (station, target_time), (_value, available_at) in labels.items():
+        issue_time = target_time - timedelta(hours=horizon)
+        if evaluation_start <= issue_time < evaluation_end and available_at <= as_of:
+            actual_counts[station] = actual_counts.get(station, 0) + 1
+
+    matched: dict[str, list[tuple[float, float, float]]] = {}
+    for vector, target, issue_time, available_at, station in samples.get(horizon, ()):
+        if not (evaluation_start <= issue_time < evaluation_end) or available_at > as_of:
+            continue
+        persistence = vector[_LATEST_INDEX]
+        if not math.isfinite(persistence):
+            continue
+        features = {
+            name: None if math.isnan(value) else value
+            for name, value in zip(FEATURE_NAMES, vector, strict=True)
+        }
+        if reference is not None and horizon not in reference.boosters:
+            continue
+        candidate_prediction = candidate.predict(horizon, features)
+        reference_prediction = (
+            persistence if reference is None else reference.predict(horizon, features)
+        )
+        if candidate_prediction is None or reference_prediction is None:
+            continue
+        matched.setdefault(station, []).append((candidate_prediction, reference_prediction, target))
+    return actual_counts, matched
+
+
+def _verified_training_window(
+    version: str, manifest: Mapping[str, Any], evaluation_start: datetime
+) -> tuple[bool, str]:
+    """Require known train bounds ending before all evaluation outcomes could begin."""
+    window = manifest.get("training_window")
+    try:
+        start = require_utc(datetime.fromisoformat(window["start"]))
+        end = require_utc(datetime.fromisoformat(window["end"]))
+    except (KeyError, TypeError, ValueError):
+        return False, f"{version} training window is unknown; overlap cannot be ruled out"
+    if start >= end:
+        return False, f"{version} training window is invalid"
+    latest_training_outcome = end + timedelta(hours=max(HORIZONS_H))
+    if latest_training_outcome >= evaluation_start:
+        return (
+            False,
+            f"{version} training outcomes overlap the evaluation window "
+            f"(latest outcome {latest_training_outcome.isoformat()})",
+        )
+    return True, "verified disjoint"
+
+
 def _mae_rmse(pairs: Sequence[tuple[float, float]]) -> tuple[float, float]:
     errors = [pred - actual for pred, actual in pairs]
     return (
@@ -231,17 +378,23 @@ def compare(
     samples: Mapping[int, Sequence[tuple]],
     models: Mapping[str, ServingModel],
     holdout_start: datetime,
+    evaluation_end: datetime | None = None,
     horizons: Sequence[int] = HORIZONS_H,
 ) -> dict[int, Comparison]:
-    """Score every model plus persistence on held-out samples (issue_time >= holdout_start).
+    """Score models plus persistence on matched samples within the held-out issue window.
 
     Only pairs scored by persistence and by every model that serves the horizon are kept, so all
     models are compared on identical (station, issue_time, valid_time) pairs. A model that does
-    not serve a horizon is left out of that horizon.
+    not serve a horizon is left out of that horizon. When ``evaluation_end`` is provided, the
+    window uses the half-open range [holdout_start, evaluation_end).
     """
     result: dict[int, Comparison] = {}
     for horizon in horizons:
-        rows = [s for s in samples.get(horizon, ()) if s[2] >= holdout_start]
+        rows = [
+            s
+            for s in samples.get(horizon, ())
+            if s[2] >= holdout_start and (evaluation_end is None or s[2] < evaluation_end)
+        ]
         serving = {v: m for v, m in models.items() if horizon in m.boosters}
         truth: dict[tuple, float] = {}
         persistence: dict[tuple, float] = {}
@@ -403,6 +556,7 @@ class RetrainResult:
     comparison: dict[str, Any] = field(default_factory=dict)
     roles: dict[str, Any] = field(default_factory=dict)
     challenger_comparison: dict[str, Any] = field(default_factory=dict)
+    station_policy: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     artifact_bytes: int = 0
     promoted: bool = False
@@ -423,6 +577,7 @@ def _summary(result: RetrainResult, settings: Settings, **extra: Any) -> None:
             "roles": result.roles,
             "comparison": result.comparison,
             "challenger_comparison": result.challenger_comparison,
+            "station_policy": result.station_policy,
             "candidate_artifact_bytes": result.artifact_bytes,
             "warnings": result.warnings,
             "decision": None
@@ -472,8 +627,10 @@ def run(
     now = require_utc(clock())
     if settings.database_url is None:
         raise ConfigError("DATABASE_URL is not set")
-    if holdout_days < 1:
-        raise ConfigError("--holdout-days must be at least 1")
+    if holdout_days != HOLDOUT_DAYS:
+        raise ConfigError(
+            f"--holdout-days must be exactly {HOLDOUT_DAYS} under the approved policy"
+        )
     if not _trusted_holdout_boundary_verified():
         blocked = RetrainResult(
             run_id=default_run_id(now),
@@ -507,9 +664,21 @@ def run(
             return skipped
     do_export = export or (lambda path, u: export_history(path, u, connect=connect))
 
-    holdout_start = now.replace(minute=0, second=0, microsecond=0) - timedelta(days=holdout_days)
+    # The 28-day issue-time evaluation window ends one full +24h horizon before now, so every
+    # outcome in it has had time to mature. The candidate training cutoff is its start.
+    evaluation_end = now.replace(minute=0, second=0, microsecond=0) - timedelta(
+        hours=EVALUATION_HORIZON_H
+    )
+    holdout_start = evaluation_end - timedelta(days=holdout_days)
     result = RetrainResult(run_id=default_run_id(now))
-    window = {"holdout_start": holdout_start.isoformat(), "holdout_days": holdout_days}
+    window = {
+        "holdout_start": holdout_start.isoformat(),
+        "holdout_days": holdout_days,
+        "evaluation_start": holdout_start.isoformat(),
+        "evaluation_end": evaluation_end.isoformat(),
+        "evaluation_days": holdout_days,
+        "evaluation_horizon_h": EVALUATION_HORIZON_H,
+    }
 
     with open_db(connect, url) as con:
         result.version = retrain_version(now, lambda v: _registered(con, v))
@@ -519,7 +688,7 @@ def run(
         base.mkdir(parents=True, exist_ok=True)
         full, train_copy = base / "retrain-history.duckdb", base / "retrain-train.duckdb"
         do_export(full, url)
-        samples = build_samples(full)[0]
+        samples, labels, _vintages = build_samples(full, as_of=now)
         make_training_export(full, train_copy, holdout_start)
         try:
             artifact, manifest = trainer(train_copy, result.version, as_of=holdout_start)
@@ -537,6 +706,15 @@ def run(
             return result
 
     manifest = {**manifest, **window, "source": "retrain"}
+    candidate_window_ok, candidate_window_reason = _verified_training_window(
+        result.version, manifest, holdout_start
+    )
+    if not candidate_window_ok:
+        result.status = "blocked_policy"
+        result.decision = Decision("keep", candidate_window_reason)
+        result.warnings.append(candidate_window_reason)
+        _summary(result, settings, block_reason="candidate_training_window_unverified", **window)
+        return result
     result.artifact_bytes = len(artifact)
     publish_model(url, result.version, artifact, manifest, connect=connect)
     candidate = load_serving_model(result.version, artifact, manifest)
@@ -544,6 +722,8 @@ def run(
     champion_version: str | None = None
     champion: ServingModel | None = None
     champion_error: str | None = None
+    incumbent_window_ok = True
+    incumbent_window_reason = "no incumbent; persistence is the reference"
     challenger_version = settings.challenger_model_version
     challenger: ServingModel | None = None
     challenger_error: str | None = None
@@ -556,6 +736,9 @@ def run(
             try:
                 champion = load_serving_model(
                     champion_version, champion_artifact, champion_manifest
+                )
+                incumbent_window_ok, incumbent_window_reason = _verified_training_window(
+                    champion_version, champion_manifest, holdout_start
                 )
                 _flag_overlap(
                     result, "champion", champion_version, champion_manifest, holdout_start
@@ -589,18 +772,42 @@ def run(
     decision_models = {result.version: candidate}
     if champion is not None and champion_version is not None:
         decision_models[champion_version] = champion
-    comparisons = compare(samples, decision_models, holdout_start)
+    comparisons = compare(samples, decision_models, holdout_start, evaluation_end)
     result.comparison = comparison_table(comparisons)
     if challenger is not None and challenger_version is not None:
         pair = {result.version: candidate, challenger_version: challenger}
-        result.challenger_comparison = comparison_table(compare(samples, pair, holdout_start))
+        result.challenger_comparison = comparison_table(
+            compare(samples, pair, holdout_start, evaluation_end)
+        )
+
+    mature_actuals, station_pairs = _station_matched_pairs(
+        samples,
+        labels,
+        candidate,
+        champion if champion_version is not None else None,
+        holdout_start,
+        evaluation_end,
+        now,
+    )
+    result.station_policy = station_policy(mature_actuals, station_pairs)
+    result.station_policy.update(
+        evaluation_start=holdout_start.isoformat(),
+        evaluation_end=evaluation_end.isoformat(),
+        locked_holdout_boundary_verified=True,
+        candidate_training_window_verified=candidate_window_ok,
+        incumbent_training_window_verified=incumbent_window_ok,
+    )
 
     headline = comparisons.get(HEADLINE_HORIZON_H, Comparison(0, {}))
     candidate_eval = evaluation(headline, result.version)
     if candidate_eval is None:
         candidate_eval = Evaluation(result.version, 0, math.nan, math.nan)
     incumbent = None if champion_version is None else evaluation(headline, champion_version)
-    if champion_version is not None and incumbent is None:
+    if champion_version is not None and not incumbent_window_ok:
+        reason = incumbent_window_reason
+        result.decision = Decision("keep", reason, {"candidate": result.version})
+        result.failures.append(reason)
+    elif champion_version is not None and incumbent is None:
         # A champion exists but cannot be scored: never promote over it.
         reason = champion_error or (
             f"champion {champion_version} could not be scored at +{HEADLINE_HORIZON_H}h "
@@ -615,10 +822,24 @@ def run(
             inc_h = None if champion_version is None else evaluation(comparison, champion_version)
             if horizon != HEADLINE_HORIZON_H and cand_h is not None and inc_h is not None:
                 others.append((horizon, cand_h, inc_h))
-        result.decision = decide(candidate_eval, incumbent, other_horizons=others)
+        if not result.station_policy["passed"]:
+            result.decision = Decision(
+                "keep",
+                "; ".join(result.station_policy["reasons"]),
+                {
+                    "candidate": result.version,
+                    "station_policy": result.station_policy,
+                },
+            )
+        else:
+            result.decision = decide(candidate_eval, incumbent, other_horizons=others)
 
     note = f" Warning: {'; '.join(result.warnings)}." if result.warnings else ""
-    event_metrics = {**result.decision.metrics, "comparison": result.comparison}
+    event_metrics = {
+        **result.decision.metrics,
+        "comparison": result.comparison,
+        "station_policy": result.station_policy,
+    }
     if result.decision.action == "promote":
         result.recommended = True
         with open_db(connect, url) as con:

@@ -1,6 +1,8 @@
 """KAN-24: model_events log, rollback, registry prune, drift-triggered retrain. Offline."""
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -39,6 +41,26 @@ def cli(reg, *argv):
         list(argv), database_url="db", connect=lambda _url: reg, out=lines.append
     )
     return code, "\n".join(lines)
+
+
+def recommend_candidate(reg, version, *, passed=True):
+    registry.record_event(
+        reg,
+        "recommend" if passed else "keep",
+        version,
+        actor="retrain",
+        metrics={
+            "station_policy": {
+                "passed": passed,
+                "locked_holdout_boundary_verified": True,
+                "candidate_training_window_verified": True,
+                "incumbent_training_window_verified": True,
+                "evaluation_start": "2026-01-01T00:00:00+00:00",
+                "evaluation_end": "2026-01-29T00:00:00+00:00",
+            }
+        },
+        previous_version=reg.champion,
+    )
 
 
 def test_promote_writes_one_event_per_change_with_the_previous_champion():
@@ -81,7 +103,10 @@ class LockFreeDb(FakeDb):
     """FakeDb for the real model_events SQL: SQLite has no `FOR UPDATE`, so it is dropped."""
 
     def execute(self, statement, params=()):
-        return super().execute(statement.replace(" FOR UPDATE", ""), params)
+        statement = statement.replace(" FOR UPDATE", "").replace(
+            registry.LOCK_CHAMPION_POINTER, "SELECT 1"
+        )
+        return super().execute(statement, params)
 
 
 def test_lock_statement_is_the_champion_select_for_update():
@@ -102,10 +127,10 @@ def test_promote_and_rollback_lock_the_pointer_before_reading_it():
     registry.promote_model(reg, "a")
     registry.promote_model(reg, "b")
     assert registry.previous_champion(reg) == "a"
-    first_champion_reads = [s for s in seen if "FROM model_champion" in s and "SELECT" in s]
-    assert first_champion_reads[0] == registry.SELECT_CHAMPION_LOCK  # promote: before the upsert
+    assert seen.index(registry.LOCK_CHAMPION_POINTER) < seen.index(registry.SELECT_CHAMPION_LOCK)
     assert seen.index(registry.SELECT_CHAMPION_LOCK) < seen.index(registry.UPSERT_CHAMPION)
-    assert seen[-2] == registry.SELECT_CHAMPION_LOCK  # previous_champion: lock, then the log
+    assert seen[-3] == registry.LOCK_CHAMPION_POINTER
+    assert seen[-2] == registry.SELECT_CHAMPION_LOCK  # rollback uses the same lock order
     assert seen[-1] == registry.SELECT_LAST_CHANGE
 
 
@@ -143,7 +168,9 @@ def test_last_retrain_event_covers_retrain_and_auto_but_not_cli():
 
 def test_rollback_moves_back_to_the_previous_champion_and_logs_it():
     reg = reg_with("a", "b")
+    recommend_candidate(reg, "a")
     cli(reg, "promote", "a", "--confirm")
+    recommend_candidate(reg, "b")
     cli(reg, "promote", "b", "--confirm")
     assert reg.champion == "b"
     code, text = cli(reg, "rollback", "--confirm")
@@ -152,12 +179,14 @@ def test_rollback_moves_back_to_the_previous_champion_and_logs_it():
     last = reg.events[-1]
     assert (last["action"], last["model_version"]) == ("rollback", "a")
     assert last["previous_version"] == "b" and last["actor"] == "cli"
-    assert len(reg.events) == 3  # one row per champion change
+    assert len(reg.events) == 5  # two recommendations, two changes, and one rollback
 
 
 def test_rollback_needs_confirm():
     reg = reg_with("a", "b")
+    recommend_candidate(reg, "a")
     cli(reg, "promote", "a", "--confirm")
+    recommend_candidate(reg, "b")
     cli(reg, "promote", "b", "--confirm")
     code, text = cli(reg, "rollback")
     assert code == 1 and "--confirm" in text and reg.champion == "b"
@@ -167,6 +196,7 @@ def test_rollback_refuses_when_no_previous_champion_is_recorded():
     reg = reg_with("a")
     code, text = cli(reg, "rollback", "--confirm")
     assert code == 1 and "nothing to roll back" in text  # no champion at all
+    recommend_candidate(reg, "a")
     cli(reg, "promote", "a", "--confirm")  # the first ever promote has no previous champion
     code, text = cli(reg, "rollback", "--confirm")
     assert code == 1 and "no previous champion" in text and reg.champion == "a"
@@ -192,10 +222,82 @@ def test_rollback_refuses_when_the_log_does_not_match_the_live_pointer():
 
 def test_manual_promote_is_logged_with_actor_cli():
     reg = reg_with("a")
+    recommend_candidate(reg, "a")
     assert cli(reg, "promote", "a", "--confirm") == (0, "production champion: none -> a")
-    assert [(e["action"], e["actor"], e["reason"]) for e in reg.events] == [
-        ("promote", "cli", "manual promote")
+    assert [(e["action"], e["actor"]) for e in reg.events] == [
+        ("recommend", "retrain"),
+        ("promote", "cli"),
     ]
+    assert reg.events[-1]["reason"] == "manual promote"
+
+
+def test_manual_promote_rejects_recommendation_against_stale_champion():
+    reg = reg_with("a", "b", "candidate")
+    registry.promote_model(reg, "a", actor="cli")
+    recommend_candidate(reg, "candidate")  # evaluated against a
+    registry.promote_model(reg, "b", actor="cli")  # champion changed afterward
+
+    code, text = cli(reg, "promote", "candidate", "--confirm")
+
+    assert code == 1
+    assert "champion changed since the candidate was evaluated" in text
+    assert reg.champion == "b"
+
+
+def test_concurrent_first_promotions_allow_only_one_candidate_evaluated_against_none():
+    reg = reg_with("a", "b")
+    recommend_candidate(reg, "a")
+    recommend_candidate(reg, "b")
+    start = threading.Barrier(2)
+
+    def promote(version):
+        start.wait()
+        return cli(reg, "promote", version, "--confirm")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(promote, ("a", "b")))
+
+    assert sum(code == 0 for code, _ in results) == 1
+    stale_results = sum(
+        "champion changed since the candidate was evaluated" in text for _, text in results
+    )
+    assert stale_results == 1
+    assert reg.champion in {"a", "b"}
+    assert sum(event["action"] == "promote" for event in reg.events) == 1
+
+
+def test_concurrent_rollback_and_promotion_complete_with_one_lock_order():
+    reg = reg_with("a", "b", "candidate")
+    registry.promote_model(reg, "a")
+    registry.promote_model(reg, "b")
+    recommend_candidate(reg, "candidate")  # evaluated against b
+    start = threading.Barrier(2)
+
+    def rollback():
+        start.wait()
+        return cli(reg, "rollback", "--confirm")
+
+    def promote():
+        start.wait()
+        return cli(reg, "promote", "candidate", "--confirm")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rollback_result = pool.submit(rollback)
+        promote_result = pool.submit(promote)
+        results = [rollback_result.result(timeout=5), promote_result.result(timeout=5)]
+
+    assert all(code in (0, 1) for code, _ in results)
+    assert reg.champion in {"a", "b", "candidate"}
+
+
+def test_manual_promote_requires_a_current_eligible_recommendation():
+    reg = reg_with("a")
+    code, text = cli(reg, "promote", "a", "--confirm")
+    assert code == 1 and "no current eligible" in text and reg.champion is None
+
+    recommend_candidate(reg, "a", passed=False)
+    code, text = cli(reg, "promote", "a", "--confirm")
+    assert code == 1 and "no current eligible" in text and reg.champion is None
 
 
 # --- prune ------------------------------------------------------------------------------------

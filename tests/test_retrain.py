@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from pm25_forecast import retrain
+from pm25_forecast.features import FEATURE_NAMES
 from pm25_forecast.retrain import Decision, Evaluation, decide, retrain_version
 from pm25_forecast.settings import Settings
 from pm25_forecast.storage import db
@@ -27,7 +28,7 @@ from pm25_forecast.train_model import build_samples, train
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 NOW = datetime(2026, 2, 10, 0, 30, tzinfo=UTC)  # holdout_start = 2026-02-03 00:00 UTC
-HOLDOUT_START = datetime(2026, 2, 3, tzinfo=UTC)
+HOLDOUT_START = datetime(2026, 1, 12, tzinfo=UTC)
 DB_URL = "postgresql://user@127.0.0.1:1/db"  # no password, nothing secret
 
 
@@ -53,12 +54,32 @@ class Registry:
 
     def execute(self, statement, params):
         with self.lock:
-            if statement.lstrip().startswith("INSERT INTO model_events"):
+            if "pg_advisory_xact_lock" in statement:
+                self._selected = None
+            elif statement.lstrip().startswith("INSERT INTO model_events"):
                 self.events.append(params)
                 if params["actor"] in ("retrain", "auto"):
                     self.last_retrain_at = datetime.now(UTC)
             elif "max(at) FROM model_events" in statement:
                 self._selected = (self.last_retrain_at,)
+            elif "SELECT action, previous_version, metrics FROM model_events" in statement:
+                version = params["model_version"]
+                decisions = [
+                    event
+                    for event in self.events
+                    if event["actor"] == "retrain"
+                    and event["action"] in ("recommend", "keep")
+                    and event["model_version"] == version
+                ]
+                self._selected = (
+                    (
+                        decisions[-1]["action"],
+                        decisions[-1]["previous_version"],
+                        decisions[-1]["metrics"],
+                    )
+                    if decisions
+                    else None
+                )
             elif "FROM model_events" in statement:
                 changes = [e for e in self.events if e["action"] in ("promote", "rollback")]
                 self._selected = None
@@ -237,7 +258,7 @@ def test_training_export_keeps_only_rows_before_the_holdout(tmp_path):
         con.execute("SET TimeZone = 'UTC'")
         newest, count = con.execute("SELECT max(ts), count(*) FROM observations").fetchone()
     assert newest == HOLDOUT_START - timedelta(hours=1)
-    assert count == 33 * 24
+    assert count == 11 * 24
 
 
 def test_training_export_drops_rows_that_arrived_after_the_cutoff(tmp_path):
@@ -269,7 +290,7 @@ def test_training_export_drops_rows_that_arrived_after_the_cutoff(tmp_path):
         con.execute("SET TimeZone = 'UTC'")
         late = con.execute("SELECT count(*) FROM observations WHERE ts = ?", [late_label])
         assert late.fetchone()[0] == 0
-        assert con.execute("SELECT count(*) FROM observations").fetchone()[0] == 33 * 24 - 1
+        assert con.execute("SELECT count(*) FROM observations").fetchone()[0] == 11 * 24 - 1
         vintages = con.execute("SELECT pm25_pred FROM forecast_vintages").fetchall()
     assert vintages == [(20.0,)]
 
@@ -309,6 +330,13 @@ def test_run_registers_candidate_and_only_recommends_when_auto_promote_is_off(ca
     assert result.artifact_bytes == len(read_model(reg, result.version)[0])
     assert table["models"][result.version]["mae"] < table["models"]["persistence-24h"]["mae"]
     assert set(result.comparison) == {"+6h", "+12h", "+24h"}
+    decision_event = reg.events[-1]
+    audit = json.loads(decision_event["metrics"])["station_policy"]
+    assert decision_event["action"] == "recommend"
+    assert decision_event["previous_version"] is None
+    assert audit["passed"] is True
+    assert audit["evaluation_start"] == "2026-01-12T00:00:00+00:00"
+    assert audit["evaluation_end"] == "2026-02-09T00:00:00+00:00"
 
     summary = [r.getMessage() for r in caplog.records if "RUN_SUMMARY" in r.getMessage()]
     assert len(summary) == 1
@@ -452,6 +480,91 @@ def test_challenger_never_changes_the_decision_pairs():
     assert "partial-challenger" in second.challenger_comparison["+6h"]["models"]
 
 
+def test_approved_station_policy_passes_at_all_inclusive_boundaries():
+    report = retrain.station_policy(
+        {"a": 20, "b": 20, "c": 20, "d": 20, "e": 20, "f": 19},
+        {station: [(1.1, 1.0, 0.0)] * 20 for station in ("a", "b", "c", "d")},
+    )
+    assert report["passed"] is True
+    assert report["eligible_station_count"] == 5  # 19 mature outcomes are below eligibility
+    assert report["qualified_station_count"] == 4
+    assert report["station_coverage"] == pytest.approx(0.80)
+    assert report["stations"]["a"]["relative_degradation"] == pytest.approx(0.10)
+
+
+def test_approved_station_policy_blocks_coverage_when_forecasts_are_missing():
+    report = retrain.station_policy(
+        dict.fromkeys(("a", "b", "c", "d", "e"), 20),
+        {
+            "a": [(0.0, 0.0, 0.0)] * 20,
+            "b": [(0.0, 0.0, 0.0)] * 20,
+            "c": [(0.0, 0.0, 0.0)] * 20,
+            "d": [(0.0, 0.0, 0.0)] * 19,  # missing one prediction fails the station floor
+            # e has mature actuals but no candidate forecasts at all.
+        },
+    )
+    assert report["passed"] is False
+    assert report["eligible_station_count"] == 5
+    assert report["qualified_station_count"] == 3
+    assert report["station_coverage"] == pytest.approx(0.60)
+    assert "below 80%" in report["reasons"][0]
+
+
+def test_approved_station_policy_blocks_more_than_ten_percent_degradation():
+    report = retrain.station_policy({"a": 20}, {"a": [(1.1001, 1.0, 0.0)] * 20})
+    assert report["passed"] is False
+    assert "candidate exceeds the 10%" in report["reasons"][0]
+    assert report["stations"]["a"]["relative_degradation"] > 0.10
+
+
+def test_station_policy_counts_only_mature_outcomes_inside_the_issue_window():
+    class ConstantModel:
+        def predict(self, _horizon, _features):
+            return 0.0
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = start + timedelta(days=28)
+    as_of = end + timedelta(hours=24)
+    samples, labels = [], {}
+    for index in range(21):
+        issue = start + timedelta(hours=index)
+        target = issue + timedelta(hours=24)
+        available = as_of + timedelta(seconds=1) if index == 20 else as_of
+        labels[("station", target)] = (0.0, available)
+        vector = [0.0] * len(FEATURE_NAMES)
+        samples.append((vector, 0.0, issue, available, "station"))
+    counts, pairs = retrain._station_matched_pairs(
+        {24: samples},
+        labels,
+        ConstantModel(),
+        None,
+        start,
+        end,
+        as_of,
+    )
+    assert counts == {"station": 20}
+    assert len(pairs["station"]) == 20
+
+
+def test_overlapping_incumbent_training_window_blocks_recommendation():
+    reg = Registry()
+    first = do_run(reg, [])
+    overlapping = {
+        "training_window": {
+            "start": "2026-01-01T00:00:00+00:00",
+            "end": "2026-01-14T00:00:00+00:00",
+        }
+    }
+    register_variant(reg, first.version, "overlapping-incumbent", manifest_update=overlapping)
+    reg.champion = "overlapping-incumbent"
+
+    result = do_run(reg, [])
+    assert result.recommended is False
+    assert result.decision.action == "keep"
+    assert "overlap the evaluation window" in result.decision.reason
+    assert result.station_policy["passed"] is True  # the independent station gate passed
+
+
 def test_overlap_with_the_holdout_is_flagged_in_summary_and_alert(caplog):
     reg, alerts = Registry(), []
     first = do_run(reg, [])
@@ -477,7 +590,8 @@ def test_insufficient_history_skips_without_registering_or_promoting():
     result = do_run(reg, alerts, export=tiny)
     assert result.status == "skipped" and not result.failures
     assert result.warnings and "training data not ready" in result.warnings[0]
-    assert (NOW.replace(minute=0) - timedelta(days=7)).isoformat() in result.warnings[0]
+    expected_start = NOW.replace(minute=0) - timedelta(hours=24 + retrain.HOLDOUT_DAYS * 24)
+    assert expected_start.isoformat() in result.warnings[0]
     assert reg.rows == {} and reg.champion is None
 
 
