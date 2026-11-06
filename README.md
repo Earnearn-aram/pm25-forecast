@@ -99,7 +99,7 @@ Notes on the diagram:
 | Workflow | Trigger | Reads | Writes | Normal duration / timeout |
 |---|---|---|---|---|
 | Collector (`collector.yml`) | cron-job.org calls `workflow_dispatch` at minutes 7, 27, 47 every hour; GitHub cron `7,27,47 * * * *` is a backup | Air4Thai, Open-Meteo (weather + CAMS) | `observations`, CAMS vintages in `predictions`; raw-response artifact (14 days) | 1-2 min per run (workflow comment); timeout 10 min |
-| Predict + Score (`predict.yml`) | `workflow_run` after each Collector run completes; backup cron `12 * * * *`; manual | `observations`, CAMS rows, `models` (challenger, if `CHALLENGER_MODEL_VERSION` is set) | `predictions` (`persistence-24h` and challenger, +6/+12/+24 h), then `scores` | Predict "well under 2 min" (workflow comment); timeout 10 min, Score step 4 min |
+| Predict + Score (`predict.yml`) | `workflow_run` after each Collector run completes; backup cron `12 * * * *`; manual | `observations`, CAMS rows, `models` (challenger, if `CHALLENGER_MODEL_VERSION` is set) | `predictions` (`persistence-24h` for +1..+24 h and each challenger for the hours it serves), then `scores` | Predict "well under 2 min" (workflow comment); timeout 10 min, Score step 4 min |
 | Heartbeat (`heartbeat.yml`) | daily 01:17 UTC | `observations` (last 24 h) | One summary line to Discord; alert if DB down or zero rows | Timeout 5 min |
 | Backfill (`backfill.yml`) | daily 01:37 UTC; manual (`lookback_days`, default 120) | Air4Thai history (about 3 months kept) | `observations` (idempotent upsert; gap recovery) | 1-3 min (workflow comment); timeout 20 min |
 | OpenAQ Backfill (`openaq-backfill.yml`) | manual only | OpenAQ | `observations` | Estimated 5-20 min, not measured ([doc](docs/openaq-backfill.md)); timeout 60 min |
@@ -184,7 +184,7 @@ most runs before (KAN-50, KAN-67).
 | Database unreachable (run skipped) | Predict, Score or Heartbeat skipped; no stale-data fallback | Check Neon (project, credentials); re-run when it is back. |
 | Heartbeat `WARN` or `(STALE)` | Some stations have no reading for over 3 h | As the stale-station alert above. |
 | Heartbeat `FAIL` or zero rows in 24 h | The Collector is not landing data | Check the cron-job.org timer, recent Collector runs and the 60-day disable rule. |
-| Predict fails after baselines are written | `CHALLENGER_MODEL_VERSION` points at a missing or incompatible model | Run `registry_cli check <version>`; unset the variable to turn the challenger off. |
+| Predict fails after baselines are written | `CHALLENGER_MODEL_VERSION` points at a missing or incompatible model | Run `registry_cli check <version>`; unset the variable (or drop that version from the comma-separated list) to turn the challenger off. The other listed challengers are still written. |
 | `[pm25 retrain] recommend promote <version>` | A retrained candidate beat the champion; nothing was changed | Read the `RUN_SUMMARY` and `model_events`, then `registry_cli promote <version> --confirm`. Undo with `registry_cli rollback --confirm` (docs/retrain.md). |
 | `[pm25 retrain] AUTO_PROMOTE: <version> is now the production champion` | `AUTO_PROMOTE=true` and a candidate won | Check it is wanted; `registry_cli rollback --confirm` reverts; unset `AUTO_PROMOTE` to stop it. |
 | Drift alert, then a retrain run from the Drift workflow | Drift confirmed on two days; `retrain --if-drift` ran the normal (recommend-only) retrain | As the recommend alert above; the run is a no-op when there is no drift alert. |

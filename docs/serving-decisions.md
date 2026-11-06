@@ -30,7 +30,7 @@ records for audit; do not drop them while the new code may run. Rollback of a ch
 effective at the next selection, not for an already frozen decision. `selected_at` and
 `issue_time` must not be interpreted as proof that a forecast was available at the hour boundary.
 
-Dashboard and Score still read the configured shadow challenger; they do not consume this serving
+Dashboard and Score still read the configured shadow challenger(s) (a list since KAN-104); they do not consume this serving
 ledger. KAN-120/121 must integrate those consumers before presenting the ledger as end-to-end
 production serving or model performance. Auto-promotion remains outside this change.
 

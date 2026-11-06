@@ -14,7 +14,8 @@ Intended post-gate run:
    Version ``retrain-YYYYMMDD`` (UTC date), ``-2``, ``-3`` ... for a same-day re-run.
 3. Register the candidate with ``publish_model`` (always; registering changes nothing live).
 4. Score the candidate, the current champion (if any), the current challenger
-   (``CHALLENGER_MODEL_VERSION``, if set) and persistence-24h on the held-out window with the
+   (``CHALLENGER_MODEL_VERSION``, if set; KAN-104: with a list, the first listed one) and
+   persistence-24h on the held-out window with the
    shared feature code, per horizon the bundle serves (+6/+12/+24 h), on matched
    (station, issue_time, valid_time) pairs only: MAE and RMSE.
 5. ``decide`` (the single decision function) returns promote or keep.
@@ -24,9 +25,10 @@ Intended post-gate run:
    with comparison metrics. The separate manual registry command records an approved ``promote``.
 
 ``--if-drift`` (KAN-24) makes the run conditional: it exits 0 without training unless the latest
-drift run has an alert for the challenger (``CHALLENGER_MODEL_VERSION``) or the production
-champion, and no retrain decision was logged since that drift run was computed (cooldown). A
-triggered run is the normal run (recommend-only; promotion requires the reviewed manual command).
+drift run has an alert for any challenger (``CHALLENGER_MODEL_VERSION``, a list since KAN-104) or
+the production champion, and no retrain decision was logged since that drift run was computed
+(cooldown). A triggered run is the normal run (recommend-only; promotion requires the reviewed
+manual command).
 
 The RUN_SUMMARY line holds the whole comparison table and the decision. DB down: the run is
 skipped, alerted, exit 1. Configuration error: exit 2. Insufficient training data is reported as
@@ -498,8 +500,7 @@ def _registered(con: Any, version: str) -> bool:
 def drift_targets(con: Any, settings: Settings) -> list[str]:
     """The models whose drift can trigger an ``--if-drift`` run: the challenger and the champion."""
     targets: list[str] = []
-    if settings.challenger_model_version:
-        targets.append(settings.challenger_model_version)
+    targets.extend(settings.challenger_model_versions)
     row = con.execute(SELECT_CHAMPION, {}).fetchone()
     if row is not None and row[0] not in targets:
         targets.append(row[0])
@@ -724,7 +725,9 @@ def run(
     champion_error: str | None = None
     incumbent_window_ok = True
     incumbent_window_reason = "no incumbent; persistence is the reference"
-    challenger_version = settings.challenger_model_version
+    # KAN-104: with several challengers configured, only the first listed is compared here. The
+    # comparison is informational and never enters the decision set; Score judges all of them.
+    challenger_version = next(iter(settings.challenger_model_versions), None)
     challenger: ServingModel | None = None
     challenger_error: str | None = None
     with open_db(connect, url) as con:

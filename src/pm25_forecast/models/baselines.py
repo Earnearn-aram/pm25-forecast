@@ -15,6 +15,9 @@ PERSISTENCE_MODEL_VERSION = "persistence-24h"
 CAMS_PASSTHROUGH_MODEL_VERSION = "cams"
 HORIZONS_H: tuple[int, ...] = (6, 12, 24)  # the headline horizon is +24 h
 HEADLINE_HORIZON_H = 24
+# KAN-104: persistence is written for every hour +1..+24 so a model that forecasts any of those
+# hours (the ridge) has a reference at that hour. The headline horizons stay HORIZONS_H.
+HOURLY_HORIZONS_H: tuple[int, ...] = tuple(range(1, 25))
 # An observation older than this (relative to issue_time) is too stale to persist.
 MAX_OBSERVATION_AGE = timedelta(hours=3)
 

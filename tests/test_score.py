@@ -320,11 +320,49 @@ def test_skill_uses_matched_pairs_only():
     assert m[P][6].rmse == pytest.approx(math.sqrt((16 + 10000) / 2))
 
 
-def test_metrics_are_split_by_horizon_and_ignore_other_horizons():
+def test_metrics_are_split_by_horizon_and_can_be_restricted():
     t0 = datetime(2026, 10, 29, 0, tzinfo=UTC)
     rows = [_row("59t", t0, 6, 1.0), _row("59t", t0, 12, 2.0), _row("59t", t0, 3, 9.0)]
-    m = rolling_metrics({P: rows})
+    m = rolling_metrics({P: rows}, horizons=(6, 12))
     assert set(m[P]) == {6, 12} and m[P][12].mae == 2.0
+
+
+def test_metrics_cover_every_scored_whole_hour_by_default():
+    """KAN-104: a non-headline horizon (+3 h, +1 h) is scored; a fractional one is not a horizon."""
+    t0 = datetime(2026, 10, 29, 0, tzinfo=UTC)
+    odd = ScoreRow(station_id="59t", issue_time=t0, valid_time=t0 + 90 * H / 60, abs_error=1.0)
+    rows = [_row("59t", t0, 1, 1.0), _row("59t", t0, 3, 9.0), _row("59t", t0, 6, 4.0), odd]
+    ref = [_row("59t", t0, 3, 12.0)]
+    m = rolling_metrics({P: ref, CHALLENGER: rows})
+    assert set(m[CHALLENGER]) == {1, 3, 6}
+    assert m[CHALLENGER][3].skill_vs_persistence == pytest.approx(1 - 9.0 / 12.0)
+    assert m[CHALLENGER][1].skill_vs_persistence is None  # no persistence at +1 h
+
+
+def test_run_scores_and_reports_non_headline_horizons(fake, caplog):
+    caplog.set_level("INFO")
+    issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    for h in (1, 3, 24):
+        add_pred(fake, "59t", issue, h, P, 40.0)
+        add_pred(fake, "59t", issue, h, CHALLENGER, 33.0)
+        add_obs(fake, "59t", issue + h * H, 30.0)
+    result = do_run(fake)
+    assert set(result.metrics[CHALLENGER]) == {1, 3, 24}
+    assert result.metrics[CHALLENGER][3].skill_vs_persistence == pytest.approx(1 - 3.0 / 10.0)
+    assert '"+3h": {"mae"' in caplog.text and '"+1h": {"mae"' in caplog.text
+    assert '"+6h": {"n": 0}' in caplog.text  # the headline horizons are always listed
+
+
+def test_two_challengers_are_scored_side_by_side(fake):
+    issue = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    for model, pred in ((P, 40.0), (CHALLENGER, 33.0), ("second-challenger", 31.0)):
+        add_pred(fake, "59t", issue, 24, model, pred)
+    add_obs(fake, "59t", issue + 24 * H, 30.0)
+    result = do_run(fake, challenger_model_version=f"{CHALLENGER}, second-challenger")
+    assert list(result.matured) == [P, CHALLENGER, "second-challenger"]
+    assert {row[2] for row in scores(fake)} == {P, CHALLENGER, "second-challenger"}
+    assert result.metrics["second-challenger"][24].skill_vs_persistence == pytest.approx(0.9)
+    assert result.metrics[CHALLENGER][24].skill_vs_persistence == pytest.approx(0.7)
 
 
 def test_naive_clock_is_rejected(fake):

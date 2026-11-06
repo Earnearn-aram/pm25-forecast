@@ -208,22 +208,19 @@ def test_predictors_reject_naive_datetimes():
 # --- the predict step ------------------------------------------------------------------------
 
 
-def test_run_writes_only_persistence_for_each_horizon(fake_db):
+def test_run_writes_only_persistence_for_every_hour_1_to_24(fake_db):
+    """KAN-104: persistence for +1..+24 h (skill at every hour); +6/+12/+24 stay the headline."""
     result = do_run(fake_db)
     assert result.failures == []
     assert result.issue_time == ISSUE
     rows = fake_db.predictions()
     got = {(r[0], r[3], r[2]): r[5] for r in rows}
-    t6, t12, t24 = (ISSUE + n * H for n in (6, 12, 24))
-    iso = lambda t: t.isoformat()  # noqa: E731
     assert got == {
-        ("59t", PERSISTENCE_MODEL_VERSION, iso(t6)): 40.0,
-        ("59t", PERSISTENCE_MODEL_VERSION, iso(t12)): 40.0,
-        ("59t", PERSISTENCE_MODEL_VERSION, iso(t24)): 40.0,
+        ("59t", PERSISTENCE_MODEL_VERSION, (ISSUE + n * H).isoformat()): 40.0 for n in range(1, 25)
     }
     assert all(r[1] == ISSUE.isoformat() and r[4] == result.run_id for r in rows)
-    assert result.per_model == {PERSISTENCE_MODEL_VERSION: 3}
-    assert result.rows_written == 3
+    assert result.per_model == {PERSISTENCE_MODEL_VERSION: 24}
+    assert result.rows_written == 24
     assert all(r[3] != CAMS_PASSTHROUGH_MODEL_VERSION for r in rows)
 
 
@@ -475,8 +472,8 @@ def test_rerun_in_the_same_hour_is_idempotent(fake_db):
     again = do_run(fake_db)
     later_same_hour = do_run(fake_db, now=NOW + timedelta(minutes=40))
     assert fake_db.predictions() == before
-    assert first.rows_written == 3 and first.rows_ignored == 0
-    assert again.rows_written == 0 and again.rows_ignored == 3
+    assert first.rows_written == 24 and first.rows_ignored == 0
+    assert again.rows_written == 0 and again.rows_ignored == 24
     assert later_same_hour.rows_written == 0
 
 

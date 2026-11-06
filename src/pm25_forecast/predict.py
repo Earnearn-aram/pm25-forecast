@@ -1,7 +1,8 @@
 """Hourly predict step (KAN-28). Run with ``python -m pm25_forecast.predict``.
 
-Per run, for every station in STATION_LOCATIONS: read stored data, make baseline forecasts for
-+6 h, +12 h and +24 h, and append them to ``predictions`` in one transaction.
+Per run, for every station in STATION_LOCATIONS: read stored data, make the persistence baseline
+for every hour +1..+24 (KAN-104; the headline horizons stay +6/+12/+24 h) and append it to
+``predictions`` in one transaction.
 
 * ``issue_time`` is the run time floored to the UTC hour, so a re-run or a doubled run in the same
   hour has the same natural key (station_id, issue_time, valid_time, model_version) and the
@@ -11,12 +12,17 @@ Per run, for every station in STATION_LOCATIONS: read stored data, make baseline
   them. Old ``cams`` rows stay and expire under the 90-day retention. The stored ``cams_global``
   vintages are still read, only to build the ``cams_pm25`` feature for the challenger.
 * Missing inputs are skipped and logged, never filled in. They are listed in the run summary.
-* Challenger (KAN-29, shadow mode; KAN-76: LightGBM or smoother bundle): when
-  ``CHALLENGER_MODEL_VERSION`` is set, that registered
-  model is read from the registry once per run (content-verified, KAN-16) and its predictions are
-  stored next to the baselines under its own model_version. Nothing reads them for decisions yet;
-  KAN-20 scores them. A missing model, a bad bundle or a feature-spec mismatch fails the run
-  loudly (alert, exit 1) after the baselines are still written.
+* Challengers (KAN-29, shadow mode; KAN-76: LightGBM, smoother or, KAN-104, ridge bundle): when
+  ``CHALLENGER_MODEL_VERSION`` is set (KAN-104: a comma-separated list of up to 3 versions), each
+  registered model is read from the registry once per run (content-verified, KAN-16) and its
+  predictions are stored next to the baselines under its own model_version, for the horizons the
+  model itself serves. Nothing reads them for decisions; KAN-20 scores them.
+* Failure policy (KAN-104): every model is loaded and built on its own. A missing model, a bad
+  bundle, a feature-spec mismatch or a prediction error drops that model's rows for this run only,
+  is listed in ``failures`` and fails the run loudly (alert, exit 1), but the baselines and the
+  other challengers are still written in the same transaction.
+* History: observations are read back as far as the loaded models need (``model.lookback``: 24 h
+  for LightGBM/smoother, 80 h for the ridge), never less than 24 h.
 * DB down: no fallback to stale data. ``run_entrypoint`` skips the run, alerts, exits non-zero.
 * Reads only the database: no HTTP calls, so ingest outages cannot block or fake a forecast.
 
@@ -39,13 +45,16 @@ from pm25_forecast.ingest.open_meteo import CAMS_MODEL_VERSION
 from pm25_forecast.models.baselines import (
     CAMS_PASSTHROUGH_MODEL_VERSION,
     HORIZONS_H,
+    HOURLY_HORIZONS_H,
     MAX_OBSERVATION_AGE,
     PERSISTENCE_MODEL_VERSION,
     Forecast,
     valid_times,
 )
 from pm25_forecast.models.serving import (
+    DEFAULT_LOOKBACK,
     ModelLoadError,
+    RidgeModel,
     ServingModel,
     SmootherModel,
     load_registered_model,
@@ -72,6 +81,17 @@ class ForecastRow(BaseModel):
     valid_time: AwareDatetime
     pm25_pred: float
     created_at: AwareDatetime
+
+
+PredictModel = ServingModel | SmootherModel | RidgeModel
+
+
+@dataclass
+class StationInputs:
+    """What one station's models are fed: the validated observations and the shared features."""
+
+    observations: list[ObservationRow]
+    features: dict[int, dict[str, float | None]]  # horizon -> shared feature mapping
 
 
 @dataclass
@@ -121,12 +141,17 @@ def build_station_rows(
     now: datetime,
     run_id: str,
     result: PredictResult,
-    features_out: dict[str, dict[int, dict[str, float | None]]] | None = None,
+    inputs_out: dict[str, StationInputs] | None = None,
+    *,
+    lookback: timedelta = DEFAULT_LOOKBACK,
+    feature_horizons: Sequence[int] = HORIZONS_H,
 ) -> list[dict[str, Any]]:
     """Read inputs for one station and build its baseline rows; gaps are skipped and reported.
 
-    The per-horizon feature mappings are stored in ``features_out[station_id]`` when given, so a
-    challenger reuses exactly the features the baselines saw (one feature build per station).
+    ``lookback`` is how much observation history to read (the longest need of the loaded models)
+    and ``feature_horizons`` the horizons the shared features are built for. Both are stored in
+    ``inputs_out[station_id]`` when given, so every model reuses exactly the inputs the baseline
+    saw (one read and one feature build per station). Persistence is written for +1..+24 h.
     """
     rows: list[dict[str, Any]] = []
 
@@ -134,13 +159,13 @@ def build_station_rows(
         sql.SELECT_OBSERVATIONS_BETWEEN,
         {
             "station_id": station_id,
-            "since": issue_time - timedelta(hours=24),
+            "since": issue_time - max(lookback, DEFAULT_LOOKBACK),
             "until": issue_time,
             "as_of": issue_time,
         },
     ).fetchall()
     obs = _validated(ObservationRow, obs_raw, ("ts", "pm25", "ingested_at"))
-    targets = valid_times(issue_time)
+    targets = valid_times(issue_time, sorted({*HORIZONS_H, *feature_horizons}))
     cams_raw = con.execute(
         sql.SELECT_FORECAST_ROWS,
         {
@@ -166,16 +191,13 @@ def build_station_rows(
         }
         for horizon, target in targets.items()
     }
-    if features_out is not None:
-        features_out[station_id] = features
-    persistence = [
-        Forecast(h, target, float(features[h]["pm25_latest"]))
-        for h, target in targets.items()
-        if features[h]["pm25_latest"] is not None
-    ]
-    if persistence:
+    if inputs_out is not None:
+        inputs_out[station_id] = StationInputs(obs, features)
+    latest = features[min(features)]["pm25_latest"]  # the same for every target hour
+    if latest is not None:
         rows.extend(
-            _row(station_id, issue_time, run_id, PERSISTENCE_MODEL_VERSION, f) for f in persistence
+            _row(station_id, issue_time, run_id, PERSISTENCE_MODEL_VERSION, Forecast(h, vt, latest))
+            for h, vt in valid_times(issue_time, HOURLY_HORIZONS_H).items()
         )
     else:
         msg = (
@@ -187,34 +209,52 @@ def build_station_rows(
     return rows
 
 
+def _hours_label(hours: Sequence[int]) -> str:
+    """``[6, 12]`` -> ``+6,12h``; runs of consecutive hours collapse: ``+1-24h``."""
+    runs: list[list[int]] = []
+    for h in sorted(hours):
+        if runs and h == runs[-1][-1] + 1:
+            runs[-1].append(h)
+        else:
+            runs.append([h])
+    parts = [",".join(map(str, r)) if len(r) < 3 else f"{r[0]}-{r[-1]}" for r in runs]
+    return "+" + ",".join(parts) + "h"
+
+
 def build_challenger_rows(
-    challenger: ServingModel | SmootherModel,
-    station_features: dict[str, dict[int, dict[str, float | None]]],
+    challenger: PredictModel,
+    station_inputs: dict[str, StationInputs],
     issue_time: datetime,
     run_id: str,
     result: PredictResult,
     *,
     role: str = "challenger",
 ) -> list[dict[str, Any]]:
-    """All-or-nothing shadow rows: any error drops every challenger row and fails the run loudly.
+    """All-or-nothing rows for one model: any error drops all of its rows and fails the run loudly.
 
-    Baseline rows are built before this and are written whatever happens here.
+    Baseline rows and other models' rows are built separately and are unaffected. The model's own
+    horizons are used (a ridge serves +1..+24 h); ``valid_time`` is ``issue_time + h``. Missing
+    inputs are skipped, summarised in one line per station.
     """
-    targets = valid_times(issue_time)
     rows: list[dict[str, Any]] = []
     skipped: list[str] = []
     try:
-        for station_id, features in station_features.items():
-            for h in challenger.horizons:
-                pred = challenger.predict(h, features[h])
-                if pred is None:
-                    skipped.append(
-                        f"{station_id}: no inputs for {challenger.model_version} +{h}h, skipped"
+        for station_id, inputs in station_inputs.items():
+            if isinstance(challenger, RidgeModel):
+                preds = challenger.forecast(inputs.observations, station_id, issue_time)
+            else:
+                preds = {h: challenger.predict(h, inputs.features[h]) for h in challenger.horizons}
+            for h, pred in preds.items():
+                if pred is not None:
+                    forecast = Forecast(h, issue_time + timedelta(hours=h), pred)
+                    rows.append(
+                        _row(station_id, issue_time, run_id, challenger.model_version, forecast)
                     )
-                    continue
-                forecast = Forecast(h, targets[h], pred)
-                rows.append(
-                    _row(station_id, issue_time, run_id, challenger.model_version, forecast)
+            missing = [h for h, pred in preds.items() if pred is None]
+            if missing:
+                skipped.append(
+                    f"{station_id}: no inputs for {challenger.model_version} "
+                    f"{_hours_label(missing)}, skipped"
                 )
     except Exception as exc:  # a challenger must never cost the baselines
         msg = f"{role} {challenger.model_version} dropped for this run: {exc!r}"
@@ -248,8 +288,11 @@ def run(
     run_id = default_run_id(now)
     result = PredictResult(run_id=run_id, issue_time=issue_time)
 
-    challenger_version = settings.challenger_model_version
-    if challenger_version in (PERSISTENCE_MODEL_VERSION, CAMS_PASSTHROUGH_MODEL_VERSION):
+    challenger_versions = settings.challenger_model_versions
+    if any(
+        v in (PERSISTENCE_MODEL_VERSION, CAMS_PASSTHROUGH_MODEL_VERSION)
+        for v in challenger_versions
+    ):
         raise ConfigError("CHALLENGER_MODEL_VERSION must differ from the baseline model versions")
 
     with open_db(connect, settings.database_url.get_secret_value()) as con:
@@ -273,34 +316,49 @@ def run(
                 champion = load_registered_model(con, champion_version)
             except (ModelLoadError, ValueError, TypeError, KeyError, UnicodeError) as exc:
                 result.failures.append(f"champion {champion_version} not served: {exc}")
-        challenger: ServingModel | SmootherModel | None = None
-        if challenger_version == champion_version and champion is not None:
-            challenger = champion
-        elif challenger_version is not None:
+        shadow: list[PredictModel] = []
+        for challenger_version in challenger_versions:
+            if challenger_version == champion_version and champion is not None:
+                continue  # already built as the champion; one set of rows per model
             try:
-                challenger = load_registered_model(con, challenger_version)
+                shadow.append(load_registered_model(con, challenger_version))
             except (ModelLoadError, ValueError, TypeError, KeyError, UnicodeError) as exc:
                 msg = f"challenger {challenger_version} not served: {exc}"
                 logger.error(msg)
                 result.failures.append(msg)
+        loaded = [m for m in (champion, *shadow) if m is not None]
+        lookback = max(
+            [DEFAULT_LOOKBACK, *(getattr(m, "lookback", DEFAULT_LOOKBACK) for m in loaded)]
+        )
+        feature_horizons = sorted(
+            {*HORIZONS_H, *(h for m in loaded if not isinstance(m, RidgeModel) for h in m.horizons)}
+        )
         rows: list[dict[str, Any]] = []
-        station_features: dict[str, dict[int, dict[str, float | None]]] = {}
+        station_inputs: dict[str, StationInputs] = {}
         for station_id in station_ids:
             rows += build_station_rows(
-                con, station_id, issue_time, now, run_id, result, station_features
+                con,
+                station_id,
+                issue_time,
+                now,
+                run_id,
+                result,
+                station_inputs,
+                lookback=lookback,
+                feature_horizons=feature_horizons,
             )
         baseline_keys = {(r["station_id"], r["valid_time"]) for r in rows}
         champion_rows = []
         if champion is not None:
             champion_rows = build_challenger_rows(
-                champion, station_features, issue_time, run_id, result, role="champion"
+                champion, station_inputs, issue_time, run_id, result, role="champion"
             )
             champion_rows = [
                 r for r in champion_rows if (r["station_id"], r["valid_time"]) in baseline_keys
             ]
             rows += champion_rows
-        if challenger is not None and challenger is not champion:
-            rows += build_challenger_rows(challenger, station_features, issue_time, run_id, result)
+        for challenger in shadow:  # each model on its own: one failure cannot cost the others
+            rows += build_challenger_rows(challenger, station_inputs, issue_time, run_id, result)
         result.rows_built = len(rows)
         result.rows_written = sql.write_rows(con, sql.INSERT_PREDICTION, rows)
         result.rows_ignored = len(rows) - result.rows_written
@@ -343,8 +401,7 @@ def run(
         served = [PERSISTENCE_MODEL_VERSION]
         if champion is not None:
             served.append(champion.model_version)
-        if challenger is not None and challenger is not champion:
-            served.append(challenger.model_version)
+        served.extend(m.model_version for m in shadow)
         for model_version in served:
             result.per_model[model_version] = sum(r["model_version"] == model_version for r in rows)
         if not serving and decision_insert.rowcount == 1:
@@ -362,6 +419,9 @@ def run(
             "status": "failed" if result.failures else "ok",
             "issue_time": issue_time,
             "horizons_h": list(HORIZONS_H),
+            "persistence_horizons_h": list(HOURLY_HORIZONS_H),
+            "challengers": list(challenger_versions),
+            "history_hours": int(lookback / timedelta(hours=1)),
             "stations": station_ids,
             "rows_built": result.rows_built,
             "rows_written": result.rows_written,
@@ -379,7 +439,12 @@ def main() -> int:
     configure_logging()
     alert = make_alert(None, prefix="[pm25 predict]")
     try:
-        settings = get_settings()
+        try:
+            settings = get_settings()
+        except ValidationError as exc:
+            # field names only, never values (KAN-104: an invalid challenger list is a config error)
+            fields = ", ".join(sorted({".".join(map(str, e["loc"])) for e in exc.errors()}))
+            raise ConfigError(f"invalid settings: {fields}") from None
         webhook = (
             settings.alert_webhook_url.get_secret_value() if settings.alert_webhook_url else None
         )

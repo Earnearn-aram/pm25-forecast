@@ -1,9 +1,9 @@
 """Hourly scoring step (KAN-20). Run with ``python -m pm25_forecast.score``.
 
-Per run, for the baseline ``persistence-24h`` and the shadow challenger
-(``CHALLENGER_MODEL_VERSION`` when set): join forecasts whose valid_time has passed with the
-actual for that station and hour, write one row per forecast to ``scores``, then report rolling
-metrics by model and horizon.
+Per run, for the baseline ``persistence-24h`` and every shadow challenger
+(``CHALLENGER_MODEL_VERSION`` when set; a comma-separated list since KAN-104): join forecasts
+whose valid_time has passed with the actual for that station and hour, write one row per forecast
+to ``scores``, then report rolling metrics by model and horizon.
 
 * Matured = ``valid_time <= run time``. A matured forecast with no usable actual yet is *waiting*,
   counted in the summary, never an error and never filled in.
@@ -13,7 +13,9 @@ metrics by model and horizon.
 * ``--since <UTC datetime>`` re-scores from that valid_time instead (one-off repair after
   observations were corrected, KAN-74); it is idempotent and does not change the metrics window.
 * CAMS rows are not scored: CAMS is out of the plan (decided 2026-10-29).
-* Metrics over ``METRICS_WINDOW`` of valid_time, per model and horizon (+6/+12/+24 h): n, MAE,
+* Metrics over ``METRICS_WINDOW`` of valid_time, per model and horizon (any whole number of hours
+  present in the scores, KAN-104: a ridge serves +1..+24 h; +6/+12/+24 h stay the headline and are
+  always listed in the run summary, as ``{"n": 0}`` when empty): n, MAE,
   RMSE and skill vs persistence = 1 - MAE_model / MAE_persistence on matched pairs (same station,
   issue_time and valid_time). Positive skill = better than persistence. ``n`` counts all of the
   model's scores; ``n_matched`` the pairs behind the skill. A model or horizon with no scores is
@@ -160,6 +162,12 @@ def score_rows(
     return rows, waiting
 
 
+def reported_horizons(*metrics: dict[str, dict[int, Metric]]) -> list[int]:
+    """The headline horizons plus every other horizon that has metrics, ascending."""
+    present = {h for m in metrics for per_h in m.values() for h in per_h}
+    return sorted({*HORIZONS_H, *present})
+
+
 def _mae_rmse(errors: Sequence[float]) -> tuple[float, float]:
     return sum(errors) / len(errors), math.sqrt(sum(e * e for e in errors) / len(errors))
 
@@ -167,17 +175,22 @@ def _mae_rmse(errors: Sequence[float]) -> tuple[float, float]:
 def rolling_metrics(
     scores: dict[str, Sequence[ScoreRow]],
     reference: str = REFERENCE_MODEL_VERSION,
-    horizons: Sequence[int] = HORIZONS_H,
+    horizons: Sequence[int] | None = None,
 ) -> dict[str, dict[int, Metric]]:
-    """Per model and horizon: n, MAE, RMSE; skill vs ``reference`` on matched pairs only."""
+    """Per model and horizon: n, MAE, RMSE; skill vs ``reference`` on matched pairs only.
+
+    ``horizons`` None (default, KAN-104) reports every whole-hour horizon found in the scores;
+    pass a sequence to restrict to those hours.
+    """
     by_model: dict[str, dict[int, dict[Key, float]]] = {}
     for model_version, rows in scores.items():
-        per_h: dict[int, dict[Key, float]] = {h: {} for h in horizons}
+        per_h: dict[int, dict[Key, float]] = {} if horizons is None else {h: {} for h in horizons}
         for r in rows:
             h = horizon_h(r.issue_time, r.valid_time)
-            if h in per_h:
-                key = (r.station_id, sql.require_utc(r.issue_time), sql.require_utc(r.valid_time))
-                per_h[int(h)][key] = r.abs_error
+            if h != int(h) or h <= 0 or (horizons is not None and h not in per_h):
+                continue  # not a whole forecast hour (or not asked for)
+            key = (r.station_id, sql.require_utc(r.issue_time), sql.require_utc(r.valid_time))
+            per_h.setdefault(int(h), {})[key] = r.abs_error
         by_model[model_version] = per_h
 
     out: dict[str, dict[int, Metric]] = {}
@@ -218,9 +231,7 @@ def run(
     if settings.database_url is None:
         raise ConfigError("DATABASE_URL is not set")
     models = [REFERENCE_MODEL_VERSION]
-    challenger = settings.challenger_model_version
-    if challenger is not None and challenger != REFERENCE_MODEL_VERSION:
-        models.append(challenger)
+    models.extend(v for v in settings.challenger_model_versions if v not in models)
 
     result = ScoreResult(run_id=default_run_id(now), scored_at=now)
     scores: dict[str, list[ScoreRow]] = {}
@@ -342,7 +353,7 @@ def run(
                     f"+{h}h": result.metrics[m][h].as_dict()
                     if h in result.metrics.get(m, {})
                     else {"n": 0}
-                    for h in HORIZONS_H
+                    for h in reported_horizons(result.metrics)
                 }
                 for m in models
             },
@@ -356,7 +367,7 @@ def run(
                     f"+{h}h": result.served_metrics[m][h].as_dict()
                     if h in result.served_metrics.get(m, {})
                     else {"n": 0}
-                    for h in HORIZONS_H
+                    for h in reported_horizons(result.served_metrics)
                 }
                 for m in result.served_metrics
             },
@@ -392,7 +403,12 @@ def main(argv: Sequence[str] = ()) -> int:
     configure_logging()
     alert = make_alert(None, prefix="[pm25 score]")
     try:
-        settings = get_settings()
+        try:
+            settings = get_settings()
+        except ValidationError as exc:
+            # field names only, never values (KAN-104: an invalid challenger list is a config error)
+            fields = ", ".join(sorted({".".join(map(str, e["loc"])) for e in exc.errors()}))
+            raise ConfigError(f"invalid settings: {fields}") from None
         webhook = (
             settings.alert_webhook_url.get_secret_value() if settings.alert_webhook_url else None
         )

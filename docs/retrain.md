@@ -35,7 +35,8 @@ also supports on-demand runs. Both currently stop at the KAN-126 safety block de
    the current UTC hour. `--holdout-days` only accepts the approved value 28.
 3. Register the candidate (`publish_model`). Registering never changes production.
 4. On the held-out window, score the candidate, the current champion, the current challenger
-   (`CHALLENGER_MODEL_VERSION`, if set) and `persistence-24h` on identical
+   (`CHALLENGER_MODEL_VERSION`, if set; with a comma-separated list since KAN-104, the first
+   version listed) and `persistence-24h` on identical
    (station, issue_time, valid_time) pairs: MAE and RMSE at +6, +12 and +24 h.
 5. `decide()` in `retrain.py` returns promote or keep. The `RUN_SUMMARY` log line holds the full
    table and the decision.
@@ -119,13 +120,25 @@ the live champion (the pointer was moved by hand outside the log; use `promote <
 A second `rollback` goes back to the version you just left, so use `promote <version>` to pick an
 older one. Automatic promotion is currently blocked.
 
+## Several challengers (KAN-104)
+
+`CHALLENGER_MODEL_VERSION` may list up to 3 registered versions, comma-separated (see
+`docs/operations.md`). For retraining this means: the drift-triggered gate fires on an alert for
+any of them or the champion; registry prune keeps all of them; the challenger comparison in the
+RUN_SUMMARY uses only the first version listed and stays informational (it never enters the
+decision set, and a ridge or smoother there is reported as skipped as before). The other
+challengers are judged by Score, not by retrain. A bad entry (duplicate, empty, more than 3) is a
+configuration error. Hourly Predict writes every healthy challenger even when another one fails;
+the failed one fails the run (exit 1) and alerts.
+
 ## Drift-triggered retrain
 
 `python -m pm25_forecast.retrain --if-drift` currently receives the same KAN-126 safety block as
 normal retraining and does not query drift or connect to the database. After trusted boundary
 provenance is implemented and reviewed, it is intended to skip without training unless the latest
 drift run (`drift.latest_drift_alert`, at most 36 h old) has an alert for
-`CHALLENGER_MODEL_VERSION` or the production champion (both are checked).
+any version in `CHALLENGER_MODEL_VERSION` (a list of up to 3 since KAN-104) or the production
+champion (all are checked).
 
 Cooldown: after the safety block is lifted, it also skips if a retrain decision (any `model_events` row by actor `retrain` or `auto`)
 was logged within the last 7 days (`RETRAIN_MIN_GAP`), so persistent drift, a "keep" result or a
@@ -141,7 +154,7 @@ python -m pm25_forecast.registry_cli prune --keep 4            # dry run: prints
 python -m pm25_forecast.registry_cli prune --keep 4 --confirm  # deletes
 ```
 
-Always kept: the production champion, `CHALLENGER_MODEL_VERSION`, the rollback target (the
+Always kept: the production champion, every version in `CHALLENGER_MODEL_VERSION`, the rollback target (the
 `previous_version` of the latest logged change), every model with predictions
 issued in the last 30 days, and the `--keep` newest models by registration time. The rest are
 deleted from `models` (and their cached drift reference); drift check history and `model_events`

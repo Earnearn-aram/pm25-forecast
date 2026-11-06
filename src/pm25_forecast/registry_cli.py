@@ -10,8 +10,8 @@
 ``promote`` and ``rollback`` write one ``model_events`` row in the same transaction as the pointer
 change (KAN-24). ``rollback`` moves the pointer back to the previous champion recorded there and
 refuses if none is recorded or that model cannot be served. ``prune`` deletes old ``models`` rows
-(dry run unless ``--confirm``), always keeping the champion, ``CHALLENGER_MODEL_VERSION``, models
-with predictions in the last 30 days, and the newest ``--keep``.
+(dry run unless ``--confirm``), always keeping the champion, every ``CHALLENGER_MODEL_VERSION``
+entry, models with predictions in the last 30 days, and the newest ``--keep``.
 
 ``register`` publishes an immutable version and reads it back (KAN-16); it never moves the
 champion pointer. ``check`` loads a registered version exactly as the hourly predict step would
@@ -110,7 +110,7 @@ def run(
                 return 0
             if args.command == "prune":
                 plan = registry.plan_prune(
-                    con, args.keep, challenger=get_settings().challenger_model_version
+                    con, args.keep, challenger=get_settings().challenger_model_versions
                 )
                 for line in prune_report(plan):
                     out(line)

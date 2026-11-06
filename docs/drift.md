@@ -39,8 +39,8 @@ An empty bin counts as a 0.0001 share so the logarithm is defined. Non-finite va
 
 ## What is compared
 
-- Models: the shadow challenger (`CHALLENGER_MODEL_VERSION`) and the production champion, if one
-  is registered (checked once if they are the same).
+- Models: every shadow challenger (`CHALLENGER_MODEL_VERSION`, a list of up to 3 since KAN-104)
+  and the production champion, if one is registered (checked once if they are the same).
 - Reference: the rows of the model manifest's `training_window` from the same season as the
   recent window: day of the year within 30 days of the recent window's end date, across all
   training years (wrapping around the year end; 29 Feb counts as 28 Feb). This keeps a

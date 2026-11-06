@@ -1,9 +1,10 @@
 """Daily drift check (KAN-22). Run with ``python -m pm25_forecast.drift``.
 
-For the shadow challenger (``CHALLENGER_MODEL_VERSION``) and the production champion, if one is
-registered: compare the last ``RECENT_WINDOW`` of hourly model inputs with the inputs of the
-model's ``training_window`` (from its manifest) using the Population Stability Index (PSI), per
-feature in ``FEATURE_NAMES``, plus the shift of the observed PM2.5 itself (``target_pm25``).
+For each shadow challenger (``CHALLENGER_MODEL_VERSION``, a list since KAN-104) and the production
+champion, if one is registered: compare the last ``RECENT_WINDOW`` of hourly model inputs with
+the inputs of the model's ``training_window`` (from its manifest) using the Population Stability
+Index (PSI), per feature in ``FEATURE_NAMES``, plus the shift of the observed PM2.5 itself
+(``target_pm25``).
 
 * Both sides are rebuilt from the database (stored observations and CAMS vintages) through the
   shared ``build_features`` module, so training and serving feature logic is not duplicated. One
@@ -744,8 +745,7 @@ def run(
     result = DriftResult(run_id=default_run_id(now), checked_at=day)
     with open_db(connect, settings.database_url.get_secret_value()) as con:
         versions: list[str] = []
-        if settings.challenger_model_version:
-            versions.append(settings.challenger_model_version)
+        versions.extend(settings.challenger_model_versions)
         champion = con.execute(SELECT_CHAMPION_VERSION, {}).fetchone()
         if champion and champion[0] not in versions:
             versions.append(champion[0])

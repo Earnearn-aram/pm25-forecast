@@ -68,7 +68,7 @@ def run(
             cursor = con.execute(sql.PURGE_OLD_PREDICTIONS, {})
             result.predictions_deleted = int(cursor.rowcount)
             logger.info("deleted %d old prediction rows", result.predictions_deleted)
-        plan = plan_prune(con, PRUNE_KEEP, challenger=settings.challenger_model_version, now=now)
+        plan = plan_prune(con, PRUNE_KEEP, challenger=settings.challenger_model_versions, now=now)
         result.prune_keep = plan.keep
         result.prune_would_delete = plan.delete  # dry run only: nothing is deleted here
     for version in plan.delete:

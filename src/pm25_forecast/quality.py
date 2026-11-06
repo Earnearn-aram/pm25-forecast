@@ -374,9 +374,7 @@ def run(
         raise ConfigError("STATION_LOCATIONS is not set")
 
     models = [PERSISTENCE_MODEL_VERSION, CAMS_MODEL_VERSION]
-    challenger = settings.challenger_model_version
-    if challenger is not None and challenger not in models:
-        models.append(challenger)
+    models.extend(v for v in settings.challenger_model_versions if v not in models)
     checked_at = floor_hour(now)
     result = QualityResult(run_id=default_run_id(now), checked_at=checked_at)
 

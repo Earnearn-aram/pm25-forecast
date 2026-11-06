@@ -35,7 +35,7 @@ from pm25_forecast.drift import DATA_SOURCE_BREAK, PSI_ALERT
 from pm25_forecast.ingest.open_meteo import CAMS_MODEL_VERSION
 from pm25_forecast.models.baselines import HORIZONS_H, PERSISTENCE_MODEL_VERSION
 from pm25_forecast.monitoring.logs import configure_logging
-from pm25_forecast.score import ScoreRow, rolling_metrics
+from pm25_forecast.score import ScoreRow, reported_horizons, rolling_metrics
 from pm25_forecast.settings import Settings, get_settings
 from pm25_forecast.storage import db, sql
 
@@ -356,8 +356,10 @@ def _scores(rd: Reader, challenger: str | None, now: datetime) -> dict[str, Any]
         by_model[model] = _rows(ScoreRow, raw)
     metrics = rolling_metrics(by_model)
     out: dict[str, Any] = {"persistence": {}, "challenger": {}, "first_scores_from": None}
+    # The headline +6/+12/+24 h plus any other scored horizon (KAN-104: the ridge scores +1..+24 h);
+    # the page draws the headline ones only.
     for key, model in (("persistence", PERSISTENCE_MODEL_VERSION), ("challenger", challenger)):
-        for h in HORIZONS_H:
+        for h in reported_horizons(metrics):
             m = metrics.get(model or "", {}).get(h)
             out[key][str(h)] = (
                 None
@@ -418,12 +420,11 @@ def _chart(rd: Reader, obs: list[ObsRow], challenger: str | None, now: datetime)
         },
     )
     future_rows = _rows(PredRow, future_raw)
+    # Headline horizons only: persistence is stored for +1..+24 (KAN-104), the chart draws 6/12/24.
+    headline = {timedelta(hours=h) for h in HORIZONS_H}
+    future_rows = [p for p in future_rows if p.valid_time - p.issue_time in headline]
     latest_issue: dict[tuple[str, str], datetime] = {}
     for prediction in future_rows:
-        if prediction.valid_time - prediction.issue_time not in [
-            timedelta(hours=h) for h in HORIZONS_H
-        ]:
-            continue
         key = (prediction.station_id, prediction.model_version)
         latest_issue[key] = max(latest_issue.get(key, prediction.issue_time), prediction.issue_time)
     future: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -2357,9 +2358,9 @@ def run(
     if settings.database_url is None:
         raise ConfigError("DATABASE_URL is not set")
     now = sql.require_utc(clock())
-    data = collect(
-        connect, settings.database_url.get_secret_value(), settings.challenger_model_version, now
-    )
+    # KAN-104: with several challengers configured the dashboard shows the first listed one.
+    primary_challenger = next(iter(settings.challenger_model_versions), None)
+    data = collect(connect, settings.database_url.get_secret_value(), primary_challenger, now)
     if all(data["sections"].get(name) == "unavailable" for name in SECTIONS):
         logger.error("dashboard: every database section failed; nothing written")
         return EXIT_FAILED
