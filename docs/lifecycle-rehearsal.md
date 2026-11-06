@@ -2,8 +2,8 @@
 
 This rehearsal connects the registry, real Predict runner, immutable serving ledger, Score runner,
 and dashboard chart using synthetic models and observations. It is an integration check of the code
-path, not evidence that the proposed promotion policy is approved or that a production champion is
-healthy.
+path, not evidence that a production champion is healthy. Its recommendation events are synthetic
+fixtures, not evidence that the locked-holdout boundary has been verified.
 
 ## Run it
 
@@ -30,6 +30,8 @@ inside the test. Removing the dedicated database after the test is part of clean
 ## What the rehearsal verifies
 
 - Register two immutable synthetic bundles and verify each through the same loader used by Predict.
+- Refuse promotion without a recommendation, then use synthetic recommendation records to exercise
+  the owner-approved promotion gate without claiming a real evaluation took place.
 - Refuse a rollback when there is no previous champion. Once A is champion, reject an invalid
   bundle without changing the pointer or adding a promotion event.
 - Run Predict with A, promote B during that already-selected issue hour, and retry. The frozen
@@ -49,7 +51,7 @@ evidence of a production rollout; it only verifies the local fixture path descri
 
 ## Remaining KAN-122 work
 
-Before claiming the full promotion rehearsal complete, KAN-120's owner-approved eligibility policy,
-verified training/evaluation provenance, and an approved candidate must exist. A controlled staging
+Before claiming the full promotion rehearsal complete, verified training/evaluation provenance and
+an approved candidate must exist. A controlled staging
 environment and owner review are still required for a real promotion and rollback. Do not set
 `AUTO_PROMOTE=true` or run this against production as part of this fixture rehearsal.

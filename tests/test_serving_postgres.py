@@ -221,6 +221,26 @@ def test_local_lifecycle_rehearsal_register_promote_predict_score_and_rollback(t
         )
         return code, "\n".join(output)
 
+    def fixture_recommendation(con, version, previous_version):
+        # Synthetic evidence for exercising the promotion interface; it is not a real evaluation.
+        registry.record_event(
+            con,
+            "recommend",
+            version,
+            previous_version=previous_version,
+            actor="retrain",
+            metrics={
+                "station_policy": {
+                    "passed": True,
+                    "locked_holdout_boundary_verified": True,
+                    "candidate_training_window_verified": True,
+                    "incumbent_training_window_verified": True,
+                    "evaluation_start": "2026-01-01T00:00:00+00:00",
+                    "evaluation_end": "2026-01-29T00:00:00+00:00",
+                }
+            },
+        )
+
     with _connect_local_test_db(dsn, autocommit=True) as setup:
         setup.execute("SET client_encoding TO 'UTF8'")
         setup.execute(f'CREATE SCHEMA "{schema}"')
@@ -254,6 +274,10 @@ def test_local_lifecycle_rehearsal_register_promote_predict_score_and_rollback(t
                 assert code == 0 and "champion unchanged" in output
                 assert cli("check", version)[0] == 0
 
+            assert cli("promote", versions[0], "--confirm")[0] == registry_cli.EXIT_FAILED
+            assert setup.execute("SELECT count(*) FROM model_champion").fetchone() == (0,)
+            assert setup.execute("SELECT count(*) FROM model_events").fetchone() == (0,)
+            fixture_recommendation(setup, versions[0], None)
             assert cli("promote", versions[0], "--confirm")[0] == 0
             # Invalid registered bytes cannot replace the current champion or append an event.
             bad_artifact = b'{"format":1,"horizon_hours":24,"booster":"not-a-booster"}'
@@ -268,12 +292,13 @@ def test_local_lifecycle_rehearsal_register_promote_predict_score_and_rollback(t
                     json.dumps(bad_manifest),
                 ),
             )
+            fixture_recommendation(setup, "rehearsal-invalid", versions[0])
             code, output = cli("promote", "rehearsal-invalid", "--confirm")
             assert code == registry_cli.EXIT_FAILED and "failed" in output
             assert setup.execute(
                 "SELECT model_version FROM model_champion WHERE slot = 'production'"
             ).fetchone() == (versions[0],)
-            assert setup.execute("SELECT count(*) FROM model_events").fetchone() == (1,)
+            assert setup.execute("SELECT count(*) FROM model_events").fetchone() == (3,)
 
             for index, issue in enumerate(issues):
                 # Provide only historical input at the issue boundary; all later outcome rows
@@ -304,6 +329,7 @@ def test_local_lifecycle_rehearsal_register_promote_predict_score_and_rollback(t
                 clock=lambda: issues[0] + timedelta(minutes=10),
             )
             assert not first.failures
+            fixture_recommendation(setup, versions[1], versions[0])
             assert cli("promote", versions[1], "--confirm")[0] == 0
             same_hour_retry = predict.run(
                 Settings(
@@ -364,7 +390,10 @@ def test_local_lifecycle_rehearsal_register_promote_predict_score_and_rollback(t
             assert setup.execute(
                 "SELECT action, model_version, previous_version FROM model_events ORDER BY id"
             ).fetchall() == [
+                ("recommend", versions[0], None),
                 ("promote", versions[0], None),
+                ("recommend", "rehearsal-invalid", versions[0]),
+                ("recommend", versions[1], versions[0]),
                 ("promote", versions[1], versions[0]),
                 ("rollback", versions[0], versions[1]),
             ]
