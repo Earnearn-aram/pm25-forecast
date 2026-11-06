@@ -13,7 +13,7 @@ Timestamps are UTC. "Last 24 h" means the 24 whole hours before the current hour
 | `freshness` | `air4thai` | Age of the newest usable observation, per station | > 3 h | > 6 h, or none in the last 7 days |
 | `freshness` | `openaq` | Same; only stations that have OpenAQ data. OpenAQ is a gap filler, so stale is normal | > 24 h | never |
 | `freshness` | `cams_global` | Age of the newest CAMS vintage (`issue_time`), per expected station | > 24 h | > 48 h (none ever: warn) |
-| `freshness` | `persistence-24h` and the challenger (`CHALLENGER_MODEL_VERSION`) | Age of the newest forecast `issue_time`, per expected station | > 3 h | > 6 h (none ever: warn, e.g. a new challenger) |
+| `freshness` | `persistence-24h` and every challenger (`CHALLENGER_MODEL_VERSION`, a list since KAN-104) | Age of the newest forecast `issue_time`, per expected station | > 3 h | > 6 h (none ever: warn, e.g. a new challenger) |
 | `missing_hours` | `air4thai` | Hours in the last 24 without a usable reading, per station | >= 3 | never |
 | `out_of_range` | any observation source | Readings in the last 24 h below 0, above 1000, or non-finite | never | any (> 0) |
 | `expected_station` | `air4thai` | A station in `STATION_LOCATIONS` with fewer than 1 row in 24 h | < 1 row | never |

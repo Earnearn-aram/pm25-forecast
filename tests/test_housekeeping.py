@@ -150,3 +150,12 @@ def test_main_exit_codes(monkeypatch):
 
     monkeypatch.setattr(housekeeping, "run", crash)
     assert housekeeping.main([]) == 1
+
+
+def test_every_listed_challenger_is_protected_from_the_prune_plan(fake):
+    """KAN-104: CHALLENGER_MODEL_VERSION may list several versions; all are kept."""
+    result = housekeeping.run(
+        settings(challenger_model_version="m2, m3"), connect=fake, clock=lambda: NOW
+    )
+    assert result.prune_would_delete == []
+    assert result.prune_keep["m2"] == "challenger" and result.prune_keep["m3"] == "challenger"

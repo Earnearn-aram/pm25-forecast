@@ -1131,3 +1131,11 @@ def test_stale_boundary_180_fresh_181_stale_and_hours_round():
     assert "No forecast:" in stale and "for 3 h" in stale
     late = _chart_html(_chart_station(latest_at=(NOW - timedelta(minutes=239)).isoformat()))
     assert "for 4 h" in late
+
+
+def test_several_challengers_show_the_first_one_listed(tmp_path):
+    """KAN-104: the dashboard stays single-challenger; the first version in the list is shown."""
+    fake = Fake()
+    seed(fake)
+    assert build(fake, tmp_path, challenger_model_version=f"{CHALLENGER}, other-model") == 0
+    assert load(tmp_path)["challenger_version"] == CHALLENGER

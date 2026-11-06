@@ -267,8 +267,23 @@ produced by the shared feature builder. The job builds features as of the floore
 live inputs are always at least 1 h old; a manifest declaring `assumed_reporting_lag_hours` below 1
 is refused as train/serve skew. This currently refuses the KAN-15 `kan15-retrospective-24h` model
 (trained at 0 h lag); it must be retrained at a 1 h lag before it can be the challenger. Challenger
-rows are all-or-nothing per run. A missing model, a bad bundle or a feature mismatch fails
-the run loudly (alert, exit 1) after the baselines are written. Unset = no challenger.
+rows are all-or-nothing per model and run. A missing model, a bad bundle or a feature mismatch
+fails the run loudly (alert, exit 1) after the baselines are written. Unset = no challenger.
+
+Several challengers (KAN-104): `CHALLENGER_MODEL_VERSION` accepts a comma-separated list, for
+example `ridge-pool-raw-chg-v1,kan32-lgbm`. Rules, checked when the settings load (an invalid
+value is a configuration error, exit 2, in Predict and Score): at most 3 versions; entries are
+trimmed; an empty entry or a duplicate is rejected; no entry may be a baseline version
+(`persistence-24h`, `cams`). One value behaves exactly as before; the list order is kept.
+Each challenger is stored under its own `model_version` and scored side by side with
+`persistence-24h`. Failure policy: every model is loaded and built on its own. A challenger that
+cannot be loaded or errors while predicting loses its rows for that run only, is named in the run
+summary `failures` and in the alert, and the run exits 1, but the baselines and the other
+challengers are still written (one transaction, so an error in the write itself still rolls back
+everything). Which readers use the list: Predict and Score (all), Drift and Quality (all), registry
+prune and Housekeeping (all are kept), the drift-triggered retrain gate (an alert on any), the
+Dashboard and the retrain challenger comparison (the first version listed only; both are
+informational). The daily live comparison and the promotion rule are KAN-110.
 
 Owner commands (`DATABASE_URL` from the environment or `.env`, never printed):
 
@@ -285,7 +300,8 @@ eligible retrain recommendation for that same live champion, and refuses a versi
 loader rejects. Predict records the serving choice per issue hour (KAN-119); automatic model
 promotion remains a separate workflow.
 
-Ridge challenger (KAN-100, stage 1: servable, not yet wired into Predict). The KAN-84 best variant
+Ridge challenger (KAN-100 stage 1: servable; stage 2, KAN-104: wired into Predict and Score, see
+below). The KAN-84 best variant
 (`ridge-pool-raw-chg`: pooled ridge, raw target, prediction = latest reading + predicted change,
 `fs_v2_core`) is trained for every hour +1..+24 h (direct strategy, one small ridge per horizon;
 `--horizons` picks a subset). Training reuses `experiments.linear_models.fit_models` (the fit the
@@ -313,26 +329,30 @@ uv run python -m pm25_forecast.registry_cli register \
 uv run python -m pm25_forecast.registry_cli check ridge-pool-raw-chg-v1
 ```
 
-Stage 2 (Predict/Score/dashboard) with 24 horizons per model and station, 5 stations: 120 rows per
-model per run, 2,880 per day, about 260 k in the 90-day window per model. Needed changes:
+Stage 2 (KAN-104: Predict and Score done; the Dashboard still draws +6/+12/+24 h only). With 24
+horizons per model and station, 5 stations: 120 rows per model per run, 2,880 per day, about 260 k
+in the 90-day window per model.
 
-- `predict.py`: read 80 h of observations (now 24 h); stop keying features by `HORIZONS_H`
-  (`features[h]` would raise KeyError for other hours): for a `RidgeModel` call
-  `challenger.forecast(observations, station, issue_time)` and store `valid_time = issue + h`.
-  Summarise "no inputs" skips per station (up to 120 lines per run otherwise). To judge the ridge
-  against persistence at hours other than 6/12/24, persistence rows for +1..+24 must be written too.
-- `score.py`: scoring itself is horizon-agnostic (horizon = `valid_time - issue_time`; there is no
-  horizon column in `predictions`/`scores`). `rolling_metrics` defaults to `HORIZONS_H` and the run
-  summary and `scores.json` export loop over `HORIZONS_H`; both need the 1..24 list (and a
-  persistence reference at each hour). `scores` is never purged.
+- `predict.py` reads as much observation history as the loaded models need (`model.lookback`: 24 h
+  for LightGBM and the smoother, 80 h for the ridge; never less than 24 h), builds the shared
+  features per horizon the model serves (no longer keyed by `HORIZONS_H`), and for a `RidgeModel`
+  calls `forecast(observations, station, issue_time)`, storing `valid_time = issue_time + h`.
+  "No inputs" skips are one line per station and model (for example `+1-24h`).
+- Persistence is written for every hour +1..+24 (`HOURLY_HORIZONS_H`) so skill can be computed at
+  each hour the ridge forecasts. +6/+12/+24 h stay the headline horizons in the summaries, the
+  dashboard and the serving ledger.
+- `score.py` is horizon-agnostic (horizon = `valid_time - issue_time`): `rolling_metrics` reports
+  every whole-hour horizon present, and the run summary and the dashboard `scores` section list the
+  headline horizons plus any other scored one.
 - `quality.py`: freshness is the newest `issue_time` per model and station, so 24 horizons change
-  nothing and the 3 h warn / 6 h fail limits stay. Optional: a check of rows per run
-  (stations x served horizons).
-- `housekeeping.py`: the 90-day purge covers `predictions` only; volume is about 8 times a 3-horizon
-  model. Check the Neon storage budget before enabling; consider purging `scores` too.
-- `dashboard.py`: draws +6/+12/+24 only (`HORIZONS_H` in several places, the skill-by-horizon
-  card, future-line selection `valid_time - issue_time in HORIZONS_H`): separate ticket to draw
-  the hourly line.
+  nothing and the 3 h warn / 6 h fail limits stay.
+- `housekeeping.py`: the 90-day purge covers `predictions` of every model (not `cams_global`), so
+  all challengers are purged at the larger volume. The `scores` table is never purged (about one
+  row per forecast, so the same order of volume); adding a retention rule for it is a policy
+  decision left to the owner. Check the Neon storage budget before configuring more than one
+  hourly-horizon model.
+- `dashboard.py`: draws +6/+12/+24 only and the first listed challenger only; a separate ticket
+  draws the hourly line and several challengers.
 
 Layout: `src/pm25_forecast/{ingest,features,models,storage,monitoring}` and `settings.py`
 (environment-driven configuration).

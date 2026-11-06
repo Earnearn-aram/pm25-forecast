@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -345,13 +345,18 @@ class PrunePlan:
 
 
 def plan_prune(
-    con: Any, keep_newest: int, *, challenger: str | None = None, now: datetime | None = None
+    con: Any,
+    keep_newest: int,
+    *,
+    challenger: str | Sequence[str] | None = None,
+    now: datetime | None = None,
 ) -> PrunePlan:
     """Which ``models`` rows a prune would delete. Nothing is changed.
 
-    Kept: the production champion, ``challenger``, the rollback target (the previous champion of the
-    latest logged change), every model with predictions issued in the last ``PRUNE_REFERENCE_DAYS``
-    days, and the ``keep_newest`` newest by ``created_at``.
+    Kept: the production champion, every ``challenger`` (one version or, KAN-104, a list), the
+    rollback target (the previous champion of the latest logged change), every model with
+    predictions issued in the last ``PRUNE_REFERENCE_DAYS`` days, and the ``keep_newest`` newest
+    by ``created_at``.
     """
     if keep_newest < 0:
         raise ValueError("--keep must not be negative")
@@ -362,8 +367,9 @@ def plan_prune(
     champion = con.execute(SELECT_CHAMPION, {}).fetchone()
     if champion is not None:
         keep[champion[0]] = "production champion"
-    if challenger:
-        keep.setdefault(challenger, "challenger")
+    for version in (challenger,) if isinstance(challenger, str) else (challenger or ()):
+        if version:
+            keep.setdefault(version, "challenger")
     last_change = con.execute(SELECT_LAST_CHANGE, {}).fetchone()
     if last_change is not None and last_change[1]:
         keep.setdefault(last_change[1], "rollback target (previous champion)")

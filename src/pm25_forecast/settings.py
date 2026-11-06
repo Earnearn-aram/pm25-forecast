@@ -11,6 +11,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # drift reference. Lift it with DRIFT_KAN74_CUTOFF= (blank) once KAN-74 is repaired.
 KAN74_BUG_CUTOFF = datetime(2026, 10, 26, 0, 0, tzinfo=UTC)
 
+# KAN-104: CHALLENGER_MODEL_VERSION may list several shadow challengers, comma-separated.
+MAX_CHALLENGERS = 3
+
+
+def parse_challenger_versions(raw: str | None) -> tuple[str, ...]:
+    """Split a comma-separated challenger list: trimmed, in order, at most ``MAX_CHALLENGERS``.
+
+    Blank or unset gives ``()``. An empty entry (``a,,b``), a duplicate or more than the cap is an
+    error (``ValueError``; the message names the problem, not the values). A single value gives
+    a one-item tuple, exactly the pre-KAN-104 behaviour.
+    """
+    if raw is None or not raw.strip():
+        return ()
+    versions = tuple(part.strip() for part in raw.split(","))
+    if any(not v for v in versions):
+        raise ValueError("CHALLENGER_MODEL_VERSION has an empty entry")
+    if len(set(versions)) != len(versions):
+        raise ValueError("CHALLENGER_MODEL_VERSION lists a model version twice")
+    if len(versions) > MAX_CHALLENGERS:
+        raise ValueError(f"CHALLENGER_MODEL_VERSION lists more than {MAX_CHALLENGERS} versions")
+    return versions
+
 
 class Settings(BaseSettings):
     """Runtime configuration. Every field is optional so the package imports without secrets."""
@@ -33,8 +55,9 @@ class Settings(BaseSettings):
 
     # Optional PEM file with extra CA certificates for Air4Thai TLS (KAN-35); unset = defaults.
     air4thai_ca_bundle: Path | None = None
-    # Registered model version scored in shadow mode by the hourly predict step (KAN-29). Unset =
-    # no challenger. Not secret: a registry label such as `kan15-retrospective-24h`.
+    # Registered model version(s) scored in shadow mode by the hourly predict step (KAN-29). Unset =
+    # no challenger. KAN-104: a comma-separated list of up to 3 versions (see
+    # `challenger_model_versions`). Not secret: registry labels such as `kan15-retrospective-24h`.
     challenger_model_version: str | None = None
 
     # KAN-23: weekly retrain may move the production champion only when this is true. Default off;
@@ -75,14 +98,19 @@ class Settings(BaseSettings):
     @classmethod
     def _blank_challenger_is_unset(cls, v: object) -> object:
         if isinstance(v, str):
-            v = v.strip()
-            return v or None
+            versions = parse_challenger_versions(v)  # validates the list (KAN-104)
+            return ",".join(versions) or None  # canonical: trimmed, single comma separators
         return v
 
     @field_validator("air4thai_ca_bundle", mode="before")
     @classmethod
     def _blank_bundle_is_unset(cls, v: object) -> object:
         return None if isinstance(v, str) and not v.strip() else v
+
+    @property
+    def challenger_model_versions(self) -> tuple[str, ...]:
+        """The configured shadow challengers in the order listed; empty when none (KAN-104)."""
+        return parse_challenger_versions(self.challenger_model_version)
 
     @property
     def station_id_list(self) -> list[str]:

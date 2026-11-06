@@ -47,6 +47,9 @@ MIN_SERVING_LAG_H = 1
 MAX_MISSING_SHARE = 0.25  # train_mean: more missing features than this gives no forecast
 RIDGE_LATEST_LAGS = ("pm25_lag_1h", "pm25_lag_2h", "pm25_lag_3h")  # newest of these = "latest"
 RIDGE_LOOKBACK = timedelta(hours=80)  # fs_v2_* read at most 72 h before the origin
+# KAN-104: observation history the hourly job must load for a model (each model's ``lookback``).
+# LightGBM and smoother features read at most the 24 h before the issue hour.
+DEFAULT_LOOKBACK = timedelta(hours=24)
 HOUR = timedelta(hours=1)
 
 
@@ -59,6 +62,7 @@ class ServingModel:
     model_version: str
     feature_list: tuple[str, ...]
     boosters: Mapping[int, lgb.Booster]  # horizon hours -> booster
+    lookback: timedelta = DEFAULT_LOOKBACK  # observation history the features read
 
     @property
     def horizons(self) -> tuple[int, ...]:
@@ -88,6 +92,7 @@ class SmootherModel:
     beta: float
     served_horizons: tuple[int, ...]
     feature_list: tuple[str, ...] = SMOOTHER_FEATURE_NAMES
+    lookback: timedelta = DEFAULT_LOOKBACK  # observation history the features read
 
     @property
     def horizons(self) -> tuple[int, ...]:
@@ -122,6 +127,7 @@ class RidgeModel:
 
     model_version: str
     spec: RidgeSpec
+    lookback: timedelta = RIDGE_LOOKBACK  # observation history the features read
 
     @property
     def feature_list(self) -> tuple[str, ...]:
