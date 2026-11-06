@@ -33,7 +33,13 @@ def _validated_test_dsn() -> str:
     return dsn
 
 
-def _connect_local_test_db(dsn: str, *, options: str | None = None, autocommit: bool = False):
+def _connect_local_test_db(
+    dsn: str,
+    *,
+    options: str | None = None,
+    autocommit: bool = False,
+    verify_socket_directory: bool = True,
+):
     """Connect only through a local socket, ignoring ambient libpq route settings."""
     params = psycopg.conninfo.conninfo_to_dict(dsn)
     saved = {key: value for key, value in os.environ.items() if key.startswith("PG")}
@@ -45,17 +51,20 @@ def _connect_local_test_db(dsn: str, *, options: str | None = None, autocommit: 
         os.environ.update(saved)
     try:
         actual = con.execute(
-            "SELECT current_database(), current_user, inet_server_addr(), "
-            "current_setting('unix_socket_directories')"
+            "SELECT current_database(), current_user, inet_server_addr()"
         ).fetchone()
-        socket_dirs = {str(Path(item).resolve()) for item in actual[3].split(",")}
         requested_socket = str(Path(params["host"]).resolve())
-        if (
-            actual[:3] != (params["dbname"], params["user"], None)
-            or requested_socket not in socket_dirs
-            or con.info.host != params["host"]
-        ):
+        if actual != (params["dbname"], params["user"], None) or con.info.host != params["host"]:
             raise ValueError("connected PostgreSQL server does not match the local test target")
+        if verify_socket_directory:
+            directories = con.execute(
+                "SELECT current_setting('unix_socket_directories')"
+            ).fetchone()[0]
+            socket_dirs = {str(Path(item).resolve()) for item in directories.split(",")}
+            if requested_socket not in socket_dirs:
+                raise ValueError(
+                    "connected PostgreSQL socket directory does not match local target"
+                )
     except Exception:
         con.close()
         raise
