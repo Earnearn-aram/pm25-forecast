@@ -601,7 +601,7 @@ def test_future_chart_uses_latest_issue_and_only_stored_horizons(tmp_path):
     issue = NOW.replace(minute=0)
     for offset, value in ((-1, 99.0), (0, 21.0)):
         t = issue + offset * H
-        for horizon in (6, 12, 24):
+        for horizon in range(1, 25):  # persistence is stored at +1..+24 since KAN-104
             fake.con.execute(
                 "INSERT INTO predictions (station_id, issue_time, valid_time, model_version,"
                 " run_id, pm25_pred) VALUES (?, ?, ?, ?, 'future', ?)",

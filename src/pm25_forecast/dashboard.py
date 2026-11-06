@@ -420,12 +420,11 @@ def _chart(rd: Reader, obs: list[ObsRow], challenger: str | None, now: datetime)
         },
     )
     future_rows = _rows(PredRow, future_raw)
+    # Headline horizons only: persistence is stored for +1..+24 (KAN-104), the chart draws 6/12/24.
+    headline = {timedelta(hours=h) for h in HORIZONS_H}
+    future_rows = [p for p in future_rows if p.valid_time - p.issue_time in headline]
     latest_issue: dict[tuple[str, str], datetime] = {}
     for prediction in future_rows:
-        if prediction.valid_time - prediction.issue_time not in [
-            timedelta(hours=h) for h in HORIZONS_H
-        ]:
-            continue
         key = (prediction.station_id, prediction.model_version)
         latest_issue[key] = max(latest_issue.get(key, prediction.issue_time), prediction.issue_time)
     future: dict[tuple[str, str], list[dict[str, Any]]] = {}
